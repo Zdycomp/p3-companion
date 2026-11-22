@@ -1,22 +1,59 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Sunglasses with purple lenses, drawn inside the 72dp safe zone of a 108dp adaptive icon -->
+<!-- Launcher foreground: glasses with violet-to-ocean lenses, kept inside the 66 dp safe circle (27-81). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- frame bar -->
-    <path android:fillColor="#E8EAED"
-        android:pathData="M24,44 L84,44 L84,49 L24,49 Z" />
     <!-- left lens -->
-    <path android:fillColor="#8B5CF6"
-        android:strokeColor="#E8EAED" android:strokeWidth="3"
-        android:pathData="M27,47 L50,47 L48,62 Q47,68 40,68 L34,68 Q28,68 28,62 Z" />
+    <path
+        android:pathData="M30,47L51,47L49.5,60Q48.5,66 42.5,66L37,66Q31,66 30.5,60Z"
+        android:strokeColor="#FFF4F1FA"
+        android:strokeWidth="2.5"
+        android:strokeLineJoin="round">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="30"
+                android:startY="47"
+                android:endX="51"
+                android:endY="66"
+                android:startColor="#FF8B5CF6"
+                android:endColor="#FF0EA5E9" />
+        </aapt:attr>
+    </path>
     <!-- right lens -->
-    <path android:fillColor="#8B5CF6"
-        android:strokeColor="#E8EAED" android:strokeWidth="3"
-        android:pathData="M58,47 L81,47 L80,62 Q80,68 74,68 L68,68 Q61,68 60,62 Z" />
-    <!-- camera dot -->
-    <path android:fillColor="#34D399"
-        android:pathData="M29,41 m-3,0 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0" />
+    <path
+        android:pathData="M57,47L78,47L77.5,60Q77,66 71,66L65.5,66Q59.5,66 58.5,60Z"
+        android:strokeColor="#FFF4F1FA"
+        android:strokeWidth="2.5"
+        android:strokeLineJoin="round">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="57"
+                android:startY="47"
+                android:endX="78"
+                android:endY="66"
+                android:startColor="#FF8B5CF6"
+                android:endColor="#FF0EA5E9" />
+        </aapt:attr>
+    </path>
+    <!-- frame bar and bridge -->
+    <path
+        android:fillColor="#FFF4F1FA"
+        android:pathData="M29,43.5h50a2,2 0,0 1,2 2v1.5a2,2 0,0 1,-2 2h-50a2,2 0,0 1,-2 -2v-1.5a2,2 0,0 1,2 -2z" />
+    <!-- specular highlights -->
+    <path
+        android:pathData="M34,51.5Q34,56 36,59 M61,51.5Q61,56 63,59"
+        android:strokeColor="#59FFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round" />
+    <!-- camera dot with a white ring -->
+    <path
+        android:fillColor="#FF34D399"
+        android:strokeColor="#FFF4F1FA"
+        android:strokeWidth="1.5"
+        android:pathData="M31,39m-3,0a3,3 0,1 0,6 0a3,3 0,1 0,-6 0" />
 </vector>

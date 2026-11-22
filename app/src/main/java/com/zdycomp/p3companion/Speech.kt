@@ -138,6 +138,10 @@ class Speech(context: Context) {
 
     // ---------------- talking ----------------
 
+    /** Speech rate and pitch (1.0 = normal), applied before every answer. */
+    var rate = 1f
+    var pitch = 1f
+
     private var tts: TextToSpeech? = null
     private var ttsState = 0 // 0 starting, 1 ready, -1 failed
     private val ttsWaiting = mutableListOf<(Boolean) -> Unit>()
@@ -192,6 +196,8 @@ class Speech(context: Context) {
                 )
                 return@withTts
             }
+            engine.setSpeechRate(rate)
+            engine.setPitch(pitch)
             engine.setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(if (throughCall) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_ASSISTANT)

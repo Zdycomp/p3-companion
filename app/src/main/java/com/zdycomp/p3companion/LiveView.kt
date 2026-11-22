@@ -313,7 +313,13 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
     private var texture: TextureView? = null
     private var status: TextView? = null
     private var stats: TextView? = null
-    private var recordButton: Button? = null
+    private var recordButton: RecordButton? = null
+    private var recordLabel: TextView? = null
+    private var recPill: TextView? = null
+    private var statusBox: LinearLayout? = null
+    private var gridView: View? = null
+    private var flashView: View? = null
+    private var showGrid = false
     private var openedAt = 0L
     private var lastShown = 0L
     private var active = false
@@ -328,47 +334,106 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
 
     override fun build(): View {
         val ui = a.ui
+        val s = ui.s
         val g = a.glasses
         active = true
-        val col = ui.column(16)
-        val top = ui.row()
-        top.addView(ui.title("Live view"), LinearLayout.LayoutParams(0, Ui.WRAP, 1f))
-        top.addView(ui.secondaryButton("Close") { a.goBack() }.apply {
-            layoutParams = LinearLayout.LayoutParams(Ui.WRAP, Ui.WRAP)
-        })
-        col.addView(top)
+        val col = ui.page()
 
         if (g.state != XkGlasses.State.READY && g.state != XkGlasses.State.BUSY) {
-            val card = ui.card()
-            card.addView(ui.body("Connect your glasses first, then open Live view again."))
-            card.addView(ui.primaryButton("Go to the Glasses tab") { a.show(MainActivity.TAB_GLASSES) })
-            col.addView(card)
-            return ScrollView(a).apply { addView(col) }
+            col.addView(ui.emptyState(R.drawable.ic_videocam, "Glasses not connected",
+                "Connect your glasses first, then open Live view again.", "Go to the Glasses tab") { a.show(MainActivity.TAB_GLASSES) })
+            return ui.screen("Live view", col, back = { a.goBack() })
         }
 
-        val frame = FrameLayout(a).apply { setBackgroundColor(android.graphics.Color.BLACK) }
+        val frame = FrameLayout(a).apply {
+            setBackgroundColor(android.graphics.Color.BLACK)
+            outlineProvider = object : android.view.ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: android.graphics.Outline) {
+                    outline.setRoundRect(0, 0, view.width, view.height, ui.dpf(24f))
+                }
+            }
+            clipToOutline = true
+        }
         val tv = TextureView(a)
         texture = tv
         frame.addView(tv, FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH))
-        val overlay = ui.body("Opening live view…").apply {
-            setTextColor(android.graphics.Color.WHITE)
-            gravity = Gravity.CENTER
+        val thirds = object : View(a) {
+            private val paint = android.graphics.Paint().apply { color = 0x59FFFFFF; strokeWidth = ui.dpf(1f) }
+            override fun onDraw(c: android.graphics.Canvas) {
+                for (i in 1..2) {
+                    c.drawLine(width * i / 3f, 0f, width * i / 3f, height.toFloat(), paint)
+                    c.drawLine(0f, height * i / 3f, width.toFloat(), height * i / 3f, paint)
+                }
+            }
+        }.apply { visibility = if (showGrid) View.VISIBLE else View.GONE; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+        gridView = thirds
+        frame.addView(thirds, FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH))
+        val top = FrameLayout(a).apply {
+            background = android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x99000000.toInt(), 0x00000000)
+            )
+            setPadding(ui.dp(12), ui.dp(12), ui.dp(12), ui.dp(12))
         }
-        status = overlay
+        val rec = ui.text("", Type.LABEL_SMALL, android.graphics.Color.WHITE).apply {
+            background = ui.rounded(s.error, 100)
+            setTextColor(s.onError)
+            fontFeatureSettings = "tnum"
+            setPadding(ui.dp(8), ui.dp(3), ui.dp(10), ui.dp(3))
+            visibility = View.GONE
+        }
+        recPill = rec
+        top.addView(rec, FrameLayout.LayoutParams(Ui.WRAP, Ui.WRAP, Gravity.TOP or Gravity.START))
+        val chip = ui.text("", Type.LABEL_SMALL, android.graphics.Color.WHITE).apply {
+            background = ui.rounded(0x66000000, 100)
+            fontFeatureSettings = "tnum"
+            setPadding(ui.dp(8), ui.dp(3), ui.dp(8), ui.dp(3))
+        }
+        stats = chip
+        top.addView(chip, FrameLayout.LayoutParams(Ui.WRAP, Ui.WRAP, Gravity.TOP or Gravity.END))
+        frame.addView(top, FrameLayout.LayoutParams(Ui.MATCH, ui.dp(72), Gravity.TOP))
+        val overlay = ui.column().apply {
+            gravity = Gravity.CENTER
+            addView(ui.spinner(32, android.graphics.Color.WHITE))
+            addView(ui.text("Opening live view…", Type.BODY_MEDIUM, android.graphics.Color.WHITE).apply {
+                gravity = Gravity.CENTER
+                setPadding(ui.dp(24), ui.dp(12), ui.dp(24), 0)
+            })
+        }
+        status = overlay.getChildAt(1) as TextView
+        statusBox = overlay
         frame.addView(overlay, FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH))
-        col.addView(frame, LinearLayout.LayoutParams(Ui.MATCH, ui.dp(260)))
+        val flash = View(a).apply { setBackgroundColor(android.graphics.Color.WHITE); alpha = 0f }
+        flashView = flash
+        frame.addView(flash, FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH))
+        val w = a.resources.displayMetrics.widthPixels - ui.dp(32)
+        col.addView(frame, LinearLayout.LayoutParams(Ui.MATCH, (w * 3 / 4).coerceAtMost(ui.dp(420))))
 
-        stats = ui.body("", muted = true, sizeSp = 13f).apply { setPadding(0, ui.dp(8), 0, 0) }
-        col.addView(stats)
-
-        val rec = ui.primaryButton("Record to phone") { toggleRecording() }
-        recordButton = rec
-        col.addView(rec)
-        col.addView(ui.secondaryButton("Save a snapshot") { snapshot() })
-        col.addView(ui.body(
-            "Recordings are video only: the glasses can't send sound while they stream. They're saved to Movies › ${a.prefs.albumName}.",
-            muted = true, sizeSp = 13f,
-        ).apply { setPadding(0, ui.dp(10), 0, 0) })
+        // Controls under the frame: snapshot, record to phone, grid.
+        val controls = ui.row().apply { gravity = Gravity.CENTER; setPadding(0, ui.dp(16), 0, ui.dp(8)) }
+        controls.addView(ui.iconButton(R.drawable.ic_photo_camera, "Save a snapshot", IconBtn.TONAL) { snapshot() }.apply {
+            layoutParams = LinearLayout.LayoutParams(ui.dp(56), ui.dp(56)); setPadding(ui.dp(14), ui.dp(14), ui.dp(14), ui.dp(14))
+        })
+        val recBtn = RecordButton(a, ui, s.outline).apply {
+            contentDescription = "Record to phone"
+            setOnClickListener { toggleRecording() }
+        }
+        recordButton = recBtn
+        controls.addView(recBtn, LinearLayout.LayoutParams(ui.dp(72), ui.dp(72)).apply { marginStart = ui.dp(32); marginEnd = ui.dp(32) })
+        controls.addView(ui.iconButton(R.drawable.ic_grid, "Rule-of-thirds grid", if (showGrid) IconBtn.TONAL else IconBtn.OUTLINED) {
+            showGrid = !showGrid
+            gridView?.visibility = if (showGrid) View.VISIBLE else View.GONE
+        }.apply { layoutParams = LinearLayout.LayoutParams(ui.dp(56), ui.dp(56)); setPadding(ui.dp(14), ui.dp(14), ui.dp(14), ui.dp(14)) })
+        col.addView(controls)
+        recordLabel = ui.text("Record to phone", Type.LABEL_LARGE, s.onSurfaceVariant).apply {
+            gravity = Gravity.CENTER
+            fontFeatureSettings = "tnum"
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+        }
+        col.addView(recordLabel)
+        col.addView(ui.banner(
+            "Video only: the glasses can't send sound while they stream. Saved to Movies › ${a.prefs.albumName}.",
+            Tone.NEUTRAL,
+        ).apply { (layoutParams as LinearLayout.LayoutParams).topMargin = ui.dp(16) })
 
         val p = VideoPipeline(a.applicationContext, a.prefs.albumName)
         pipeline = p
@@ -383,20 +448,20 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         g.previewStateSink = { open ->
             if (!open && active) {
                 p.stopRecording("The glasses stopped the video; the recording was saved.")
-                status?.text = "The glasses closed the live view."
-                status?.visibility = View.VISIBLE
+                showStatus("The glasses closed the live view.", spinning = false)
             }
         }
-        a.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (a.prefs.liveKeepScreenOn) a.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         // The glasses can't stream video while their mic link is in use.
         val route = a.assistant.route
         if (route.active) {
-            overlay.text = "The glasses' mic is in use (voice chat or recording)."
-            col.addView(ui.primaryButton("Stop the mic and open live view") {
+            showStatus("The glasses' mic is in use (voice chat or recording).", spinning = false)
+            col.addView(ui.banner("The mic is in use, so the glasses can't stream.", Tone.WARN), 1)
+            col.addView(ui.button("Stop the mic and open live view", Btn.FILLED, R.drawable.ic_stop) {
                 a.assistant.stop()
                 a.recorder.stop()
-                overlay.text = "Opening live view…"
+                showStatus("Opening live view…", spinning = true)
                 main.postDelayed({ if (active) open() }, 1_000)
             }, 2)
         } else {
@@ -404,17 +469,20 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         }
         main.removeCallbacks(ticker)
         main.postDelayed(ticker, 1_000)
-        return ScrollView(a).apply { addView(col) }
+        return ui.screen("Live view", col, back = { a.goBack() })
+    }
+
+    private fun showStatus(text: String, spinning: Boolean) {
+        status?.text = text
+        statusBox?.getChildAt(0)?.visibility = if (spinning) View.VISIBLE else View.GONE
+        statusBox?.visibility = View.VISIBLE
     }
 
     private fun open() {
         openedAt = SystemClock.elapsedRealtime()
         a.glasses.openPreview { msg ->
             if (!active) return@openPreview
-            if (msg != null) {
-                status?.text = msg
-                status?.visibility = View.VISIBLE
-            }
+            if (msg != null) showStatus(msg, spinning = false)
         }
     }
 
@@ -424,25 +492,36 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         val fps = shownNow - lastShown
         lastShown = shownNow
         val (w, h) = p.size
-        stats?.text = "$fps fps · ${w}×$h · ${p.dropped} dropped"
-        if (p.received > 0) status?.visibility = View.GONE
+        stats?.text = "${w}×$h · $fps fps" + if (p.dropped > 0) " · ${p.dropped} dropped" else ""
+        if (p.received > 0) statusBox?.visibility = View.GONE
         else if (openedAt != 0L && SystemClock.elapsedRealtime() - openedAt > 8_000 && a.glasses.preview != XkGlasses.Preview.BUSY &&
             a.glasses.preview != XkGlasses.Preview.UNSUPPORTED) {
-            status?.text = "No video yet. Make sure LensMoo is closed, then try again. If it still doesn't come, share the log from Diagnostics."
-            status?.visibility = View.VISIBLE
+            showStatus("No video yet. Make sure LensMoo is closed, then try again. If it still doesn't come, share the log from Diagnostics.", spinning = false)
         }
         val since = p.recordingSince
         if (since != 0L) {
-            recordButton?.text = "Stop recording " + VoiceRecorder.clock(SystemClock.elapsedRealtime() - since)
+            val clock = VoiceRecorder.clock(SystemClock.elapsedRealtime() - since)
+            recordButton?.recording = true
+            recordButton?.contentDescription = "Stop recording"
+            recordLabel?.text = "Recording $clock · tap to stop"
+            recPill?.text = "● REC $clock"
+            recPill?.visibility = View.VISIBLE
+            if (!a.ui.reduceMotion) recPill?.alpha = if ((SystemClock.elapsedRealtime() / 500) % 2 == 0L) 1f else 0.75f
             if (p.received > 0 && SystemClock.elapsedRealtime() - p.lastAuAt > 4_000) {
                 p.stopRecording("The video stopped, so the recording was saved.")
             }
-        } else recordButton?.text = "Record to phone"
+        } else {
+            recordButton?.recording = false
+            recordButton?.contentDescription = "Record to phone"
+            recordLabel?.text = "Record to phone"
+            recPill?.visibility = View.GONE
+        }
     }
 
     private fun toggleRecording() {
         val p = pipeline ?: return
-        if (p.recordingSince != 0L) { p.stopRecording(null); return }
+        if (p.recordingSince != 0L) { a.ui.haptic(recordButton, Haptic.END); p.stopRecording(null); return }
+        a.ui.haptic(recordButton, Haptic.START)
         p.startRecording { uri, why ->
             if (uri != null) a.toast(why ?: "Video saved to Movies › ${a.prefs.albumName}.")
             else a.toast(why ?: "Nothing was recorded.")
@@ -453,6 +532,12 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
 
     private fun snapshot() {
         val bmp = texture?.bitmap ?: run { a.toast("No picture yet."); return }
+        flashView?.let { f ->
+            if (!a.ui.reduceMotion) {
+                f.alpha = 0f
+                f.animate().alpha(0.6f).setDuration(60).withEndAction { f.animate().alpha(0f).setDuration(90).start() }.start()
+            }
+        }
         val album = a.prefs.albumName
         val resolver = a.contentResolver
         Thread {
@@ -510,6 +595,11 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         status = null
         stats = null
         recordButton = null
+        recordLabel = null
+        recPill = null
+        statusBox = null
+        gridView = null
+        flashView = null
         openedAt = 0
         lastShown = 0
     }

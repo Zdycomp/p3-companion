@@ -12,7 +12,19 @@ which talks only to the AI service you choose, with your own key.
 | **Gallery** | Everything imported, newest first, filter by photos, videos or audio. Tap to open, press and hold to share or delete. |
 | **Glasses** | **Pair new glasses** in the app (Classic Bluetooth search, low-energy duplicates hidden), then connect (even before the key is added: the app shows what the glasses answer and walks you through finishing setup) and sign in with your own key. Battery and charging, **Take photo** (saved straight to the gallery), photos from the glasses' own button saved automatically, even with the app closed (a notification keeps the link up and it reconnects by itself when the glasses come back). **Live view and record to phone**: the glasses' camera streamed live, recorded as MP4 to Movies › album, with snapshots. **Voice recorder** using the glasses' microphone when they're your phone's headset. Record on the glasses for models that store video. **Diagnostics** checks every step and makes a shareable report (key and address hidden). |
 | **Assistant** | AI with Google Gemini (free key from Google AI Studio) or Anthropic Claude. **Voice chat**: tap, ask, hear the answer through the glasses (or tap the glasses' touch pad). **Live translation** between two languages with a swap button. **Ask about a photo**: pick one, use the glasses' last photo, or take a new one with the glasses; presets for describing a scene, identifying plants and animals, food and calories, and reading and translating text. Answers always come in your chosen reply language. |
-| **Settings** | Run diagnostics, theme, start tab, which file types to import, auto-import, delete-after-import, file naming, album name, reconnect, button-photo saving, connection log, AI service, key, model, reply language, tap-to-talk, glasses audio, reading photo answers aloud. Every change saves instantly. |
+| **Settings** | Grouped into Appearance, Glasses, Capture, Import, Assistant, Privacy, Storage, Backup and About. Every change saves instantly. |
+
+## New in 3.0
+
+- **Look**: Material You colors from your wallpaper (Android 12+) or an accent preset (Violet, Ocean, Emerald, Sunset, Rose, Graphite, any hue), pure black for OLED, high contrast, four text sizes, reduce motion, vibration on taps. New icons, bottom bar with an animated indicator, tonal cards, snackbars and sheets.
+- **Glasses tab**: hero card with a battery ring and connection chip, a big shutter, a record-on-glasses button, a 3/5/10 s self-timer, last-photo thumbnail.
+- **Glasses options**: connect when the app opens and reconnect after a drop as separate switches, keep connected in the background (on by default), low-battery alert, photo-saved notification with the picture, phone shutter sound and vibration, open the photo after taking it, minimal connection notification.
+- **Shortcuts**: a Quick Settings tile (one tap takes a photo while connected) and long-press app shortcuts for Take photo, Live view and Voice chat.
+- **Gallery**: select several to share or delete, sort (newest, oldest, largest, name), 2 to 5 columns, ask the Assistant about a photo.
+- **Assistant**: voice speed and pitch with a sample, how many messages are remembered, editable quick photo questions, chat bubbles, option to show voice answers without reading them aloud.
+- **Privacy and more**: lock the app with fingerprint, face or screen lock; hide the app in Recents; save and restore settings to a file (keys are never written); storage used and clear temporary files; About screen with What's new.
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## One-time setup for Bluetooth control
 

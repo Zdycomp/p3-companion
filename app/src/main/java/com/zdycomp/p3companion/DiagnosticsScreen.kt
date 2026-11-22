@@ -21,6 +21,7 @@ import android.os.ParcelUuid
 import android.os.PowerManager
 import android.os.SystemClock
 import android.speech.SpeechRecognizer
+import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -39,18 +40,15 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var running = false
     @Volatile private var report: String? = null
-    private var reportView: TextView? = null
+    private var resultsBox: LinearLayout? = null
+    @Volatile private var liveReport: String? = null
     private var logView: TextView? = null
     private var visible = false
 
     override fun build(): View {
         val ui = a.ui
         visible = true
-        val col = ui.column(16)
-        val top = ui.row()
-        top.addView(ui.title("Diagnostics"), LinearLayout.LayoutParams(0, Ui.WRAP, 1f))
-        top.addView(ui.secondaryButton("Close") { a.goBack() }.apply { layoutParams = LinearLayout.LayoutParams(Ui.WRAP, Ui.WRAP) })
-        col.addView(top)
+        val col = ui.page()
 
         val card = ui.card()
         card.addView(ui.body(
@@ -59,54 +57,107 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
                 "The report hides your glasses key and the full Bluetooth address.",
             muted = true, sizeSp = 13f,
         ))
-        card.addView(ui.primaryButton(if (running) "Running…" else "Run the checks") { run() }.apply { isEnabled = !running })
-        card.addView(ui.secondaryButton("Test without key") { a.withBluetooth { testWithoutKey() } }.apply { isEnabled = !running })
+        val runRow = ui.row().apply { gravity = Gravity.CENTER_VERTICAL }
+        runRow.addView(ui.button(if (running) "Running…" else "Run the checks", Btn.FILLED, R.drawable.ic_build, full = false) { run() }
+            .apply { isEnabled = !running })
+        if (running) runRow.addView(ui.spinner(24), LinearLayout.LayoutParams(ui.dp(24), ui.dp(24)).apply { marginStart = ui.dp(16) })
+        card.addView(runRow, LinearLayout.LayoutParams(Ui.MATCH, Ui.WRAP).apply { topMargin = ui.dp(8) })
+        card.addView(ui.button("Test without key", Btn.OUTLINED, R.drawable.ic_lock, full = false) { a.withBluetooth { testWithoutKey() } }
+            .apply { isEnabled = !running })
         card.addView(ui.body(
             "Test without key reconnects without signing in and records whether battery, device info and the camera " +
                 "answer anyway. It may take one photo, which isn't saved. Then it reconnects normally.",
             muted = true, sizeSp = 12f,
-        ))
-        val rv = ui.mono(report ?: "No report yet.")
-        reportView = rv
-        card.addView(rv.apply { setPadding(0, ui.dp(10), 0, 0) })
-        card.addView(ui.secondaryButton("Share report") {
-            val r = report ?: run { a.toast("Run the checks first."); return@secondaryButton }
-            a.shareText("P3 Companion diagnostics", r + "\n\n" + redact(a.glasses.logText()))
-        })
-        card.addView(ui.secondaryButton("Copy report") {
-            val r = report ?: run { a.toast("Run the checks first."); return@secondaryButton }
-            a.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("P3 diagnostics", r))
-            a.toast("Copied.")
-        })
+        ).apply { setPadding(0, ui.dp(4), 0, 0) })
         col.addView(card)
 
+        val results = ui.card()
+        results.addView(ui.heading("Results", R.drawable.ic_check_circle))
+        val box = ui.column()
+        resultsBox = box
+        renderResults(if (running) liveReport else report ?: liveReport)
+        results.addView(box)
+        col.addView(results)
+
         val fixes = ui.card()
-        fixes.addView(ui.heading("Quick fixes"))
-        fixes.addView(ui.secondaryButton("Let the app run in the background") { askBatteryExemption() })
-        fixes.addView(ui.secondaryButton("Open Bluetooth settings") {
+        fixes.addView(ui.heading("Quick fixes", R.drawable.ic_settings))
+        val chips = Flow(a, ui.dp(8), 0)
+        chips.addView(ui.assistChip("Run in the background", R.drawable.ic_power) { askBatteryExemption() })
+        chips.addView(ui.assistChip("Bluetooth settings", R.drawable.ic_bluetooth) {
             runCatching { a.startActivity(Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)) }
         })
-        fixes.addView(ui.secondaryButton("Open this app's permissions") {
+        chips.addView(ui.assistChip("App permissions", R.drawable.ic_lock) {
             runCatching {
                 a.startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", a.packageName, null)))
             }
         })
+        fixes.addView(chips)
         fixes.addView(ui.body(
             "On Samsung phones also add P3 Companion to Settings › Battery › Background usage limits › Never sleeping apps.",
             muted = true, sizeSp = 13f,
-        ))
+        ).apply { setPadding(0, ui.dp(4), 0, 0) })
         col.addView(fixes)
 
         val logCard = ui.card()
-        logCard.addView(ui.heading("Connection log"))
-        val lv = ui.mono(logText())
+        logCard.addView(ui.heading("Connection log", R.drawable.ic_history))
+        val lv = ui.mono(logText()).apply { setPadding(ui.dp(12), ui.dp(12), ui.dp(12), ui.dp(12)) }
         logView = lv
-        logCard.addView(lv)
-        logCard.addView(ui.secondaryButton("Refresh log") { logView?.text = logText() })
-        logCard.addView(ui.secondaryButton("Share log") { a.shareText("P3 glasses log", redact(a.glasses.logText())) })
+        logCard.addView(android.widget.ScrollView(a).apply {
+            background = ui.rounded(ui.s.surfaceContainerLowest, 12)
+            isNestedScrollingEnabled = true
+            addView(lv)
+        }, LinearLayout.LayoutParams(Ui.MATCH, ui.dp(320)))
+        logCard.addView(ui.buttonRow(
+            ui.button("Refresh", Btn.TEXT, R.drawable.ic_refresh, full = false) { logView?.text = logText() },
+            ui.button("Share log", Btn.TEXT, R.drawable.ic_share, full = false) { a.shareText("P3 glasses log", redact(a.glasses.logText())) },
+        ))
         col.addView(logCard)
 
-        return ScrollView(a).apply { addView(col) }
+        return ui.screen("Diagnostics", col, back = { a.goBack() }, actions = listOf(
+            BarAction(R.drawable.ic_share, "Share report") {
+                val r = report ?: run { a.toast("Run the checks first."); return@BarAction }
+                a.shareText("P3 Companion diagnostics", r + "\n\n" + redact(a.glasses.logText()))
+            },
+            BarAction(R.drawable.ic_copy, "Copy report") {
+                val r = report ?: run { a.toast("Run the checks first."); return@BarAction }
+                a.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("P3 diagnostics", r))
+                a.toast("Copied.")
+            },
+        ))
+    }
+
+    /** Report lines as rows: a status icon (PASS / WARN / FAIL) and the text. */
+    private fun renderResults(text: String?) {
+        val box = resultsBox ?: return
+        val ui = a.ui
+        val s = ui.s
+        box.removeAllViews()
+        if (text.isNullOrBlank()) {
+            box.addView(ui.body("No report yet. Tap Run the checks.", muted = true, sizeSp = 14f))
+            return
+        }
+        text.lines().filter { it.isNotBlank() }.forEach { line ->
+            val tag = line.take(4)
+            val (icon, color) = when (tag) {
+                "PASS" -> R.drawable.ic_check_circle to s.success
+                "WARN" -> R.drawable.ic_warning to s.warning
+                "FAIL" -> R.drawable.ic_error to s.error
+                "INFO", "SKIP" -> R.drawable.ic_info to s.onSurfaceVariant
+                else -> null to s.onSurface
+            }
+            val body = if (icon != null) line.drop(4).trim() else line
+            box.addView(ui.row().apply {
+                gravity = Gravity.TOP
+                setPadding(0, ui.dp(4), 0, ui.dp(4))
+                isScreenReaderFocusable = true
+                if (icon != null) {
+                    addView(ui.icon(icon, color, 20), LinearLayout.LayoutParams(ui.dp(20), ui.dp(20)).apply { marginEnd = ui.dp(12); topMargin = ui.dp(1) })
+                    contentDescription = tag.lowercase() + ": " + body
+                }
+                addView(ui.text(body, if (icon == null) Type.TITLE_SMALL else Type.BODY_MEDIUM).apply { setTextIsSelectable(false) },
+                    LinearLayout.LayoutParams(0, Ui.WRAP, 1f))
+            })
+        }
     }
 
     private fun logText(): String {
@@ -129,12 +180,14 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
     private fun run() {
         if (running) return
         running = true
+        liveReport = null
         a.refresh()
         val sb = StringBuilder()
         fun line(s: String) {
             sb.appendLine(s)
             val text = sb.toString()
-            main.post { if (visible) reportView?.text = text }
+            liveReport = text
+            main.post { if (visible) renderResults(text) }
         }
         Thread {
             try { checks(::line) } catch (e: Exception) { line("FAIL  checks stopped: ${e.message}") }
@@ -151,12 +204,14 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
         val addr = a.prefs.glassesAddress ?: run { a.toast("Pick or pair your glasses first."); return }
         val name = a.prefs.glassesName
         running = true
+        liveReport = null
         a.refresh()
         val sb = StringBuilder()
         fun line(s: String) {
             sb.appendLine(s)
             val text = sb.toString()
-            main.post { if (visible) reportView?.text = text }
+            liveReport = text
+            main.post { if (visible) renderResults(text) }
         }
         Thread {
             try {
@@ -219,6 +274,8 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
         val restricted = a.getSystemService(ActivityManager::class.java)?.isBackgroundRestricted == true
         line("${if (restricted) "FAIL" else "PASS"}  background use ${if (restricted) "restricted" else "allowed"}")
         line("INFO  background connection service ${if (GlassesService.running) "running" else "not running"}")
+        line("INFO  settings: connect on open ${if (p.connectOnLaunch) "on" else "off"}, reconnect after a drop ${if (p.autoReconnect) "on" else "off"}, " +
+            "keep connected in the background ${if (p.keepConnectedInBackground) "on" else "off"}" + if (g.pausedForBackground) " (paused now)" else "")
 
         // Bluetooth
         val adapter = a.getSystemService(BluetoothManager::class.java)?.adapter
@@ -307,7 +364,7 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
 
     override fun onHidden() {
         visible = false
-        reportView = null
+        resultsBox = null
         logView = null
     }
 

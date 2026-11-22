@@ -121,7 +121,7 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
         val speakTag: String
         if (m == Mode.CHAT) {
             system = AiWire.systemPrompt(prefs.replyLanguage, spoken = true)
-            turns = history.takeLast(AiWire.HISTORY_LIMIT) + AiTurn(true, text)
+            turns = history.takeLast(prefs.historyLimit) + AiTurn(true, text)
             speakTag = Languages.byName(prefs.replyLanguage).tag
         } else {
             system = AiWire.translationPrompt(prefs.translateFrom, prefs.translateTo)
@@ -136,11 +136,13 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
                     if (m == Mode.CHAT) {
                         history += AiTurn(true, text)
                         history += AiTurn(false, reply)
-                        while (history.size > AiWire.HISTORY_LIMIT * 2) history.removeAt(0)
+                        while (history.size > maxOf(prefs.historyLimit, 1) * 2) history.removeAt(0)
                     }
                     add(lines, Who.AI, reply)
+                    if (m == Mode.CHAT && !prefs.speakChatAnswers) { endTurn(); return@onSuccess }
                     phase = Phase.SPEAKING
                     changed()
+                    tune()
                     speech.speak(reply, speakTag, throughCall = throughGlasses) { err ->
                         if (my != turn) return@speak
                         if (err != null) add(lines, Who.NOTE, err)
@@ -164,12 +166,18 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
         holdRoute { via ->
             if (my != turn) return@holdRoute
             throughGlasses = via
+            tune()
             speech.speak(text, Languages.byName(prefs.replyLanguage).tag, throughCall = via) { err ->
                 if (my != turn) return@speak
                 if (err != null) { photoError = err }
                 endTurn()
             }
         }
+    }
+
+    private fun tune() {
+        speech.rate = prefs.ttsRate
+        speech.pitch = prefs.ttsPitch
     }
 
     /** Stops listening, thinking or talking right away. */

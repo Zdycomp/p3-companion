@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Long-press the app icon: Take photo, Live view, Voice chat (handled by MainActivity.handleAction). -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:icon="@mipmap/ic_sc_photo"
+        android:shortcutDisabledMessage="@string/sc_disabled"
+        android:shortcutId="photo"
+        android:shortcutLongLabel="@string/sc_photo_long"
+        android:shortcutShortLabel="@string/sc_photo_short">
+        <intent
+            android:action="com.zdycomp.p3companion.action.PHOTO"
+            android:targetClass="com.zdycomp.p3companion.MainActivity"
+            android:targetPackage="com.zdycomp.p3companion" />
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@mipmap/ic_sc_live"
+        android:shortcutDisabledMessage="@string/sc_disabled"
+        android:shortcutId="live"
+        android:shortcutLongLabel="@string/sc_live_long"
+        android:shortcutShortLabel="@string/sc_live_short">
+        <intent
+            android:action="com.zdycomp.p3companion.action.LIVE"
+            android:targetClass="com.zdycomp.p3companion.MainActivity"
+            android:targetPackage="com.zdycomp.p3companion" />
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@mipmap/ic_sc_voice"
+        android:shortcutDisabledMessage="@string/sc_disabled"
+        android:shortcutId="voice"
+        android:shortcutLongLabel="@string/sc_voice_long"
+        android:shortcutShortLabel="@string/sc_voice_short">
+        <intent
+            android:action="com.zdycomp.p3companion.action.VOICE"
+            android:targetClass="com.zdycomp.p3companion.MainActivity"
+            android:targetPackage="com.zdycomp.p3companion" />
+    </shortcut>
+</shortcuts>

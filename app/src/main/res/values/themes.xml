@@ -1,9 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
+    <!-- The starting window. MainActivity switches to the light or dark DeviceDefault theme it needs
+         before drawing, and paints every color itself from the app's color scheme. -->
+    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">
         <item name="android:colorAccent">#8B5CF6</item>
-        <item name="android:colorPrimary">#171B22</item>
-        <item name="android:windowBackground">#0E1116</item>
+        <item name="android:windowBackground">@color/window_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
     </style>
-    <color name="ic_bg">#0E1116</color>
+    <color name="window_bg">#121016</color>
+    <color name="ic_bg">#0F0D13</color>
+    <color name="sc_bg">#EADDFF</color>
 </resources>

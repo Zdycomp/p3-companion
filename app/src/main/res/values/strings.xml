@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">P3 Companion</string>
+    <string name="tile_photo">Glasses photo</string>
+    <string name="sc_photo_short">Take photo</string>
+    <string name="sc_photo_long">Take a photo with the glasses</string>
+    <string name="sc_live_short">Live view</string>
+    <string name="sc_live_long">Open the glasses\' live view</string>
+    <string name="sc_voice_short">Voice chat</string>
+    <string name="sc_voice_long">Ask the assistant out loud</string>
+    <string name="sc_disabled">Open P3 Companion first</string>
+</resources>

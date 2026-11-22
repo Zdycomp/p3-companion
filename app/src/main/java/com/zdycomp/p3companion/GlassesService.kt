@@ -50,6 +50,7 @@ class GlassesService : Service(), XkGlasses.Listener {
         super.onCreate()
         prefs = Prefs(this)
         g = XkGlasses.get(this, prefs)
+        GlassesEvents.install(this)
         getSystemService(NotificationManager::class.java)?.createNotificationChannel(
             NotificationChannel(CHANNEL, "Glasses connection", NotificationManager.IMPORTANCE_LOW).apply {
                 description = "Shows while P3 Companion keeps your glasses connected"
@@ -91,7 +92,8 @@ class GlassesService : Service(), XkGlasses.Listener {
     }
 
     private fun statusText(): String = when (g.state) {
-        XkGlasses.State.READY -> "Connected" + (g.battery?.let { " · battery $it%" } ?: "")
+        XkGlasses.State.READY -> if (prefs.minimalNotification) "Glasses connected"
+        else "Connected" + (g.battery?.let { " · battery $it%" } ?: "") + (if (g.charging == true) ", charging" else "")
         XkGlasses.State.BUSY -> g.busyText ?: "Working…"
         XkGlasses.State.CONNECTING -> "Connecting…"
         XkGlasses.State.IDLE -> if (g.wantsLink) "Waiting for the glasses" else "Not connected"
@@ -159,6 +161,8 @@ class GlassesWakeReceiver : BroadcastReceiver() {
     override fun onReceive(c: Context, i: Intent) {
         val p = Prefs(c)
         if (!p.autoReconnect || p.userKey == null || p.glassesAddress == null || p.userStopped) return
+        // 2.1: with "Keep connected in the background" off, the link only runs while the app is open.
+        if (!p.keepConnectedInBackground) return
         val d = XkGlasses.deviceExtra(i) ?: return
         if (!d.address.equals(p.glassesAddress, ignoreCase = true)) return
         GlassesService.start(c)

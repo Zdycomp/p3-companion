@@ -719,7 +719,46 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     /** True while the app should keep the glasses connected. */
     val wantsLink: Boolean
         get() = !userDisconnect && !gaveUp && !prefs.userStopped && prefs.glassesAddress != null && prefs.userKey != null &&
-            (state != State.IDLE || prefs.autoReconnect)
+            (state != State.IDLE || prefs.autoReconnect) && !pausedForBackground
+
+    /**
+     * 2.1 "Keep connected in the background" off: the app went to the background, so the link was
+     * closed without marking a user disconnect. In memory only; [resumeIfPaused] clears it.
+     */
+    @Volatile var pausedForBackground = false
+        private set
+
+    /**
+     * Closes the link because the app left the screen (only when the person turned off "Keep connected
+     * in the background"). Unlike [disconnect] it doesn't set userStopped, so [resumeIfPaused] brings it
+     * back. Never interrupts a photo transfer (BUSY).
+     */
+    fun pause() {
+        if (state == State.BUSY || pausedForBackground || !wantsLink) return
+        pausedForBackground = true
+        session.incrementAndGet()
+        main.removeCallbacks(retry)
+        runCatching { retryLock?.release() }
+        attempt = 0
+        runCatching { pendingSocket?.close() }
+        dropLink("app in background")
+        state = State.IDLE
+        busyText = null
+        recording = false
+        setPreviewOff()
+        addLog("Paused while the app is in the background")
+        changed()
+        GlassesService.stop(app)
+    }
+
+    /** The app is back on screen: reconnect if [pause] closed the link. */
+    fun resumeIfPaused() {
+        if (!pausedForBackground) return
+        pausedForBackground = false
+        if (prefs.userStopped || userDisconnect) return
+        addLog("App is back: reconnecting")
+        reconnectSaved()
+    }
 
     /** Connects to the saved glasses if allowed: auto-reconnect only while they're still paired. */
     fun reconnectSaved() {
@@ -823,7 +862,10 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
             }
             // Assistant touch hook: a tap on the glasses starts a voice question.
             "C101", "C107" -> onTouch?.let { cb -> main.post { cb() } }
-            "57B1" -> if (capturing) { busyText = "Processing the photo…"; changed() }
+            "57B1" -> {
+                onShutter?.let { cb -> main.post { cb() } } // 2.1 hook: phone-side shutter sound
+                if (capturing) { busyText = "Processing the photo…"; changed() }
+            }
             "5790" -> if (f.data.isNotEmpty()) { recording = f.data[0].toInt() == 1; changed() }
             "5710" -> if (f.data.isNotEmpty()) onPreviewState(f.data[0].toInt() and 0xFF)
             "5760" -> addLog("Glasses voice memo state ${f.data.firstOrNull()?.toInt()}")
@@ -842,6 +884,13 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     /** Called on the main thread when the glasses report a touch-pad tap (nodes C101 / C107). */
     @Volatile var onTouch: (() -> Unit)? = null
     // ---- Assistant touch hook (end) ----
+
+    // ---- 2.1 hooks (read-only; called after the existing success lines) ----
+    /** Main thread: the glasses reported the shutter fired (node 57B1). */
+    @Volatile var onShutter: (() -> Unit)? = null
+    /** Main thread: a photo was saved; the flag is true for photos taken with the glasses' own button. */
+    @Volatile var onPhotoSaved: ((Uri, Boolean) -> Unit)? = null
+    private fun photoSaved(uri: Uri, fromButton: Boolean) { onPhotoSaved?.let { cb -> main.post { cb(uri, fromButton) } } }
 
     // ---------------- media ----------------
 
@@ -907,6 +956,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                 if (count == null) { release("bad part count"); throw LinkException("the glasses announced an unreadable photo.") }
                 lastPhoto = download(count)
                 lastMessage = "Photo saved to your gallery."
+                lastPhoto?.let { photoSaved(it, false) }
             } catch (e: Exception) {
                 lastError = "Photo failed: ${e.message}"
             } finally {
@@ -934,6 +984,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                 if (count == null) { release("bad part count"); throw LinkException("unreadable photo announcement") }
                 lastPhoto = download(count)
                 lastMessage = "Saved the photo you took with the glasses."
+                lastPhoto?.let { photoSaved(it, true) }
             } catch (e: Exception) {
                 lastError = "Couldn't fetch that photo: ${e.message}"
             } finally {
@@ -1185,6 +1236,13 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     private fun setReady() { busyText = null; state = if (link != null) State.READY else State.IDLE; changed() }
 
     fun clearMessages() { lastError = null; lastMessage = null; changed() }
+
+    /** Settings › Privacy: empties the connection log and the list of link losses. */
+    @Synchronized
+    fun clearLog() {
+        log.clear()
+        synchronized(linkLosses) { linkLosses.clear() }
+    }
 
     @Synchronized
     fun addLog(line: String) {

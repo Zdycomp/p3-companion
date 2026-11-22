@@ -112,17 +112,8 @@ object AiWire {
 
     /** The preset photo questions, worded for the chosen reply language. */
     fun photoPreset(index: Int, replyLanguage: String): String {
-        val lang = Languages.byName(replyLanguage).name
-        return when (index) {
-            0 -> "Describe what I'm looking at in this photo, briefly and clearly. Mention anything important or unusual."
-            1 -> "Identify the plant or animal in this photo. Give its common name, its scientific name, how sure you are, " +
-                "and one or two useful facts, such as whether it is safe to touch or eat."
-            2 -> "Identify the food in this photo and estimate its calories. List each item with the portion size you assumed " +
-                "and its estimated calories, then the total. Make clear these are estimates."
-            3 -> "Read all the text in this photo exactly as written, then translate it into $lang. " +
-                "If it is already in $lang, just give the text."
-            else -> error("no preset $index")
-        }
+        require(index in PRESET_QUESTIONS.indices) { "no preset $index" }
+        return fillLanguage(PRESET_QUESTIONS[index], replyLanguage)
     }
 
     val photoPresetLabels = listOf(
@@ -130,6 +121,25 @@ object AiWire {
         "Identify this plant or animal",
         "Food and calories estimate",
         "Read and translate the text",
+    )
+
+    /** "{language}" in a saved quick question becomes the reply language. */
+    const val LANGUAGE_TOKEN = "{language}"
+
+    fun fillLanguage(template: String, replyLanguage: String): String =
+        template.replace(LANGUAGE_TOKEN, Languages.byName(replyLanguage).name)
+
+    /** The built-in quick photo questions as (label, template) pairs, for the editable list. */
+    fun photoPresetTemplates(): List<Pair<String, String>> = photoPresetLabels.zip(PRESET_QUESTIONS)
+
+    private val PRESET_QUESTIONS = listOf(
+        "Describe what I'm looking at in this photo, briefly and clearly. Mention anything important or unusual.",
+        "Identify the plant or animal in this photo. Give its common name, its scientific name, how sure you are, " +
+            "and one or two useful facts, such as whether it is safe to touch or eat.",
+        "Identify the food in this photo and estimate its calories. List each item with the portion size you assumed " +
+            "and its estimated calories, then the total. Make clear these are estimates.",
+        "Read all the text in this photo exactly as written, then translate it into $LANGUAGE_TOKEN. " +
+            "If it is already in $LANGUAGE_TOKEN, just give the text.",
     )
 
     // ---------------- speech ----------------
