@@ -1,0 +1,9 @@
+# Glasses -> app replies to 102E (user bind), type 04 FMT_ERRCODE, 1 data byte = ErrorCode.
+# CONSTRUCTED on the captured FMT_ERRCODE layout (see replies_captured_misc.hex). Whether the
+# glasses reply to a rejected key at all is NOT documented; they may stay silent.
+# CONSTRUCTED: ERR_CODE_FAIL (01) -> app must report the key as refused
+301202800000120000000000689D00009800FFFFFFFF648000013130324504010001
+# CONSTRUCTED: ERR_CODE_OK (00) -> bound
+301302800000120000000000498D00009800FFFFFFFF648000013130324504010000
+# CONSTRUCTED: FMT_NODATA, len 0 -> treat as accepted (no error code present)
+301402800000110000000000B1D900009800FFFFFFFF6480000131303245030000

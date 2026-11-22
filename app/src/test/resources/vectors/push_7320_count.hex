@@ -1,0 +1,7 @@
+# Glasses -> app push 7320 (photo element count). CONSTRUCTED: no 7320 frame was ever
+# published. Layout inferred from the SDK client, validated end to end, which reads the count
+# as payload[16]<<8|payload[17] = (high byte of LE len, i.e. 0)<<8 | data[0]. So data[0] = count.
+# CONSTRUCTED: count=6, data = 06 (1 byte)
+302101800000120000000000891600000000FFFFFFFF048000013733323000010006
+# CONSTRUCTED: count=1, data = 01
+3022018000001200000000006E6600000000FFFFFFFF048000013733323000010001

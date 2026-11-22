@@ -1,0 +1,4 @@
+# Glasses -> app push 57B1 (shutter done, photo being prepared). CONSTRUCTED: body unknown;
+# a test may only assert node, direction and that the app ACKs it. It carries NO count.
+# CONSTRUCTED: node=57B1
+302001800000120000000000E2D700000000FFFFFFFF048000013537423100010000

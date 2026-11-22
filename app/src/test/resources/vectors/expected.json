@@ -1,0 +1,228 @@
+{
+ "noise_false_header.hex": {
+  "chunks": 2,
+  "corrupt_frames_dropped": 1,
+  "current_app_parser_result": "FAIL: emitted []",
+  "frames_out": [
+   "1003",
+   "5713"
+  ],
+  "hardened_parser_result": "PASS"
+ },
+ "noise_resync.hex": {
+  "chunks": 3,
+  "corrupt_frames_dropped": 1,
+  "frames_out": [
+   "1003",
+   "5713",
+   "7320"
+  ],
+  "frames_out_after_chunk": [
+   0,
+   1,
+   3
+  ]
+ },
+ "photo_download.hex": {
+  "control_acks_expected": 8,
+  "divide_types_per_element": [
+   [
+    0
+   ],
+   [
+    1,
+    2,
+    3
+   ],
+   [
+    1,
+    3
+   ]
+  ],
+  "element_count": 3,
+  "element_lengths": [
+   125,
+   405,
+   138
+  ],
+  "jpeg_len": 653,
+  "jpeg_sha256": "e6a5d4a899019014239ff34556a7685b860222f8a9be69de4a80a592caaffba5",
+  "media_acks_expected": 2
+ },
+ "preview_h264_320x240.hex": {
+  "access_units": 3,
+  "au_bytes": 6005,
+  "au_sha256": "e17cc9f3b5215d47f50679cf15208d645cdd0fa359535f2368582a7297d8b430",
+  "control_frames_interleaved": 1,
+  "element_len_field": 6005,
+  "height": 240,
+  "keyframes": 3,
+  "nal_types_per_au": [
+   7,
+   8,
+   6,
+   5
+  ],
+  "width": 320
+ },
+ "preview_h264_640x360.hex": {
+  "access_units": 1,
+  "au_bytes": 10049,
+  "au_sha256": "1786f718ad96a6d83dcfde785a90f6f435211f7d5f8d56e7a73266911cd17941",
+  "control_frames_interleaved": 0,
+  "element_len_field": 10049,
+  "height": 360,
+  "keyframes": 1,
+  "nal_types_per_au": [
+   7,
+   8,
+   6,
+   5
+  ],
+  "width": 640
+ },
+ "push_57B1_capture.hex": {
+  "app_must_ack": true,
+  "frames": [
+   {
+    "node": "57B1"
+   }
+  ]
+ },
+ "push_7320_count.hex": {
+  "app_must_ack": true,
+  "frames": [
+   {
+    "count": 6,
+    "node": "7320"
+   },
+   {
+    "count": 1,
+    "node": "7320"
+   }
+  ]
+ },
+ "push_7320_count_u16le.hex": {
+  "frames": [
+   {
+    "count": 6,
+    "node": "7320"
+   },
+   {
+    "count": 1,
+    "node": "7320"
+   }
+  ]
+ },
+ "push_C101_touch.hex": {
+  "app_must_ack": true,
+  "frames": [
+   {
+    "node": "C101"
+   },
+   {
+    "node": "C107"
+   }
+  ]
+ },
+ "replies_captured_misc.hex": {
+  "frames": [
+   {
+    "code": 4,
+    "node": "C101",
+    "type": 4
+   },
+   {
+    "code": 3,
+    "node": "57A0",
+    "type": 4
+   },
+   {
+    "data": "1f000000",
+    "node": "1017",
+    "type": 0
+   },
+   {
+    "data": "00",
+    "node": "57A0",
+    "type": 0
+   }
+  ]
+ },
+ "reply_1001_device_info.hex": {
+  "frames": [
+   {
+    "battery_main": 100,
+    "dev_name": "xk one Pro_0001",
+    "len": 411,
+    "node": "1001",
+    "preview_height": 120,
+    "preview_width": 160,
+    "prod_mode": "E13C-1",
+    "soft_ver": "1.0.2",
+    "type": 2
+   }
+  ]
+ },
+ "reply_1003_battery.hex": {
+  "frames": [
+   {
+    "charging": true,
+    "level": 100,
+    "node": "1003"
+   },
+   {
+    "charging": false,
+    "level": 100,
+    "node": "1003"
+   },
+   {
+    "charging": false,
+    "level": 57,
+    "node": "1003"
+   }
+  ]
+ },
+ "reply_102E_bind.hex": {
+  "frames": [
+   {
+    "code": 1,
+    "node": "102E",
+    "refused": true,
+    "type": 4
+   },
+   {
+    "code": 0,
+    "node": "102E",
+    "refused": false,
+    "type": 4
+   },
+   {
+    "len": 0,
+    "node": "102E",
+    "refused": false,
+    "type": 3
+   }
+  ]
+ },
+ "reply_5713_media_counts.hex": {
+  "frames": [
+   {
+    "node": "5713",
+    "photo": 0,
+    "record": 0,
+    "video": 0
+   },
+   {
+    "node": "5713",
+    "photo": 12,
+    "record": 5,
+    "video": 3
+   }
+  ]
+ },
+ "requests_app_captured.hex": {
+  "all_crc_valid": true,
+  "frames": 9
+ }
+}

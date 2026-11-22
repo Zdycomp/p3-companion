@@ -1,0 +1,7 @@
+# SPECULATIVE variant of 7320 with a 2-byte little-endian count. Not observed; included
+# because the validated SDK parser accepts it (it reads data[0]) and a big-endian reader does not.
+# A correct parser returns the same count as push_7320_count.hex.
+# CONSTRUCTED: count=6, data = 06 00
+3023018000001300000000002B6000000000FFFFFFFF04800001373332300002000600
+# CONSTRUCTED: count=1, data = 01 00 (a big-endian reader gets 256)
+302401800000130000000000BCF900000000FFFFFFFF04800001373332300002000100
