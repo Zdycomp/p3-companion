@@ -63,14 +63,13 @@ class GlassesScreen(private val a: MainActivity) : Screen {
         col.addView(ui.title("Glasses"))
 
         val hasKey = a.prefs.userKey != null
-        if (!hasKey) {
-            col.addView(setupCard())
-        }
+        val connected = g.state == XkGlasses.State.READY || g.state == XkGlasses.State.BUSY
 
         // Status and controls
         val card = ui.card()
         val (label, color) = when (g.state) {
-            XkGlasses.State.READY -> "Connected" to ui.p.good
+            XkGlasses.State.READY -> (if (g.signedIn) "Connected" else "Connected, not signed in") to
+                (if (g.signedIn) ui.p.good else ui.p.warn)
             XkGlasses.State.BUSY -> (g.busyText ?: "Working…") to ui.p.warn
             XkGlasses.State.CONNECTING -> "Connecting…" to ui.p.warn
             XkGlasses.State.IDLE -> "Not connected" to ui.p.muted
@@ -94,14 +93,21 @@ class GlassesScreen(private val a: MainActivity) : Screen {
         }
         g.lastMessage?.let { card.addView(ui.body(it, sizeSp = 14f).apply { setTextColor(ui.p.good); setPadding(0, ui.dp(8), 0, 0) }) }
         g.lastError?.let { card.addView(ui.body(it, sizeSp = 14f).apply { setTextColor(ui.p.bad); setPadding(0, ui.dp(8), 0, 0) }) }
+        if (connected && !g.signedIn && g.keylessReport.isNotEmpty()) {
+            card.addView(ui.divider())
+            card.addView(ui.body("Without your key the glasses answered:", sizeSp = 14f))
+            card.addView(ui.body(g.keylessReport.joinToString("\n") { "• $it" }, muted = true, sizeSp = 13f))
+        }
 
         when (g.state) {
             XkGlasses.State.READY, XkGlasses.State.BUSY -> {
                 val ready = g.state == XkGlasses.State.READY
                 card.addView(ui.primaryButton("Take photo") { g.takePhoto() }.apply { isEnabled = ready; alpha = if (ready) 1f else .5f })
+                card.addView(ui.primaryButton("Live view and record to phone") { a.showLiveView() }
+                    .apply { isEnabled = ready; alpha = if (ready) 1f else .5f })
                 card.addView(
-                    (if (g.recording) ui.dangerButton("Stop video") { g.setRecording(false) }
-                    else ui.secondaryButton("Start video") { g.setRecording(true) })
+                    (if (g.recording) ui.dangerButton("Stop recording on the glasses") { g.setRecording(false) }
+                    else ui.secondaryButton("Record on the glasses (if supported)") { g.setRecording(true) })
                         .apply { isEnabled = ready; alpha = if (ready) 1f else .5f }
                 )
                 g.lastPhoto?.let { uri ->
@@ -118,8 +124,23 @@ class GlassesScreen(private val a: MainActivity) : Screen {
             XkGlasses.State.CONNECTING -> card.addView(ui.secondaryButton("Cancel") { g.disconnect() })
             XkGlasses.State.IDLE -> {
                 val saved = a.prefs.glassesAddress
-                if (saved != null && hasKey) {
+                if (saved != null) {
                     card.addView(ui.primaryButton("Connect") { a.withBluetooth { g.connect(saved, a.prefs.glassesName) } })
+                    if (!hasKey) card.addView(ui.body(
+                        "You can connect before adding your key: the app checks what the glasses answer, then helps you finish setup.",
+                        muted = true, sizeSp = 13f,
+                    ).apply { setPadding(0, ui.dp(6), 0, 0) })
+                } else {
+                    card.addView(ui.primaryButton("Pair new glasses") { a.withScan { startScan() } })
+                    card.addView(ui.body("Or pick your glasses below if they're already paired.", muted = true, sizeSp = 13f))
+                }
+                if (g.lastError?.contains("LensMoo") == true) {
+                    card.addView(ui.secondaryButton("Open LensMoo's app info (to force-stop it)") {
+                        runCatching {
+                            a.startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                android.net.Uri.parse("package:com.lensmoo.app")))
+                        }.onFailure { a.toast("LensMoo isn't installed.") }
+                    })
                 }
                 card.addView(ui.body(
                     "If LensMoo is still installed, close it first: the glasses talk to one app at a time.",
@@ -128,6 +149,16 @@ class GlassesScreen(private val a: MainActivity) : Screen {
             }
         }
         col.addView(card)
+
+        // Key setup sits right under the status: before connecting, or once connected without a key.
+        if (!hasKey) col.addView(setupCard())
+        else if (connected && !g.signedIn) {
+            val sign = ui.card()
+            sign.addView(ui.heading("Key saved"))
+            sign.addView(ui.body("Sign in on this connection to unlock photos and live view.", muted = true, sizeSp = 13f))
+            sign.addView(ui.primaryButton("Sign in now") { g.signIn() })
+            col.addView(sign)
+        }
 
         col.addView(recorderCard())
 
@@ -145,13 +176,18 @@ class GlassesScreen(private val a: MainActivity) : Screen {
             "• Photos taken here are copied to your phone right away, in the \"${a.prefs.albumName}\" album.\n" +
                 "• Photos you take with the button on the glasses are saved too while connected" +
                 (if (a.prefs.saveButtonPhotos) "." else " (turned off in Settings).") + "\n" +
-                "• Videos stay on the glasses. Bring them over with the cable on the Import tab.\n" +
-                "• Bluetooth photos are smaller than the camera's full size. The cable import gets the originals.",
+                "• While connected, a notification keeps the link up even with the app closed, so button photos still arrive.\n" +
+                "• Live view streams the camera to the phone and can record it to Movies › ${a.prefs.albumName} (video only: " +
+                "the glasses can't send sound at the same time).\n" +
+                "• Bluetooth photos are the size the glasses make them (often 640×480).",
             muted = true, sizeSp = 13f,
         ))
         col.addView(tips)
 
         if (a.prefs.showLog) col.addView(logCard())
+        col.addView(ui.secondaryButton("Diagnostics and connection log") { a.showDiagnostics() }.apply {
+            (layoutParams as LinearLayout.LayoutParams).bottomMargin = ui.dp(12)
+        })
 
         return ScrollView(a).apply { addView(col) }
     }
@@ -190,41 +226,38 @@ class GlassesScreen(private val a: MainActivity) : Screen {
     private fun pick(d: XkGlasses.Paired) {
         a.prefs.glassesAddress = d.address
         a.prefs.glassesName = d.name
-        if (a.prefs.userKey == null) {
-            a.toast("Saved. Add your glasses key above, then connect.")
-            a.refresh()
-        } else {
-            a.withBluetooth { a.glasses.connect(d.address, d.name) }
-        }
+        a.withBluetooth { a.glasses.connect(d.address, d.name) }
     }
 
-    /** First-time setup: get the owner's own key from their own phone's Bluetooth log. */
+    /** Finish setup: get the owner's own key from their own phone's Bluetooth log. Short and prominent. */
     private fun setupCard(): LinearLayout {
         val ui = a.ui
-        val card = ui.card()
-        card.addView(ui.heading("Set up (one time)"))
+        val card = ui.card().apply { background = ui.rounded(ui.p.cardAlt, 16, ui.p.accent) }
+        card.addView(ui.heading("Finish setup: add your glasses key"))
         card.addView(ui.body(
-            "Your glasses only take commands from an app that signs in with your LensMoo account's ID. " +
-                "This app reads that ID from your own phone, once, and keeps it here. Nothing is uploaded.",
-            muted = true,
+            "The glasses take photos and video only from an app signed in with your LensMoo account ID. " +
+                "Get it once from your own phone (nothing is uploaded):",
+            muted = true, sizeSp = 13f,
         ))
-        card.addView(ui.divider())
         card.addView(ui.body(
-            "1. Settings › About phone › Software information: tap Build number 7 times to unlock Developer options.\n" +
-                "2. Settings › Developer options: turn on Bluetooth HCI snoop log (pick Enabled, not Filtered, if asked).\n" +
-                "3. Turn Bluetooth off and back on.\n" +
-                "4. Open LensMoo and connect to your glasses once. Take one photo in it.\n" +
-                "5. Developer options › Take bug report › Interactive. Wait for the notification, tap it, and share it to P3 Companion. " +
-                "Or save it and tap the button below.\n" +
-                "6. Turn the snoop log back off.",
+            "1. Developer options › Bluetooth HCI snoop log › Enabled (not Filtered).\n" +
+                "2. Turn Bluetooth off and on. Open LensMoo and connect the glasses.\n" +
+                "3. Developer options › Take bug report › Interactive. When it's ready, tap the notification › Share › P3 Companion.\n" +
+                "4. Turn the snoop log off again.",
             sizeSp = 14f,
-        ))
-        card.addView(ui.primaryButton("Open bug report or log file") { a.pickKeyFile() })
-        card.addView(ui.secondaryButton("Open Developer options") {
+        ).apply { setPadding(0, ui.dp(6), 0, 0) })
+        card.addView(ui.primaryButton("Open Developer options") {
             runCatching { a.startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)) }
-                .onFailure { a.toast("Unlock Developer options first (step 1).") }
+                .onFailure {
+                    a.toast("First unlock them: Settings › About phone › Software information › tap Build number 7 times.")
+                }
         })
+        card.addView(ui.secondaryButton("Pick a saved bug report or log") { a.pickKeyFile() })
         card.addView(ui.secondaryButton("I already have the key") { enterKeyDialog() })
+        card.addView(ui.body(
+            "No Developer options? Settings › About phone › Software information › tap Build number 7 times.",
+            muted = true, sizeSp = 12f,
+        ).apply { setPadding(0, ui.dp(6), 0, 0) })
         return card
     }
 
@@ -259,7 +292,7 @@ class GlassesScreen(private val a: MainActivity) : Screen {
                 if (Xk.isValidUserId(k)) {
                     a.prefs.userKey = k
                     a.toast("Key saved.")
-                    a.refresh()
+                    a.onKeySaved()
                 } else {
                     a.toast("That isn't 32 characters of 0-9 and a-f.")
                 }
@@ -273,7 +306,7 @@ class GlassesScreen(private val a: MainActivity) : Screen {
         val g = a.glasses
         val card = ui.card()
         card.addView(ui.heading("Connection log"))
-        val lines = synchronized(g) { g.log.toList().takeLast(60) }
+        val lines = g.logLines(60)
         card.addView(ui.mono(if (lines.isEmpty()) "Nothing yet." else lines.joinToString("\n")))
         card.addView(ui.secondaryButton("Share log") { a.shareText("P3 glasses log", g.logText()) })
         card.addView(ui.secondaryButton("Copy log") {
@@ -376,8 +409,10 @@ class GlassesScreen(private val a: MainActivity) : Screen {
         }
 
         val list = found.values.sortedWith(
-            compareByDescending<Found> { XkGlasses.looksLikeGlasses(it.name ?: "") }.thenByDescending { it.name != null }
-        ).take(15)
+            compareByDescending<Found> { XkGlasses.strongMatch(it.name, it.address) }
+                .thenByDescending { XkGlasses.looksLikeGlasses(it.name ?: "") }
+                .thenByDescending { it.name != null }
+        ).take(20)
         if (list.isNotEmpty()) {
             box.addView(ui.body("Tap your glasses. Likely matches are at the top.", muted = true, sizeSp = 13f).apply {
                 setPadding(0, ui.dp(10), 0, 0)
@@ -468,7 +503,7 @@ class GlassesScreen(private val a: MainActivity) : Screen {
                         }
                         unregisterPairReceiverIfIdle()
                     }
-                    BluetoothDevice.ACTION_FOUND -> {
+                    BluetoothDevice.ACTION_FOUND, BluetoothDevice.ACTION_NAME_CHANGED -> {
                         val d = device ?: return
                         if (d.type == BluetoothDevice.DEVICE_TYPE_LE) return // the glasses' control link is Classic
                         val name = intent.getStringExtra(BluetoothDevice.EXTRA_NAME) ?: runCatching { d.name }.getOrNull()
@@ -497,6 +532,7 @@ class GlassesScreen(private val a: MainActivity) : Screen {
         pairReceiver = r
         AudioRoute.registerSystemReceiver(a.applicationContext, r, IntentFilter().apply {
             addAction(BluetoothDevice.ACTION_FOUND)
+            addAction(BluetoothDevice.ACTION_NAME_CHANGED)
             addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED)
             addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
             addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)

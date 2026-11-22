@@ -3,20 +3,29 @@
 Do these in order on your phone with the glasses. Before you start: charge the glasses, close LensMoo
 (swipe it away), and in P3 Companion turn on **Settings > Show connection log**.
 
-**If a step fails:** go to the **Glasses** tab, scroll to **Connection log**, tap **Share log**, and send
-it with the test number and one line about what you saw. Send a screenshot too if something looks
-wrong on screen. The log never contains your glasses key.
+**If a step fails:** Glasses tab > **Diagnostics and connection log** > **Run the checks** > **Share
+report**, and send it with the test number and one line about what you saw. Send a screenshot too if
+something looks wrong on screen. The report never contains your glasses key or full Bluetooth address.
 
 1. **Cable import.** Plug the glasses into the phone with their cable. Import tab > Choose glasses drive
    (first time only) > Import new files. *Expect:* photos, videos and voice recordings appear in the
    Gallery tab; tapping Import again copies nothing new. *If not:* send a screenshot of the Import tab.
-2. **Key setup from a bug report.** Developer options > turn on **Bluetooth HCI snoop log** > turn
+2. **Connect before the key (new).** With no key saved, Glasses tab > **Connect** (or Pair new glasses).
+   *Expect:* "Connected, not signed in" and a list saying which of Battery / Device info / Media counts
+   the glasses answered, with the orange **Finish setup** card right below. Then Diagnostics > **Test
+   without key** and share the report: it tells us whether your P3 really needs the key.
+2b. **Key setup from a bug report.** Developer options > turn on **Bluetooth HCI snoop log** > turn
    Bluetooth off and on > open LensMoo, connect, take one photo > close LensMoo > Developer options >
-   **Take bug report** (Full) > save it to Files. In P3 Companion: Glasses > Set up > **Open bug report
-   or log file** and pick it. *Expect:* "Key saved" and a key of 32 characters (0-9, a-f).
-   *If not:* tell us the bug report's size; do not send the bug report itself (it is private).
-3. **Connect.** Glasses > tap your glasses > Connect. *Expect:* "Connected" within about 10 seconds;
-   the log shows `Link open` then `Bound`. Repeat: Disconnect, Connect again. Both must work.
+   **Take bug report** (Interactive). When the notification says it's ready, tap it and choose
+   **P3 Companion** in the share list (or save it and use Glasses > Set up > **Open bug report or log
+   file**). *Expect:* "Key found" and a masked key. If the app says the log is **Filtered**, set the
+   snoop log to Enabled and repeat. *If not:* send the message text; never send the bug report itself.
+3. **Pair and connect.** If the glasses aren't in Your glasses, use **Pair new glasses** > Search > tap
+   them > accept the popup. Then Connect. *Expect:* "Connected" within about 10 seconds; the log
+   shows `Link open (...) in N ms`, `102E reply: ...` and `Signed in, battery N%`. Repeat Disconnect /
+   Connect 5 times: all must work. With LensMoo open and connected, Connect must fail quickly with a
+   message naming LensMoo; after force-stopping LensMoo it must connect. Tap Connect then Cancel at
+   once: it must stay "Not connected".
 4. **Battery.** *Expect:* battery % shown after connecting. Put the glasses on the charger, tap
    **Refresh battery and counts** twice, 30 seconds apart. *Expect:* charging shows, the number is the
    same or higher, and each refresh takes under 5 seconds.
@@ -24,15 +33,20 @@ wrong on screen. The log never contains your glasses key.
    from **Open last photo** and is in the Gallery. Do it 3 times in a row; all 3 must save.
 6. **Button photo auto-save.** Settings > turn on **Save photos taken with the glasses' button**. Press
    the glasses' photo button once. *Expect:* the photo arrives in the Gallery within 20 seconds and
-   the glasses do not keep beeping or stay stuck. Then turn the setting off, press the button again:
-   the glasses must still be usable afterwards (Take photo still works).
-7. **Video on the glasses.** Tap **Start video**, wait 10 seconds, tap **Stop video**. *Expect:* no
-   error, and "On the glasses" video count goes up by 1. Then do test 1 again: the video imports.
-   If you get "these glasses don't support recording from the app", note it and send the log.
-8. **Live view.** Tap **Live view** (when the button exists). *Expect:* moving picture from the glasses
-   within 5 seconds, delay under 1 second when you wave a hand. Leave it on 60 seconds: no freeze.
-9. **Phone-side recording.** In Live view tap **Record** for 15 seconds, then stop. *Expect:* a video
-   about 15 seconds long in the Gallery that plays on the phone.
+   the glasses do not keep beeping or stay stuck. Press Home, lock the phone for 2 minutes, press the
+   button again: the photo must still arrive (the "Your glasses" notification keeps the link). Then
+   turn the setting off, press the button again: the log shows `Releasing the transfer`, and Take
+   photo still works.
+7. **Video on the glasses.** Tap **Record on the glasses (if supported)**, wait 10 seconds, tap
+   **Stop recording on the glasses**. *Expect:* either "Recording saved on the glasses" (video count
+   goes up) or a clear message that your glasses don't store videos. Send the log either way.
+8. **Live view.** Tap **Live view and record to phone**. *Expect:* moving picture from the glasses
+   within 5 seconds, about 25-30 fps in the stats line, delay under 1 second when you wave a hand.
+   Leave it on 60 seconds: no freeze. Press Close: the log shows `→ 5720 00`. If there's no picture,
+   share the Diagnostics report (it lists what video data arrived).
+9. **Phone-side recording.** In Live view tap **Record to phone** for 15 seconds, then stop. *Expect:*
+   a video about 15 seconds long in Movies > your album that plays on the phone. Also tap **Save a
+   snapshot** once: a picture appears in the Gallery.
 10. **Audio through the glasses' mic.** Start a voice recording with the glasses connected; speak with
     the phone in another room or covered. *Expect:* your voice is clear in the playback (it came
     from the glasses). Also check: music played on the phone afterwards still comes out of the glasses.
@@ -49,4 +63,7 @@ wrong on screen. The log never contains your glasses key.
     20 seconds, then on. *Expect:* "Connected" again within 30 seconds without touching the phone,
     and Take photo works.
 
-When everything passes, send "all 14 passed" plus one shared log from the end of the session.
+15. **Diagnostics.** Glasses > Diagnostics and connection log > Run the checks. *Expect:* mostly PASS
+    lines and "Done."; share the report once even if everything works.
+
+When everything passes, send "all 15 passed" plus one Diagnostics report from the end of the session.

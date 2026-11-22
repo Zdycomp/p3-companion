@@ -66,6 +66,7 @@ class MainActivity : Activity() {
 
         screens = listOf(
             ImportScreen(this), GalleryScreen(this), GlassesScreen(this), AssistantScreen(this), SettingsScreen(this),
+            DiagnosticsScreen(this), LiveViewScreen(this),
         )
 
         val root = LinearLayout(this).apply {
@@ -87,8 +88,10 @@ class MainActivity : Activity() {
         setContentView(root)
 
         val start = savedInstanceState?.getInt("tab") ?: prefs.startTab
-        show(start.coerceIn(0, screens.size - 1))
-        if (prefs.autoReconnect && prefs.glassesAddress != null && hasBluetoothPermission()) {
+        show(start.coerceIn(0, TAB_COUNT - 1))
+        if (prefs.autoReconnect && prefs.glassesAddress != null && prefs.userKey != null && hasBluetoothPermission() && !prefs.userStopped) {
+            // The service keeps the link up in the background; it connects if the glasses are paired.
+            GlassesService.start(this)
             glasses.reconnectSaved()
         }
         handleShared(intent)
@@ -99,18 +102,27 @@ class MainActivity : Activity() {
         handleShared(intent)
     }
 
-    /** A bug report or log shared to the app from the bug report notification. */
+    /**
+     * A bug report or log shared to the app. The bug report notification shares the zip and a
+     * screenshot together (SEND_MULTIPLE), so the screenshot is skipped.
+     */
     private fun handleShared(intent: Intent?) {
-        if (intent?.action != Intent.ACTION_SEND) return
-        val uri: Uri? = if (Build.VERSION.SDK_INT >= 33) {
-            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-        } else {
-            @Suppress("DEPRECATION")
-            intent.getParcelableExtra(Intent.EXTRA_STREAM)
+        val uris: List<Uri> = when (intent?.action) {
+            Intent.ACTION_SEND -> listOfNotNull(
+                if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                else @Suppress("DEPRECATION") intent.getParcelableExtra(Intent.EXTRA_STREAM)
+            )
+            Intent.ACTION_SEND_MULTIPLE ->
+                (if (Build.VERSION.SDK_INT >= 33) intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                else @Suppress("DEPRECATION") intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)) ?: emptyList()
+            else -> return
         }
-        if (uri != null) {
+        val logs = uris.filterNot { runCatching { contentResolver.getType(it) }.getOrNull()?.startsWith("image/") == true }
+        if (logs.isNotEmpty()) {
             show(TAB_GLASSES)
-            readKeyFrom(uri)
+            readKeyFrom(logs)
+        } else if (uris.isNotEmpty()) {
+            toast("That was only a picture. Share the bug report itself.")
         }
         setIntent(Intent(this, MainActivity::class.java))
     }
@@ -128,10 +140,22 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun readKeyFrom(uri: Uri) {
+    private fun readKeyFrom(uri: Uri) = readKeyFrom(listOf(uri))
+
+    /** Tries each file until one holds the key. */
+    private fun readKeyFrom(uris: List<Uri>) {
+        @Suppress("DEPRECATION")
         val dialog = android.app.ProgressDialog.show(this, "Reading the log", "Looking for your glasses key…", true)
         Thread {
-            val result = runCatching { KeyFinder.find(contentResolver, uri) }
+            val result = runCatching {
+                var last: KeyFinder.Result? = null
+                for (u in uris) {
+                    val r = KeyFinder.find(contentResolver, u, cacheDir)
+                    if (r.key != null) return@runCatching r
+                    if (last == null || r.snoopFiles > last.snoopFiles || r.scannedBytes > last.scannedBytes) last = r
+                }
+                last ?: error("nothing to read")
+            }
             runOnUiThread {
                 runCatching { dialog.dismiss() }
                 val r = result.getOrNull()
@@ -139,6 +163,7 @@ class MainActivity : Activity() {
                     r == null -> toast("Couldn't read that file: ${result.exceptionOrNull()?.message}")
                     r.key != null -> {
                         prefs.userKey = r.key
+                        onKeySaved()
                         AlertDialog.Builder(this)
                             .setTitle("Key found")
                             .setMessage("Saved ${KeyFinder.mask(r.key)}. You can turn the Bluetooth snoop log off now, then connect.")
@@ -147,12 +172,8 @@ class MainActivity : Activity() {
                         show(TAB_GLASSES)
                     }
                     else -> AlertDialog.Builder(this)
-                        .setTitle("No key in that file")
-                        .setMessage(
-                            "Read ${r.scannedBytes / 1_048_576} MB but didn't find the glasses' sign-in. " +
-                                "Make sure the snoop log was on (Enabled, not Filtered), Bluetooth was turned off and on " +
-                                "after switching it on, and LensMoo connected to the glasses before you took the bug report."
-                        )
+                        .setTitle(if (r.filtered) "The log is filtered" else "No key in that file")
+                        .setMessage(KeyFinder.explainMiss(r))
                         .setPositiveButton("OK", null)
                         .show()
                 }
@@ -183,16 +204,39 @@ class MainActivity : Activity() {
         return bar
     }
 
+    /** The tab to go back to from Diagnostics or Live view. */
+    private var returnTab = TAB_GLASSES
+
     fun show(index: Int) {
         if (current in screens.indices) screens[current].onHidden()
+        if (current in 0 until TAB_COUNT && index >= TAB_COUNT) returnTab = current
         current = index
         content.removeAllViews()
         content.addView(screens[index].build(), FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH))
         tabViews.forEachIndexed { i, tv ->
-            val on = i == index
+            val on = i == index || (index >= TAB_COUNT && i == returnTab)
             tv.setTextColor(if (on) ui.p.accent else ui.p.muted)
             tv.typeface = if (on) Typeface.create("sans-serif-medium", Typeface.NORMAL) else Typeface.DEFAULT
         }
+    }
+
+    /** A key was just saved: sign in on the current link if it was opened without one. */
+    fun onKeySaved() {
+        if (glasses.state == XkGlasses.State.READY && !glasses.signedIn) glasses.signIn()
+        refresh()
+    }
+
+    /** Leaves Diagnostics or Live view for the tab they were opened from. */
+    fun goBack() { if (current >= TAB_COUNT) show(returnTab) }
+
+    fun showDiagnostics() = show(SCREEN_DIAGNOSTICS)
+    fun showLiveView() = show(SCREEN_LIVE)
+
+    /** Back from Diagnostics or Live view returns to the tab it came from. */
+    @Deprecated("Framework back handling")
+    override fun onBackPressed() {
+        if (current >= TAB_COUNT) show(returnTab)
+        else @Suppress("DEPRECATION") super.onBackPressed()
     }
 
     /** Rebuild the visible screen, for example after a setting changes. */
@@ -200,7 +244,7 @@ class MainActivity : Activity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        outState.putInt("tab", current)
+        outState.putInt("tab", if (current >= TAB_COUNT) returnTab else current)
     }
 
     override fun onResume() {
@@ -387,6 +431,21 @@ class MainActivity : Activity() {
     ) {
         val need = required.filterNot(::granted) + optional.filter { !granted(it) && it !in askedOptional }
         if (need.isEmpty()) { action(); return }
+        val missingRequired = required.filterNot(::granted)
+        // Android stops showing the dialog after two refusals; send the person to app settings instead.
+        if (missingRequired.isNotEmpty() && missingRequired.all { prefs.wasAsked(it) && !shouldShowRequestPermissionRationale(it) }) {
+            confirm(
+                "Permission needed",
+                "$denied Android won't ask again, so open the app's settings › Permissions and allow it there.",
+                "Open settings",
+            ) {
+                runCatching {
+                    startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null)))
+                }
+            }
+            return
+        }
+        missingRequired.forEach { prefs.markAsked(it) }
         askedOptional += optional
         pendingPermission = PendingPermission(required, denied, action)
         requestPermissions(need.toTypedArray(), REQ_PERMS)
@@ -415,8 +474,13 @@ class MainActivity : Activity() {
         return false
     }
 
+    /** Connecting also asks to show the connection notification (Android 13+), which doesn't block. */
     fun withBluetooth(action: () -> Unit) =
-        withPermissions(bluetoothPermissions(), denied = "Bluetooth permission is needed to reach your glasses.") {
+        withPermissions(
+            bluetoothPermissions(),
+            optional = if (Build.VERSION.SDK_INT >= 33) listOf(Manifest.permission.POST_NOTIFICATIONS) else emptyList(),
+            denied = "Bluetooth permission (Nearby devices) is needed to reach your glasses.",
+        ) {
             if (bluetoothReady()) action()
         }
 
@@ -491,6 +555,9 @@ class MainActivity : Activity() {
 
         const val TAB_GLASSES = 2
         const val TAB_ASSISTANT = 3
+        const val TAB_COUNT = 5
+        const val SCREEN_DIAGNOSTICS = 5
+        const val SCREEN_LIVE = 6
     }
 }
 

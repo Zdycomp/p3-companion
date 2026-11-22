@@ -75,6 +75,7 @@ class SettingsScreen(private val a: MainActivity) : Screen {
             p.saveButtonPhotos,
         ) { p.saveButtonPhotos = it })
         gl.addView(ui.switchRow("Show connection log", "For troubleshooting", p.showLog) { p.showLog = it })
+        gl.addView(ui.secondaryButton("Run diagnostics") { a.showDiagnostics() })
         if (p.glassesAddress != null) {
             gl.addView(ui.dangerButton("Forget these glasses") {
                 a.confirm("Forget glasses?", "You'll pick them again from your paired devices.", "Forget") {

@@ -9,5 +9,5 @@ dependencies {
 kotlin { jvmToolchain(21) }
 sourceSets {
     main { kotlin.srcDir("../app/src/main/java") }
-    test { kotlin.srcDir("../app/src/test/java") }
+    test { kotlin.srcDir("../app/src/test/java"); resources.srcDir("../app/src/test/resources") }
 }

@@ -89,6 +89,25 @@ class Prefs(context: Context) {
         get() = sp.getInt("start_tab", 0)
         set(v) = sp.edit().putInt("start_tab", v).apply()
 
+    /** The RFCOMM method that last worked, tried first next time. */
+    var linkMethod: String?
+        get() = sp.getString("link_method", null)
+        set(v) = sp.edit().putString("link_method", v).apply()
+
+    /** The person disconnected on purpose: don't reconnect by ourselves. */
+    var userStopped: Boolean
+        get() = sp.getBoolean("user_stopped", false)
+        set(v) = sp.edit().putBoolean("user_stopped", v).apply()
+
+    /** Action code that the glasses accepted for the live view command (3, or 2 as fallback). */
+    var previewAction: Int
+        get() = sp.getInt("preview_action", Xk.ACTION_EXECUTE)
+        set(v) = sp.edit().putInt("preview_action", v).apply()
+
+    /** Whether Android has asked for this permission before (to spot "don't ask again"). */
+    fun wasAsked(permission: String): Boolean = sp.getBoolean("asked_$permission", false)
+    fun markAsked(permission: String) = sp.edit().putBoolean("asked_$permission", true).apply()
+
     var lastImportSummary: String?
         get() = sp.getString("last_import", null)
         set(v) = sp.edit().putString("last_import", v).apply()

@@ -77,9 +77,9 @@ class XkProtocolTest {
             Xk.Frame(Xk.HEAD_MEDIA, 0, 0x8001, div, byteArrayOf(idx.toByte(), 0, 0, 0) + body)
         val asm = Xk.PhotoAssembler(1)
         asm.start(1)
-        assertEquals(false, asm.feed(part(1, 0, element.copyOfRange(0, 4))))
-        assertEquals(false, asm.feed(part(2, 1, element.copyOfRange(4, 8))))
-        assertEquals(true, asm.feed(part(3, 2, element.copyOfRange(8, element.size))))
+        assertEquals(Xk.PhotoAssembler.Result.MORE, asm.feed(part(1, 0, element.copyOfRange(0, 4))))
+        assertEquals(Xk.PhotoAssembler.Result.MORE, asm.feed(part(2, 1, element.copyOfRange(4, 8))))
+        assertEquals(Xk.PhotoAssembler.Result.DONE, asm.feed(part(3, 2, element.copyOfRange(8, element.size))))
         assertArrayEquals(jpeg, asm.jpeg())
     }
 

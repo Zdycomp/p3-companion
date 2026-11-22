@@ -68,6 +68,8 @@ class AudioRoute private constructor(context: Context, private val prefs: Prefs)
         waiting += onReady
         if (connecting) return
         if (!willUseGlasses()) { finish(false); return }
+        // The glasses can't stream live video while their mic link is up: close the live view first.
+        XkGlasses.get(app, prefs).micWillStart()
         connecting = true
         savedMode = am.mode
         val gen = ++generation

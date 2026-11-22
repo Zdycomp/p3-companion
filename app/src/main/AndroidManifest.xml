@@ -19,6 +19,10 @@
     <!-- Keeps a voice recording going with the screen off -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Keeps the glasses connected in the background so button photos are still saved -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
@@ -55,6 +59,7 @@
             <!-- Lets the bug report notification share straight into the app for key setup -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="application/vnd.android.bugreport" />
                 <data android:mimeType="application/zip" />
@@ -62,6 +67,21 @@
                 <data android:mimeType="application/octet-stream" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".GlassesService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!-- Brings the link back when the glasses reconnect to the phone after the app was closed.
+             ACL_CONNECTED is a protected system broadcast that needs BLUETOOTH_CONNECT. -->
+        <receiver
+            android:name=".GlassesWakeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+            </intent-filter>
+        </receiver>
 
         <service
             android:name=".RecorderService"
