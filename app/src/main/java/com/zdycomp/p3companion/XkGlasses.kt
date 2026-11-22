@@ -385,6 +385,11 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         }, "glasses-reader").apply { isDaemon = true; start() }
     }
 
+    // ---- Assistant touch hook (begin) ----
+    /** Called on the main thread when the glasses report a touch-pad tap (nodes C101 / C107). */
+    @Volatile var onTouch: (() -> Unit)? = null
+    // ---- Assistant touch hook (end) ----
+
     private fun handle(f: Xk.Frame) {
         try {
             when (f.head) {
@@ -417,6 +422,8 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                             }
                             return
                         }
+                        // Assistant touch hook: a tap on the glasses starts a voice question.
+                        "C101", "C107" -> onTouch?.let { cb -> main.post { cb() } }
                         "5790" -> if (f.data.isNotEmpty()) { recording = f.data[0].toInt() == 1; changed() }
                         "1003" -> {}
                     }

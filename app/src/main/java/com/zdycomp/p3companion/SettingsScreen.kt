@@ -22,7 +22,7 @@ class SettingsScreen(private val a: MainActivity) : Screen {
             p.theme = listOf(Prefs.Theme.DARK, Prefs.Theme.LIGHT, Prefs.Theme.SYSTEM)[it]
             a.recreate()
         })
-        look.addView(ui.choiceRow("Open the app on", listOf("Import", "Gallery", "Glasses"), p.startTab.coerceIn(0, 2)) {
+        look.addView(ui.choiceRow("Open the app on", listOf("Import", "Gallery", "Glasses", "Assistant"), p.startTab.coerceIn(0, 3)) {
             p.startTab = it
         })
         col.addView(look)
@@ -87,13 +87,17 @@ class SettingsScreen(private val a: MainActivity) : Screen {
         }
         col.addView(gl)
 
+        // Assistant
+        col.addView(AiSetup.card(a))
+        col.addView(AiSetup.optionsCard(a))
+
         // About
         val about = ui.card()
         about.addView(ui.heading("About"))
         val version = runCatching { a.packageManager.getPackageInfo(a.packageName, 0).versionName }.getOrNull() ?: "?"
         about.addView(ui.body(
             "P3 Companion $version\n" +
-                "Works offline. No account, no ads, no data leaves your phone.\n" +
+                "No account, no ads. Everything works offline except the Assistant, which sends only what you ask to the AI service you choose.\n" +
                 "Not made by or connected to NovaSight, Shenju or LensMoo.",
             muted = true, sizeSp = 13f,
         ))

@@ -93,6 +93,52 @@ class Prefs(context: Context) {
         get() = sp.getString("last_import", null)
         set(v) = sp.edit().putString("last_import", v).apply()
 
+    // ---------- Assistant ----------
+
+    var aiProvider: AiProvider
+        get() = enumOr(sp.getString("ai_provider", null), AiProvider.GEMINI)
+        set(v) = sp.edit().putString("ai_provider", v.name).apply()
+
+    /** API keys stay in this private storage only and are never shown in full. */
+    fun aiKey(provider: AiProvider = aiProvider): String? =
+        sp.getString("ai_key_" + provider.name, null)?.takeIf { it.isNotBlank() }
+
+    fun setAiKey(provider: AiProvider, key: String?) =
+        sp.edit().putString("ai_key_" + provider.name, key?.trim()?.takeIf { it.isNotEmpty() }).apply()
+
+    fun aiModel(provider: AiProvider = aiProvider): String =
+        sp.getString("ai_model_" + provider.name, null)?.takeIf { it.isNotBlank() } ?: provider.defaultModel
+
+    fun setAiModel(provider: AiProvider, model: String) =
+        sp.edit().putString("ai_model_" + provider.name, AiWire.cleanModel(model, provider)).apply()
+
+    /** The language every AI answer is written and spoken in. */
+    var replyLanguage: String
+        get() = Languages.byName(sp.getString("reply_lang", null)).name
+        set(v) = sp.edit().putString("reply_lang", Languages.byName(v).name).apply()
+
+    /** Touching the glasses' touch pad starts a voice question. */
+    var tapToTalk: Boolean
+        get() = sp.getBoolean("tap_to_talk", true)
+        set(v) = sp.edit().putBoolean("tap_to_talk", v).apply()
+
+    /** Use the glasses as microphone and speaker when they're the phone's Bluetooth headset. */
+    var useGlassesAudio: Boolean
+        get() = sp.getBoolean("glasses_audio", true)
+        set(v) = sp.edit().putBoolean("glasses_audio", v).apply()
+
+    var speakPhotoAnswers: Boolean
+        get() = sp.getBoolean("speak_photo", true)
+        set(v) = sp.edit().putBoolean("speak_photo", v).apply()
+
+    var translateFrom: String
+        get() = Languages.byName(sp.getString("tr_from", null)).name
+        set(v) = sp.edit().putString("tr_from", Languages.byName(v).name).apply()
+
+    var translateTo: String
+        get() = sp.getString("tr_to", null)?.let { Languages.byName(it).name } ?: "Spanish"
+        set(v) = sp.edit().putString("tr_to", Languages.byName(v).name).apply()
+
     private inline fun <reified T : Enum<T>> enumOr(name: String?, fallback: T): T =
         name?.let { runCatching { enumValueOf<T>(it) }.getOrNull() } ?: fallback
 

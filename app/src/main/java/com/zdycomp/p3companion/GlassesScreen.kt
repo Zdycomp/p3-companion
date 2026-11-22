@@ -1,20 +1,54 @@
 package com.zdycomp.p3companion
 
+import android.annotation.SuppressLint
 import android.app.AlertDialog
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
+import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.TextView
 
-/** Live control of the glasses: connect, battery, take photos, start and stop video. */
+/** Live control of the glasses: connect, battery, take photos, start and stop video, record audio, pair. */
+@SuppressLint("MissingPermission")
 class GlassesScreen(private val a: MainActivity) : Screen {
     override val label = "Glasses"
 
     private val listener = XkGlasses.Listener { if (visible) a.refresh() }
+    private val recorderListener: () -> Unit = { if (visible) a.refresh() }
     private var visible = false
+    private val main = Handler(Looper.getMainLooper())
+
+    // Voice recorder clock
+    private var clockView: TextView? = null
+    private val tick = object : Runnable {
+        override fun run() {
+            val rec = a.recorder
+            clockView?.text = "Recording " + VoiceRecorder.clock(rec.elapsedMs())
+            if (visible && rec.recording) main.postDelayed(this, 500)
+        }
+    }
+
+    // Pairing new glasses
+    private data class Found(val address: String, val name: String?, val bonded: Boolean)
+    private val found = LinkedHashMap<String, Found>()
+    private var scanning = false
+    private var bondingAddress: String? = null
+    private var pairStatus: String? = null
+    private var justPaired: XkGlasses.Paired? = null
+    private var pairReceiver: BroadcastReceiver? = null
+    private var pairBox: LinearLayout? = null
 
     override fun build(): View {
         val ui = a.ui
@@ -22,6 +56,8 @@ class GlassesScreen(private val a: MainActivity) : Screen {
         visible = true
         g.removeListener(listener)
         g.addListener(listener)
+        a.recorder.removeListener(recorderListener)
+        a.recorder.addListener(recorderListener)
 
         val col = ui.column(16)
         col.addView(ui.title("Glasses"))
@@ -86,15 +122,20 @@ class GlassesScreen(private val a: MainActivity) : Screen {
                     card.addView(ui.primaryButton("Connect") { a.withBluetooth { g.connect(saved, a.prefs.glassesName) } })
                 }
                 card.addView(ui.body(
-                    "Close LensMoo first: the glasses talk to one app at a time.",
+                    "If LensMoo is still installed, close it first: the glasses talk to one app at a time.",
                     muted = true, sizeSp = 13f,
                 ).apply { setPadding(0, ui.dp(8), 0, 0) })
             }
         }
         col.addView(card)
 
-        // Pick the glasses from paired devices
-        if (g.state == XkGlasses.State.IDLE) col.addView(deviceCard())
+        col.addView(recorderCard())
+
+        // Pick the glasses from paired devices, or pair new ones
+        if (g.state == XkGlasses.State.IDLE) {
+            col.addView(deviceCard())
+            col.addView(pairCard())
+        }
 
         if (hasKey) col.addView(keyCard())
 
@@ -127,8 +168,7 @@ class GlassesScreen(private val a: MainActivity) : Screen {
         val paired = a.glasses.pairedDevices()
         if (paired.isEmpty()) {
             card.addView(ui.body(
-                "No paired devices yet. Pair the glasses in your phone's Bluetooth settings first " +
-                    "(or connect them once in LensMoo), then come back.",
+                "No paired devices yet. Use Pair new glasses below, or pair them in your phone's Bluetooth settings.",
                 muted = true,
             ))
         } else {
@@ -243,8 +283,238 @@ class GlassesScreen(private val a: MainActivity) : Screen {
         return card
     }
 
+    // ---------------- voice recorder ----------------
+
+    private fun recorderCard(): LinearLayout {
+        val ui = a.ui
+        val rec = a.recorder
+        val card = ui.card()
+        card.addView(ui.heading("Voice recorder"))
+        when {
+            rec.recording -> {
+                val line = ui.statusLine("Recording " + VoiceRecorder.clock(rec.elapsedMs()), ui.p.bad)
+                clockView = line.getChildAt(1) as? TextView
+                card.addView(line)
+                card.addView(ui.body(
+                    if (rec.throughGlasses) "Using the glasses' microphone." else "Using the phone's microphone.",
+                    muted = true, sizeSp = 13f,
+                ))
+                card.addView(ui.dangerButton("Stop and save") { rec.stop() })
+                main.removeCallbacks(tick)
+                main.postDelayed(tick, 500)
+            }
+            rec.starting -> card.addView(ui.statusLine("Getting the microphone ready…", ui.p.warn))
+            else -> {
+                clockView = null
+                val viaGlasses = a.assistant.route.willUseGlasses()
+                card.addView(ui.body(
+                    (if (viaGlasses) "Records with the glasses' microphone (they're connected as your headset)."
+                    else "Records with the phone's microphone. Connect the glasses as a Bluetooth headset to use theirs.") +
+                        " Saved to Music › ${a.prefs.albumName}, and shown in the Gallery.",
+                    muted = true, sizeSp = 13f,
+                ))
+                card.addView(ui.primaryButton("Record audio") { a.withMic(forRecording = true) { rec.start() } })
+            }
+        }
+        rec.error?.let { card.addView(ui.body(it, sizeSp = 14f).apply { setTextColor(ui.p.bad); setPadding(0, ui.dp(8), 0, 0) }) }
+        val saved = rec.lastSaved
+        if (saved != null && !rec.recording) {
+            card.addView(ui.body("Saved ${rec.lastSavedName ?: "the recording"}.", sizeSp = 14f).apply {
+                setTextColor(ui.p.good); setPadding(0, ui.dp(8), 0, 0)
+            })
+            card.addView(ui.secondaryButton("Play last recording") {
+                runCatching {
+                    a.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(saved, "audio/mp4")
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+                }.onFailure { a.toast("No app on this phone can play it.") }
+            })
+        }
+        return card
+    }
+
+    // ---------------- pairing ----------------
+
+    private fun adapter(): BluetoothAdapter? = a.getSystemService(BluetoothManager::class.java)?.adapter
+
+    private fun pairCard(): LinearLayout {
+        val ui = a.ui
+        val card = ui.card()
+        card.addView(ui.heading("Pair new glasses"))
+        card.addView(ui.body(
+            "Turn the glasses on and keep them close. If they're connected to another phone, disconnect them there first.",
+            muted = true, sizeSp = 13f,
+        ))
+        val box = ui.column()
+        pairBox = box
+        card.addView(box)
+        renderPair()
+        return card
+    }
+
+    private fun renderPair() {
+        val box = pairBox ?: return
+        val ui = a.ui
+        box.removeAllViews()
+        if (scanning) {
+            box.addView(ui.statusLine("Searching for nearby devices…", ui.p.warn).apply { setPadding(0, ui.dp(10), 0, 0) })
+            box.addView(ui.secondaryButton("Stop searching") { stopScan() })
+        } else {
+            box.addView(ui.primaryButton(if (found.isEmpty()) "Search for glasses" else "Search again") {
+                a.withScan { startScan() }
+            })
+        }
+        pairStatus?.let { box.addView(ui.body(it, sizeSp = 14f).apply { setPadding(0, ui.dp(8), 0, 0) }) }
+
+        justPaired?.let { d ->
+            if (a.glasses.state == XkGlasses.State.IDLE) {
+                if (a.prefs.userKey != null) {
+                    box.addView(ui.primaryButton("Connect to ${d.name}") { a.withBluetooth { a.glasses.connect(d.address, d.name) } })
+                } else {
+                    box.addView(ui.body("Next, add your glasses key in Set up above, then connect.", muted = true, sizeSp = 13f))
+                }
+            }
+        }
+
+        val list = found.values.sortedWith(
+            compareByDescending<Found> { XkGlasses.looksLikeGlasses(it.name ?: "") }.thenByDescending { it.name != null }
+        ).take(15)
+        if (list.isNotEmpty()) {
+            box.addView(ui.body("Tap your glasses. Likely matches are at the top.", muted = true, sizeSp = 13f).apply {
+                setPadding(0, ui.dp(10), 0, 0)
+            })
+        }
+        list.forEach { f ->
+            val name = f.name ?: "Unnamed device (${f.address})"
+            val text = name + when {
+                f.address == bondingAddress -> " · pairing…"
+                f.bonded -> " · paired"
+                else -> ""
+            }
+            val btn = if (XkGlasses.looksLikeGlasses(f.name ?: "")) ui.primaryButton(text) { pairWith(f) }
+            else ui.secondaryButton(text) { pairWith(f) }
+            box.addView(btn)
+        }
+    }
+
+    private fun startScan() {
+        val ad = adapter() ?: run { a.toast("This phone has no Bluetooth."); return }
+        registerPairReceiver()
+        runCatching { ad.cancelDiscovery() }
+        found.clear()
+        justPaired = null
+        val ok = runCatching { ad.startDiscovery() }.getOrDefault(false)
+        scanning = ok
+        pairStatus = if (ok) null else "Couldn't start searching. Turn Bluetooth off and on, then try again."
+        if (!ok) unregisterPairReceiverIfIdle()
+        renderPair()
+    }
+
+    private fun stopScan() {
+        runCatching { adapter()?.cancelDiscovery() }
+        scanning = false
+        unregisterPairReceiverIfIdle()
+        renderPair()
+    }
+
+    private fun pairWith(f: Found) {
+        val ad = adapter() ?: return
+        runCatching { ad.cancelDiscovery() }
+        scanning = false
+        val device = runCatching { ad.getRemoteDevice(f.address) }.getOrNull() ?: return
+        if (device.bondState == BluetoothDevice.BOND_BONDED) {
+            paired(f.address, f.name ?: device.name ?: f.address)
+            return
+        }
+        registerPairReceiver()
+        val ok = runCatching { device.createBond() }.getOrDefault(false)
+        if (ok) {
+            bondingAddress = f.address
+            pairStatus = "Pairing with ${f.name ?: f.address}… Accept the request on your phone (and on the glasses) if one appears."
+        } else {
+            pairStatus = "Couldn't start pairing with ${f.name ?: f.address}. Try again, or pair it in Bluetooth settings."
+            unregisterPairReceiverIfIdle()
+        }
+        renderPair()
+    }
+
+    private fun paired(address: String, name: String) {
+        bondingAddress = null
+        a.prefs.glassesAddress = address
+        a.prefs.glassesName = name
+        justPaired = XkGlasses.Paired(address, name)
+        found[address] = Found(address, name, true)
+        pairStatus = "Paired with $name and saved as your glasses."
+        unregisterPairReceiverIfIdle()
+        if (visible) a.refresh() else renderPair()
+    }
+
+    private fun registerPairReceiver() {
+        if (pairReceiver != null) return
+        val r = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, intent: Intent) {
+                val device: BluetoothDevice? = if (Build.VERSION.SDK_INT >= 33) {
+                    intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                }
+                when (intent.action) {
+                    BluetoothAdapter.ACTION_DISCOVERY_STARTED -> scanning = true
+                    BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
+                        scanning = false
+                        if (bondingAddress == null && justPaired == null) {
+                            pairStatus = if (found.isEmpty()) "Nothing found. Make sure the glasses are on and close, then search again."
+                            else "Search finished."
+                        }
+                        unregisterPairReceiverIfIdle()
+                    }
+                    BluetoothDevice.ACTION_FOUND -> {
+                        val d = device ?: return
+                        if (d.type == BluetoothDevice.DEVICE_TYPE_LE) return // the glasses' control link is Classic
+                        val name = intent.getStringExtra(BluetoothDevice.EXTRA_NAME) ?: runCatching { d.name }.getOrNull()
+                        val old = found[d.address]
+                        found[d.address] = Found(d.address, name ?: old?.name, d.bondState == BluetoothDevice.BOND_BONDED)
+                    }
+                    BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
+                        val d = device ?: return
+                        if (d.address != bondingAddress) return
+                        when (intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)) {
+                            BluetoothDevice.BOND_BONDED -> {
+                                paired(d.address, found[d.address]?.name ?: runCatching { d.name }.getOrNull() ?: d.address)
+                                return
+                            }
+                            BluetoothDevice.BOND_NONE -> {
+                                bondingAddress = null
+                                pairStatus = "Pairing didn't finish. Check the glasses are in pairing mode and try again."
+                                unregisterPairReceiverIfIdle()
+                            }
+                        }
+                    }
+                }
+                renderPair()
+            }
+        }
+        pairReceiver = r
+        AudioRoute.registerSystemReceiver(a.applicationContext, r, IntentFilter().apply {
+            addAction(BluetoothDevice.ACTION_FOUND)
+            addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED)
+            addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
+            addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+        })
+    }
+
+    private fun unregisterPairReceiverIfIdle() {
+        if (scanning || bondingAddress != null) return
+        pairReceiver?.let { runCatching { a.applicationContext.unregisterReceiver(it) } }
+        pairReceiver = null
+    }
+
     override fun onHidden() {
         visible = false
         a.glasses.removeListener(listener)
+        a.recorder.removeListener(recorderListener)
+        main.removeCallbacks(tick)
+        clockView = null
+        pairBox = null
     }
 }

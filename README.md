@@ -1,7 +1,8 @@
 # P3 Companion
 
-A clean, English, offline Android app for NovaSight P3 camera glasses and other glasses that use the
-LensMoo app (Shenju "XK" family). No account, no ads, no cloud.
+A clean, English Android app that replaces LensMoo for NovaSight P3 camera glasses and other glasses
+that use it (Shenju "XK" family). No account, no ads. Everything works offline except the Assistant,
+which talks only to the AI service you choose, with your own key.
 
 ## What it does
 
@@ -9,14 +10,25 @@ LensMoo app (Shenju "XK" family). No account, no ads, no cloud.
 |---|---|
 | **Import** | Plug the glasses into the phone with their magnetic USB cable. The app copies new photos, videos and voice recordings into your gallery (album "P3 Glasses"), skips ones it already has, and can start by itself when the glasses are plugged in. Optional: delete from the glasses after each verified copy. |
 | **Gallery** | Everything imported, newest first, filter by photos, videos or audio. Tap to open, press and hold to share or delete. |
-| **Glasses** | Bluetooth control: connect, battery and charging, counts of what's stored on the glasses, **Take photo** (saved straight to the gallery), **Start/Stop video** on the glasses, and auto-save of photos you take with the glasses' own button. |
-| **Settings** | Theme, which file types to import, auto-import, delete-after-import, file naming, album name, reconnect, button-photo saving, connection log. Every change saves instantly. |
+| **Glasses** | Bluetooth control: connect, battery and charging, counts of what's stored on the glasses, **Take photo** (saved straight to the gallery), **Start/Stop video** on the glasses, and auto-save of photos you take with the glasses' own button. **Voice recorder**: records with the glasses' microphone when they're your phone's headset (otherwise the phone's), saves .m4a to Music › album, keeps going with the screen off. **Pair new glasses**: search, pair and save the glasses without leaving the app. |
+| **Assistant** | AI with Google Gemini (free key from Google AI Studio) or Anthropic Claude. **Voice chat**: tap, ask, hear the answer through the glasses (or tap the glasses' touch pad). **Live translation** between two languages with a swap button. **Ask about a photo**: pick one, use the glasses' last photo, or take a new one with the glasses; presets for describing a scene, identifying plants and animals, food and calories, and reading and translating text. Answers always come in your chosen reply language. |
+| **Settings** | Theme, start tab, which file types to import, auto-import, delete-after-import, file naming, album name, reconnect, button-photo saving, connection log, AI service, key, model, reply language, tap-to-talk, glasses audio, reading photo answers aloud. Every change saves instantly. |
 
 ## One-time setup for Bluetooth control
 
 The glasses only accept commands from an app that signs in with **your own LensMoo account ID**. The
 app finds it on your phone from Android's Bluetooth log; it's stored only in the app's private storage
 and never uploaded. Steps are on the Glasses tab. Cable import needs no setup beyond picking the drive once.
+
+## Setting up the Assistant
+
+1. Get a key: a free Gemini key at https://aistudio.google.com/apikey, or a Claude key from your Anthropic account.
+2. Open the **Assistant** tab and paste it. The key is kept only in the app's private storage and shown masked.
+3. To talk and listen through the glasses, keep them connected as your phone's Bluetooth headset
+   (they usually are after pairing). Without that, the phone's mic and speaker are used.
+
+Defaults: Gemini model `gemini-2.5-flash`, Claude model `claude-sonnet-5-5`, replies in English. You can change all
+three in Settings. Speech recognition and voices come from your phone (Google's speech services and text-to-speech).
 
 ## Install on a phone
 

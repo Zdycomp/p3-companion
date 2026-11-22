@@ -222,7 +222,11 @@ class Ui(val context: Context, val p: Palette) {
             chips.addView(chip)
         }
         paint(selected)
-        wrap.addView(chips)
+        // Scrolls sideways when the choices don't fit on a narrow phone.
+        wrap.addView(android.widget.HorizontalScrollView(context).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(chips)
+        })
         return wrap
     }
 
