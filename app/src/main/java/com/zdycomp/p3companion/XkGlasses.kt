@@ -90,6 +90,20 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     @Volatile var previewStateSink: ((Boolean) -> Unit)? = null
     @Volatile var videoFrames = 0L; private set
 
+    // Live view probe (3.1): what the glasses said about preview, and every media frame seen.
+    /** The preview_* fields of the 1001 device info, as the glasses sent them. */
+    @Volatile var previewInfo: Map<String, String> = emptyMap(); private set
+    /** Last video-preview state the glasses reported on node 57A0 (0 off, 1 on), if any. */
+    @Volatile var previewState57A0: Int? = null; private set
+    @Volatile var mediaFramesSeen = 0L; private set
+    @Volatile var mediaFrag5 = 0L; private set
+    /** True while [runLiveProbe] is trying the live view commands. */
+    @Volatile var probing = false; private set
+    /** The probe path the open live view used ("5710/3"…), or null for the standard 5720 open. */
+    @Volatile private var openedWith: String? = null
+    /** Snapshot view takes photos without the shutter sound, notification or "last photo" update. */
+    @Volatile private var quietCapture = false
+
     // Diagnostics
     @Volatile var lastConnectReport: List<String> = emptyList(); private set
     @Volatile var lastBind: String? = null; private set
@@ -654,6 +668,11 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         firmware = str("soft_ver") ?: firmware
         model = str("prod_mode") ?: model
         if (battery == null) battery = str("battery_main")?.toIntOrNull()?.takeIf { it in 0..100 }
+        val pv = j.entries.mapNotNull { (k, v) ->
+            val key = k as? String ?: return@mapNotNull null
+            if (key.startsWith("preview_") && v != null) key to v.toString() else null
+        }.toMap()
+        if (pv.isNotEmpty()) previewInfo = pv
         str("mac_addr")?.let { mac ->
             val saved = prefs.glassesAddress
             addLog("Address check: " + if (saved != null && mac.equals(saved, ignoreCase = true)) "matches" else "differs from the saved link")
@@ -810,6 +829,8 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
             when (f.head) {
                 Xk.HEAD_MEDIA -> {
                     if (f.isAck) return
+                    mediaFramesSeen++
+                    if (f.fragment == 5) mediaFrag5++
                     lastMediaAt = SystemClock.elapsedRealtime()
                     burstOpen = f.fragment == 1 || f.fragment == 2
                     // The glasses wait for this on every last fragment, so it goes first, whatever happens next.
@@ -863,12 +884,17 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
             // Assistant touch hook: a tap on the glasses starts a voice question.
             "C101", "C107" -> onTouch?.let { cb -> main.post { cb() } }
             "57B1" -> {
-                onShutter?.let { cb -> main.post { cb() } } // 2.1 hook: phone-side shutter sound
+                if (!quietCapture) onShutter?.let { cb -> main.post { cb() } } // 2.1 hook: phone-side shutter sound
                 if (capturing) { busyText = "Processing the photo…"; changed() }
             }
             "5790" -> if (f.data.isNotEmpty()) { recording = f.data[0].toInt() == 1; changed() }
             "5710" -> if (f.data.isNotEmpty()) onPreviewState(f.data[0].toInt() and 0xFF)
             "5760" -> addLog("Glasses voice memo state ${f.data.firstOrNull()?.toInt()}")
+            // Video-preview state per the vendor SDK (0 off, 1 on). Recorded only; the live view decides by frames.
+            "57A0" -> if (f.replyType == Xk.FMT_BIN && f.data.isNotEmpty()) {
+                previewState57A0 = f.data[0].toInt() and 0xFF
+                addLog("Video preview state (57A0): $previewState57A0")
+            }
         }
         pushWaiters[node]?.offer(f)
     }
@@ -933,12 +959,22 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
 
     private fun note(line: String) { if (mediaNotes++ < 40) addLog(line) }
 
-    /** Fire the camera, pull the picture over Bluetooth, and save it to the gallery. */
-    fun takePhoto() {
-        if (state != State.READY || !busyFlag.compareAndSet(false, true)) return
-        setBusy("Taking a photo…")
+    /**
+     * Fire the camera, pull the picture over Bluetooth, and save it to the gallery. [onDone] (main
+     * thread) gets the saved photo or null. [announce] false is the Snapshot view: no shutter sound,
+     * no photo notification and the "last photo" stays as it was.
+     */
+    fun takePhoto(onDone: ((Uri?) -> Unit)? = null, announce: Boolean = true) {
+        if (state != State.READY || probing || !busyFlag.compareAndSet(false, true)) {
+            onDone?.let { cb -> main.post { cb(null) } }
+            return
+        }
+        quietCapture = !announce
+        val loud = announce
+        setBusy(if (loud) "Taking a photo…" else "Snapshot…")
         io.execute {
             var reopen = false
+            var saved: Uri? = null
             try {
                 if (preview == Preview.ON || preview == Preview.OPENING) { closePreviewNow(); reopen = true }
                 capturing = true
@@ -954,18 +990,24 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                 val announce = awaitPush("7320", q, 12_000) ?: throw LinkException("the glasses didn't report a new photo.")
                 val count = Xk.elementCount(announce)
                 if (count == null) { release("bad part count"); throw LinkException("the glasses announced an unreadable photo.") }
-                lastPhoto = download(count)
-                lastMessage = "Photo saved to your gallery."
-                lastPhoto?.let { photoSaved(it, false) }
+                val uri = download(count)
+                saved = uri
+                if (loud) {
+                    lastPhoto = uri
+                    lastMessage = "Photo saved to your gallery."
+                    lastPhoto?.let { photoSaved(it, false) }
+                }
             } catch (e: Exception) {
                 lastError = "Photo failed: ${e.message}"
             } finally {
                 pushWaiters.remove("7320")
                 capturing = false
+                quietCapture = false
                 busyFlag.set(false)
                 setReady()
                 fetchPendingAnnounce()
                 if (reopen && link != null) openPreviewNow()
+                onDone?.let { cb -> val u = saved; main.post { cb(u) } }
             }
         }
     }
@@ -1157,6 +1199,10 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         preview = Preview.OPENING
         videoFrames = 0
         changed()
+        // 3.1: a command the live view probe found working on these glasses goes first.
+        val learned = prefs.livePath
+        if (learned != null && learned in PROBE_PATHS && !learned.startsWith("5720/")) return openVia(learned)
+        openedWith = null
         var action = prefs.previewAction
         var r = request("5720", action, byteArrayOf(1), 4_000)
         if (r?.errCode in setOf(3, 4, 6)) {
@@ -1188,8 +1234,154 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     private fun closePreviewNow() {
         if (preview == Preview.OFF) return
         preview = Preview.OFF
-        if (link != null) runCatching { request("5720", prefs.previewAction, byteArrayOf(0), 2_000) }
+        val via = openedWith
+        openedWith = null
+        if (via != null) {
+            if (link != null) runCatching { request(probeNode(via), probeAction(via), byteArrayOf(0), 2_000) }
+        } else if (link != null) runCatching { request("5720", prefs.previewAction, byteArrayOf(0), 2_000) }
         changed()
+    }
+
+    /** Opens the live view with a command the probe learned (node and action, data [01]). */
+    private fun openVia(path: String): String? {
+        openedWith = path
+        addLog("Live view: opening with $path (found by the live view test)")
+        val r = request(probeNode(path), probeAction(path), byteArrayOf(1), 4_000)
+        val code = r?.errCode
+        preview = when (code) {
+            null, 0 -> Preview.ON
+            2 -> Preview.BUSY
+            3, 4, 6 -> Preview.UNSUPPORTED
+            else -> Preview.OFF
+        }
+        if (preview != Preview.ON) openedWith = null
+        changed()
+        return when (preview) {
+            Preview.ON -> null
+            Preview.BUSY -> "The glasses are busy (the mic or a call is using them). Stop that, then try again."
+            Preview.UNSUPPORTED -> "These glasses didn't accept the live view command."
+            else -> "The glasses said no (${Xk.errorText(code ?: 1)})."
+        }
+    }
+
+    // ---------------- live view probe (3.1) ----------------
+
+    /** Result of [runLiveProbe]: the command that produced video, or null, and every line it logged. */
+    data class LiveProbe(val path: String?, val summary: String, val log: List<String>, val complete: Boolean)
+
+    private fun describeReply(f: Xk.Frame?): String {
+        if (f == null) return "no answer"
+        val type = f.replyType
+        val base = "type 0x%02X, %d byte(s)".format(type and 0xFF, f.data.size)
+        return when {
+            type == Xk.FMT_ERRCODE && f.data.isNotEmpty() ->
+                "$base, status 0x%02X (%s)".format(f.data[0].toInt() and 0xFF, Xk.errorText(f.data[0].toInt() and 0xFF))
+            type == Xk.FMT_JSON -> "$base, JSON " + (f.json()?.take(160) ?: "?")
+            f.data.isNotEmpty() -> "$base, data " + hex(f.data.take(16).toByteArray())
+            else -> base
+        }
+    }
+
+    /**
+     * Learns how (and whether) these glasses send live video over Bluetooth: reads the preview info
+     * (1001 preview_*, 57A0, 2410, 2420), then tries each open command in turn, listening about 5 s
+     * for video, and closes it again after each. The working command is saved for next time, or
+     * "none" when no video arrived. [onLine] and [done] run on the main thread.
+     */
+    fun runLiveProbe(onLine: ((String) -> Unit)?, done: (LiveProbe) -> Unit) {
+        if (state != State.READY || recording || capturing || !busyFlag.compareAndSet(false, true)) {
+            val why = when {
+                state == State.IDLE || state == State.CONNECTING -> "Connect the glasses first."
+                recording -> "The glasses are recording video. Stop that first."
+                else -> "The glasses are busy. Try again in a moment."
+            }
+            main.post { done(LiveProbe(null, why, emptyList(), complete = false)) }
+            return
+        }
+        probing = true
+        setBusy("Testing live view…")
+        io.execute {
+            val lines = mutableListOf<String>()
+            fun say(s: String) {
+                synchronized(lines) { lines += s }
+                addLog("Live test: $s")
+                onLine?.let { cb -> main.post { cb(s) } }
+            }
+            var found: String? = null
+            var complete = false
+            var anyMedia = false
+            try {
+                if (preview != Preview.OFF) closePreviewNow()
+                say("Phone model ${Build.MANUFACTURER} ${Build.MODEL}; glasses ${model ?: "?"}, firmware ${firmware ?: "?"}")
+                say("1001 preview fields at sign-in: " +
+                    (previewInfo.takeIf { it.isNotEmpty() }?.entries?.joinToString(", ") { "${it.key}=${it.value}" } ?: "none"))
+                val info = request("1001", Xk.ACTION_READ, ByteArray(0), 1_500)
+                info?.let { applyInfo(it) }
+                say("1001 read again: " + if (info == null) "no answer (it usually answers once per session)" else
+                    describeReply(info).take(80) + if (previewInfo.isNotEmpty()) " → " + previewInfo.entries.joinToString(", ") { "${it.key}=${it.value}" } else "")
+                for (node in listOf("57A0", "2410", "2420")) {
+                    if (link == null) throw LinkException("Lost the connection to the glasses.")
+                    val r = request(node, Xk.ACTION_READ, ByteArray(0), 1_500)
+                    if (node == "57A0" && r != null && r.replyType == Xk.FMT_BIN && r.data.isNotEmpty()) previewState57A0 = r.data[0].toInt() and 0xFF
+                    say("$node read: ${describeReply(r)}")
+                }
+                for (path in PROBE_PATHS) {
+                    if (link == null) throw LinkException("Lost the connection to the glasses.")
+                    val node = probeNode(path)
+                    val action = probeAction(path)
+                    val m0 = mediaFramesSeen
+                    val v0 = videoFrames
+                    val f0 = mediaFrag5
+                    preview = Preview.OPENING
+                    changed()
+                    val r = request(node, action, byteArrayOf(1), 3_000)
+                    say("$path open [01]: ${describeReply(r)}")
+                    val end = SystemClock.elapsedRealtime() + PROBE_LISTEN_MS
+                    while (SystemClock.elapsedRealtime() < end && videoFrames - v0 < 3 && link != null) Thread.sleep(100)
+                    val media = mediaFramesSeen - m0
+                    val video = videoFrames - v0
+                    val f5 = mediaFrag5 - f0
+                    if (media > 0) anyMedia = true
+                    if (link != null) {
+                        val st = request("57A0", Xk.ACTION_READ, ByteArray(0), 1_000)
+                        if (st != null) say("  57A0 while open: ${describeReply(st)}")
+                    }
+                    say("  heard for ${PROBE_LISTEN_MS / 1000} s: $media media frame(s), $video video picture(s), $f5 divideType-5 frame(s)")
+                    if (link != null) {
+                        val c = runCatching { request(node, action, byteArrayOf(0), 2_000) }.getOrNull()
+                        say("  close [00]: ${describeReply(c)}")
+                    }
+                    preview = Preview.OFF
+                    changed()
+                    Thread.sleep(400)
+                    if (video > 0 || f5 > 0) { found = path; break }
+                }
+                complete = true
+            } catch (e: Exception) {
+                say("Stopped early: ${e.message}")
+            } finally {
+                preview = Preview.OFF
+                openedWith = null
+                probing = false
+                busyFlag.set(false)
+                setReady()
+            }
+            val summary = when {
+                found != null -> "Live video works with command $found. The app will use it from now on."
+                !complete -> "The test didn't finish, so nothing was changed. Try again with the glasses connected."
+                anyMedia -> "The glasses sent some media data but no video the phone could show. Snapshot view will be used."
+                else -> "The glasses sent no video over Bluetooth. Snapshot view will be used instead."
+            }
+            say(summary)
+            if (complete) {
+                found?.takeIf { it.startsWith("5720/") }?.let { prefs.previewAction = probeAction(it) }
+                prefs.livePath = found ?: LIVE_NONE
+                prefs.liveProbeSummary = summary
+                prefs.liveProbeAt = System.currentTimeMillis()
+            }
+            val result = LiveProbe(found, summary, synchronized(lines) { lines.toList() }, complete)
+            main.post { done(result) }
+        }
     }
 
     private fun onPreviewState(v: Int) {
@@ -1268,6 +1460,15 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         private const val ELEMENT_RETRIES = 1
         private const val ELEMENT_IDLE_MS = 4_000L
         private const val ELEMENT_CAP_MS = 15_000L
+
+        /** Live view open commands tried by the probe, in order: node/action, data [01] to open, [00] to close. */
+        val PROBE_PATHS = listOf("5720/3", "5720/2", "5710/3", "5710/2", "102A/3", "102C/3")
+        /** Saved when the probe found that no command makes the glasses send video. */
+        const val LIVE_NONE = "none"
+        private const val PROBE_LISTEN_MS = 5_000L
+
+        fun probeNode(path: String) = path.substringBefore('/')
+        fun probeAction(path: String) = path.substringAfter('/').toIntOrNull() ?: Xk.ACTION_EXECUTE
 
         @Volatile private var instance: XkGlasses? = null
 

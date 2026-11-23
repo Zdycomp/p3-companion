@@ -24,6 +24,7 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -304,9 +305,15 @@ class PreviewRecorder(
  * Live view from the glasses, with recording to the phone. Built once when shown and then updated
  * in place, so the video surface is never torn down by a screen refresh. Leaving it always closes
  * the live view on the glasses.
+ *
+ * 3.1: when no video arrives within 6 seconds, the live view test ([XkGlasses.runLiveProbe]) tries
+ * every open command the glasses might use. When none sends video, the screen switches to Snapshot
+ * view: it takes a photo with the glasses, shows it, and takes the next one.
  */
 class LiveViewScreen(private val a: MainActivity) : Screen {
     override val label = "Live view"
+
+    private enum class Mode { VIDEO, TESTING, SNAPSHOT }
 
     private val main = Handler(Looper.getMainLooper())
     private var pipeline: VideoPipeline? = null
@@ -319,10 +326,29 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
     private var statusBox: LinearLayout? = null
     private var gridView: View? = null
     private var flashView: View? = null
+    private var modeBox: LinearLayout? = null
+    private var probeLine: TextView? = null
+    private var snapImage: ImageView? = null
     private var showGrid = false
     private var openedAt = 0L
     private var lastShown = 0L
     private var active = false
+
+    private var mode = Mode.VIDEO
+    private var autoProbed = false
+    private var videoSeen = false
+
+    // Snapshot view
+    private var snapRunning = false
+    private var snapBusy = false
+    private var snapCurrent: Uri? = null
+    private var snapBitmap: Bitmap? = null
+    private val snapKept = mutableSetOf<Uri>()
+    private var snapCount = 0
+    private var snapLastAt = 0L
+    private var snapEveryMs = 0L
+    private var snapNote: String? = null
+    private var snapToken = 0
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -344,6 +370,12 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
                 "Connect your glasses first, then open Live view again.", "Go to the Glasses tab") { a.show(MainActivity.TAB_GLASSES) })
             return ui.screen("Live view", col, back = { a.goBack() })
         }
+        autoProbed = false
+        videoSeen = false
+        snapKept.clear()
+        snapCount = 0
+        snapEveryMs = 0
+        snapNote = null
 
         val frame = FrameLayout(a).apply {
             setBackgroundColor(android.graphics.Color.BLACK)
@@ -357,6 +389,13 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         val tv = TextureView(a)
         texture = tv
         frame.addView(tv, FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH))
+        val img = ImageView(a).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            visibility = View.GONE
+            contentDescription = "Latest snapshot from the glasses"
+        }
+        snapImage = img
+        frame.addView(img, FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH))
         val thirds = object : View(a) {
             private val paint = android.graphics.Paint().apply { color = 0x59FFFFFF; strokeWidth = ui.dpf(1f) }
             override fun onDraw(c: android.graphics.Canvas) {
@@ -408,6 +447,11 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         val w = a.resources.displayMetrics.widthPixels - ui.dp(32)
         col.addView(frame, LinearLayout.LayoutParams(Ui.MATCH, (w * 3 / 4).coerceAtMost(ui.dp(420))))
 
+        // What the screen is doing right now, and which mode is active.
+        val mb = ui.column().apply { setPadding(0, ui.dp(12), 0, 0) }
+        modeBox = mb
+        col.addView(mb)
+
         // Controls under the frame: snapshot, record to phone, grid.
         val controls = ui.row().apply { gravity = Gravity.CENTER; setPadding(0, ui.dp(16), 0, ui.dp(8)) }
         controls.addView(ui.iconButton(R.drawable.ic_photo_camera, "Save a snapshot", IconBtn.TONAL) { snapshot() }.apply {
@@ -446,15 +490,17 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         }
         g.videoSink = { p.offer(it) }
         g.previewStateSink = { open ->
-            if (!open && active) {
+            if (!open && active && mode == Mode.VIDEO) {
                 p.stopRecording("The glasses stopped the video; the recording was saved.")
                 showStatus("The glasses closed the live view.", spinning = false)
             }
         }
         if (a.prefs.liveKeepScreenOn) a.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        // The glasses can't stream video while their mic link is in use.
+        // The glasses can't stream video while their mic link is in use (an idle voice session lets go of it).
+        a.assistant.releaseAudio()
         val route = a.assistant.route
+        mode = Mode.VIDEO
         if (route.active) {
             showStatus("The glasses' mic is in use (voice chat or recording).", spinning = false)
             col.addView(ui.banner("The mic is in use, so the glasses can't stream.", Tone.WARN), 1)
@@ -462,14 +508,20 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
                 a.assistant.stop()
                 a.recorder.stop()
                 showStatus("Opening live view…", spinning = true)
-                main.postDelayed({ if (active) open() }, 1_000)
+                main.postDelayed({ if (active) start() }, 1_000)
             }, 2)
         } else {
-            open()
+            start()
         }
+        renderMode()
         main.removeCallbacks(ticker)
         main.postDelayed(ticker, 1_000)
         return ui.screen("Live view", col, back = { a.goBack() })
+    }
+
+    /** Video when it can work on these glasses, otherwise straight to Snapshot view. */
+    private fun start() {
+        if (a.prefs.livePath == XkGlasses.LIVE_NONE) startSnapshots() else open()
     }
 
     private fun showStatus(text: String, spinning: Boolean) {
@@ -479,24 +531,230 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
     }
 
     private fun open() {
+        mode = Mode.VIDEO
+        snapImage?.visibility = View.GONE
         openedAt = SystemClock.elapsedRealtime()
+        showStatus("Opening live view…", spinning = true)
+        renderMode()
         a.glasses.openPreview { msg ->
-            if (!active) return@openPreview
+            if (!active || mode != Mode.VIDEO) return@openPreview
             if (msg != null) showStatus(msg, spinning = false)
         }
     }
 
+    // ---------------- what the screen says it's doing ----------------
+
+    private fun renderMode() {
+        val box = modeBox ?: return
+        val ui = a.ui
+        val s = ui.s
+        val p = a.prefs
+        box.removeAllViews()
+        probeLine = null
+        val card = ui.tonalCard()
+        when (mode) {
+            Mode.VIDEO -> {
+                card.addView(ui.statusChip(if (videoSeen) "Mode: live video" else "Mode: live video, waiting for the first picture",
+                    if (videoSeen) Tone.GOOD else Tone.BUSY, pulse = !videoSeen))
+                val via = p.livePath?.takeIf { it != XkGlasses.LIVE_NONE }
+                card.addView(ui.body(
+                    "Video comes straight from the glasses' camera over Bluetooth" + (via?.let { ", using command $it" } ?: "") + ". " +
+                        if (videoSeen) "You can record it to the phone or save a snapshot."
+                        else "If nothing arrives within 6 seconds the app tests which live view command your glasses answer.",
+                    muted = true, sizeSp = 13f,
+                ).apply { setPadding(0, ui.dp(8), 0, 0) })
+                card.addView(ui.button("Use snapshot view instead", Btn.TEXT, R.drawable.ic_photo_camera, full = false) { startSnapshots() })
+            }
+            Mode.TESTING -> {
+                card.addView(ui.statusChip("Mode: testing live view", Tone.BUSY, pulse = true))
+                card.addView(ui.body(
+                    "No video arrived, so the app is trying each live view command these glasses might use, listening about " +
+                        "5 seconds for each and closing it again. This takes about 40 seconds.",
+                    muted = true, sizeSp = 13f,
+                ).apply { setPadding(0, ui.dp(8), 0, 0) })
+                val line = ui.mono("Starting…").apply { setPadding(0, ui.dp(8), 0, 0); maxLines = 3 }
+                probeLine = line
+                card.addView(line)
+            }
+            Mode.SNAPSHOT -> {
+                card.addView(ui.statusChip(if (snapRunning) "Mode: snapshot view" else "Mode: snapshot view, stopped",
+                    if (snapRunning) Tone.INFO else Tone.NEUTRAL))
+                card.addView(ui.body(
+                    "Snapshot view, about one picture every few seconds. The app takes a photo with the glasses, shows it here " +
+                        "and takes the next one. It isn't live video: " +
+                        (p.liveProbeSummary ?: "your glasses don't send live video over Bluetooth."),
+                    muted = true, sizeSp = 13f,
+                ).apply { setPadding(0, ui.dp(8), 0, 0) })
+                snapNote?.let { card.addView(ui.text(it, Type.BODY_SMALL, s.onSurfaceVariant).apply { setPadding(0, ui.dp(6), 0, 0) }) }
+                card.addView(ui.buttonRow(
+                    if (snapRunning) ui.button("Stop", Btn.TONAL, R.drawable.ic_stop, full = false) { stopSnapshots(); renderMode() }
+                    else ui.button("Start", Btn.FILLED, R.drawable.ic_play, full = false) { startSnapshots() },
+                    ui.button("Save this one", Btn.OUTLINED, R.drawable.ic_photo_library, full = false) { keepCurrent() },
+                    ui.button("Test live video again", Btn.TEXT, R.drawable.ic_refresh, full = false) { runProbe(auto = false) },
+                ).apply { setPadding(0, ui.dp(8), 0, 0) })
+                card.addView(ui.switchRow(
+                    "Keep every snapshot",
+                    "Off: each snapshot is deleted after it's shown, unless you tap Save this one",
+                    p.keepSnapshots, R.drawable.ic_photo_library,
+                ) { p.keepSnapshots = it })
+            }
+        }
+        box.addView(card)
+        recordButton?.isEnabled = mode == Mode.VIDEO
+        recordButton?.alpha = if (mode == Mode.VIDEO) 1f else 0.4f
+    }
+
+    // ---------------- live view test ----------------
+
+    private fun runProbe(auto: Boolean) {
+        val g = a.glasses
+        stopSnapshots()
+        mode = Mode.TESTING
+        renderMode()
+        snapImage?.visibility = View.GONE
+        showStatus(
+            if (auto) "No video after 6 seconds. Testing which live view command your glasses answer…"
+            else "Testing which live view command your glasses answer…",
+            spinning = true,
+        )
+        g.runLiveProbe(onLine = { line -> if (active && mode == Mode.TESTING) probeLine?.text = line }) { res ->
+            if (!active) return@runLiveProbe
+            when {
+                res.path != null -> { a.toast("Live video works with command ${res.path}."); open() }
+                res.complete -> startSnapshots()
+                else -> {
+                    mode = Mode.VIDEO
+                    renderMode()
+                    showStatus(res.summary, spinning = false)
+                }
+            }
+        }
+    }
+
+    // ---------------- snapshot view ----------------
+
+    private fun startSnapshots() {
+        val g = a.glasses
+        if (mode == Mode.VIDEO) {
+            pipeline?.stopRecording(null)
+            g.closePreview()
+        }
+        mode = Mode.SNAPSHOT
+        snapRunning = true
+        snapNote = null
+        snapImage?.visibility = View.VISIBLE
+        if (snapBitmap == null) showStatus("Taking the first picture…", spinning = true) else statusBox?.visibility = View.GONE
+        renderMode()
+        nextSnap(++snapToken)
+    }
+
+    private fun stopSnapshots() {
+        snapRunning = false
+        snapToken++
+    }
+
+    /** Why a snapshot can't be taken right now, or null. Never during a recording or an import. */
+    private fun snapBlocker(): String? {
+        val g = a.glasses
+        return when {
+            g.state == XkGlasses.State.IDLE || g.state == XkGlasses.State.CONNECTING -> "Waiting for the glasses to connect…"
+            g.recording -> "Paused: the glasses are recording video."
+            a.recorder.recording || a.recorder.starting -> "Paused: the voice recorder is on."
+            a.importer.running -> "Paused while files are being imported."
+            g.probing -> "Paused while the live view test runs."
+            g.state == XkGlasses.State.BUSY -> "Waiting for the glasses to finish…"
+            else -> null
+        }
+    }
+
+    private fun nextSnap(token: Int) {
+        if (!active || !snapRunning || token != snapToken || snapBusy) return
+        val blocker = snapBlocker()
+        if (blocker != null) {
+            if (snapNote != blocker) { snapNote = blocker; renderMode() }
+            if (snapBitmap == null) showStatus(blocker, spinning = false)
+            main.postDelayed({ nextSnap(token) }, 2_000)
+            return
+        }
+        if (snapNote != null) { snapNote = null; renderMode() }
+        snapBusy = true
+        val startedAt = SystemClock.elapsedRealtime()
+        a.glasses.takePhoto(onDone = { uri ->
+            snapBusy = false
+            if (!active || !snapRunning || token != snapToken) {
+                if (uri != null && !a.prefs.keepSnapshots) deleteSnapshot(uri)
+                return@takePhoto
+            }
+            if (uri == null) {
+                snapNote = "That picture didn't arrive: ${a.glasses.lastError ?: "no answer"}. Trying again…"
+                renderMode()
+                main.postDelayed({ nextSnap(token) }, 2_000)
+                return@takePhoto
+            }
+            val now = SystemClock.elapsedRealtime()
+            snapEveryMs = if (snapLastAt == 0L) now - startedAt else now - snapLastAt
+            snapLastAt = now
+            showSnapshot(uri)
+            main.postDelayed({ nextSnap(token) }, 300)
+        }, announce = false)
+    }
+
+    private fun showSnapshot(uri: Uri) {
+        val cr = a.contentResolver
+        Thread {
+            val bmp = runCatching { ImagePrep.thumbnail(cr, uri, 1280) }.getOrNull()
+            a.runOnUiThread {
+                if (!active) { bmp?.recycle(); if (!a.prefs.keepSnapshots && uri !in snapKept) deleteSnapshot(uri); return@runOnUiThread }
+                if (bmp != null) {
+                    val old = snapBitmap
+                    snapImage?.setImageBitmap(bmp)
+                    snapBitmap = bmp
+                    old?.recycle()
+                    statusBox?.visibility = View.GONE
+                }
+                val previous = snapCurrent
+                snapCurrent = uri
+                snapCount++
+                if (previous != null && previous != uri && !a.prefs.keepSnapshots && previous !in snapKept) deleteSnapshot(previous)
+            }
+        }.start()
+    }
+
+    private fun keepCurrent() {
+        val u = snapCurrent ?: run { a.toast("No snapshot yet."); return }
+        if (a.prefs.keepSnapshots) { a.toast("Every snapshot is being kept already."); return }
+        snapKept += u
+        a.toast("Kept in Pictures › ${a.prefs.albumName}.")
+    }
+
+    private fun deleteSnapshot(uri: Uri) {
+        val cr = a.contentResolver
+        Thread { runCatching { cr.delete(uri, null, null) } }.start()
+    }
+
+    // ---------------- updates ----------------
+
     private fun update() {
         val p = pipeline ?: return
+        val g = a.glasses
+        if (mode == Mode.SNAPSHOT) {
+            stats?.text = if (snapCount == 0) "Snapshot view" else
+                "Snapshot $snapCount" + if (snapEveryMs > 0) " · every ${(snapEveryMs + 500) / 1000} s" else ""
+            recPill?.visibility = View.GONE
+            return
+        }
         val shownNow = p.shown
         val fps = shownNow - lastShown
         lastShown = shownNow
         val (w, h) = p.size
-        stats?.text = "${w}×$h · $fps fps" + if (p.dropped > 0) " · ${p.dropped} dropped" else ""
-        if (p.received > 0) statusBox?.visibility = View.GONE
-        else if (openedAt != 0L && SystemClock.elapsedRealtime() - openedAt > 8_000 && a.glasses.preview != XkGlasses.Preview.BUSY &&
-            a.glasses.preview != XkGlasses.Preview.UNSUPPORTED) {
-            showStatus("No video yet. Make sure LensMoo is closed, then try again. If it still doesn't come, share the log from Diagnostics.", spinning = false)
+        stats?.text = if (mode == Mode.TESTING) "Testing…" else "${w}×$h · $fps fps" + if (p.dropped > 0) " · ${p.dropped} dropped" else ""
+        if (p.received > 0) {
+            statusBox?.visibility = View.GONE
+            if (!videoSeen) { videoSeen = true; if (mode == Mode.VIDEO) renderMode() }
+        } else if (mode == Mode.VIDEO && openedAt != 0L && !autoProbed && SystemClock.elapsedRealtime() - openedAt > AUTO_PROBE_MS &&
+            g.preview != XkGlasses.Preview.BUSY && g.state == XkGlasses.State.READY) {
+            autoProbed = true
+            runProbe(auto = true)
         }
         val since = p.recordingSince
         if (since != 0L) {
@@ -513,13 +771,14 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         } else {
             recordButton?.recording = false
             recordButton?.contentDescription = "Record to phone"
-            recordLabel?.text = "Record to phone"
+            recordLabel?.text = if (mode == Mode.VIDEO) "Record to phone" else "Recording needs live video"
             recPill?.visibility = View.GONE
         }
     }
 
     private fun toggleRecording() {
         val p = pipeline ?: return
+        if (mode != Mode.VIDEO) { a.toast("Recording to the phone needs live video."); return }
         if (p.recordingSince != 0L) { a.ui.haptic(recordButton, Haptic.END); p.stopRecording(null); return }
         a.ui.haptic(recordButton, Haptic.START)
         p.startRecording { uri, why ->
@@ -530,7 +789,9 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         update()
     }
 
-    private fun snapshot() {
+    /** Saves what's on screen (live video), or keeps the current snapshot. Also used by "save a snapshot". */
+    internal fun snapshot() {
+        if (mode == Mode.SNAPSHOT) { keepCurrent(); return }
         val bmp = texture?.bitmap ?: run { a.toast("No picture yet."); return }
         flashView?.let { f ->
             if (!a.ui.reduceMotion) {
@@ -584,6 +845,13 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         if (!active) return
         active = false
         main.removeCallbacks(ticker)
+        stopSnapshots()
+        snapCurrent?.let { u -> if (!a.prefs.keepSnapshots && u !in snapKept) deleteSnapshot(u) }
+        snapCurrent = null
+        snapImage?.setImageDrawable(null)
+        snapBitmap?.recycle()
+        snapBitmap = null
+        snapLastAt = 0L
         val g = a.glasses
         g.videoSink = null
         g.previewStateSink = null
@@ -600,7 +868,15 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         statusBox = null
         gridView = null
         flashView = null
+        modeBox = null
+        probeLine = null
+        snapImage = null
         openedAt = 0
         lastShown = 0
+    }
+
+    private companion object {
+        /** No video this long after opening starts the live view test. */
+        const val AUTO_PROBE_MS = 6_000L
     }
 }

@@ -91,7 +91,10 @@ class AssistantScreen(private val a: MainActivity) : Screen {
             muted = true, sizeSp = 13f,
         ))
         liveBox = ui.column().also { card.addView(it) }
-        card.addView(ui.button("Clear conversation", Btn.TEXT, R.drawable.ic_delete_sweep, full = false) { a.assistant.clearChat() })
+        card.addView(ui.buttonRow(
+            ui.button("What can I say?", Btn.TEXT, R.drawable.ic_info, full = false) { AiSetup.showCommands(a) },
+            ui.button("Clear conversation", Btn.TEXT, R.drawable.ic_delete_sweep, full = false) { a.assistant.clearChat() },
+        ))
     }
 
     // ---------------- translate ----------------
@@ -274,6 +277,21 @@ class AssistantScreen(private val a: MainActivity) : Screen {
                 setTypeface(typeface, Typeface.ITALIC)
                 gravity = Gravity.CENTER
                 setPadding(ui.dp(8), ui.dp(12), ui.dp(8), 0)
+            })
+        }
+
+        // Which speech service listened, the last listening problem in full, and how fast the last answer started.
+        val sp = asst.speech
+        val details = listOfNotNull(
+            sp.lastService?.let { "Speech service: $it" },
+            asst.lastVoiceError?.let { "Last problem: $it" },
+            asst.lastTiming?.let { "Last timing: $it" },
+        )
+        if (details.isNotEmpty()) {
+            box.addView(ui.text(details.joinToString("\n"), Type.BODY_SMALL, s.onSurfaceVariant).apply {
+                gravity = Gravity.CENTER
+                setPadding(ui.dp(8), ui.dp(8), ui.dp(8), 0)
+                setTextIsSelectable(true)
             })
         }
 

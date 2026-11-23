@@ -154,3 +154,22 @@ Close LensMoo first. Turn on Settings > Show connection log.
 14. Diagnostics > Run the checks > Share report once.
 
 If any line fails: Diagnostics > Share report, with the line number.
+
+
+---
+
+## 8. 3.1.0: additive changes near frozen code
+
+None of these touch connect, pairing, sign-in, the link, framing or the photo transfer.
+
+| Where | Change |
+|---|---|
+| `handle()` media branch | Two counters (`mediaFramesSeen`, `mediaFrag5`) before the existing logic. |
+| `onControl()` | New `57A0` branch: records the video-preview state and logs it; changes nothing else. `57B1` skips `onShutter` only while a Snapshot-view photo is taken. |
+| `applyInfo()` | Also keeps the `preview_*` fields of 1001. |
+| `takePhoto(onDone, announce)` | R-C5. `announce = false` (Snapshot view) skips `lastPhoto`, the message and the photo-saved hook; everything else is the same path. |
+| `openPreviewNow` / `closePreviewNow` | Only when the live view test saved a non-5720 command (`prefs.livePath`) is that command used; otherwise the 5720 path is byte-for-byte the same. A 5720 result found by the test is stored in `previewAction`. |
+| `runLiveProbe` | New. Holds `busyFlag` while it runs; refuses while recording or capturing. |
+
+Phone check additions: Live view on glasses without video → test runs after 6 s → Snapshot view; Diagnostics › Test
+voice reports the service; one voice question shows a timing line in the connection log.

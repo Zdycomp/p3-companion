@@ -34,6 +34,7 @@ object SettingsBackup {
         "ai_provider" to Kind.STRING, "reply_lang" to Kind.STRING, "tap_to_talk" to Kind.BOOL, "glasses_audio" to Kind.BOOL,
         "speak_photo" to Kind.BOOL, "speak_chat" to Kind.BOOL, "tr_from" to Kind.STRING, "tr_to" to Kind.STRING,
         "tts_rate" to Kind.FLOAT, "tts_pitch" to Kind.FLOAT, "history_limit" to Kind.INT, "photo_presets" to Kind.STRING,
+        "speak_through" to Kind.STRING, "voice_commands" to Kind.BOOL, "keep_snapshots" to Kind.BOOL,
         // Privacy
         "app_lock" to Kind.BOOL, "lock_after" to Kind.INT, "secure_window" to Kind.BOOL, "hide_keys" to Kind.BOOL,
     )
@@ -42,6 +43,7 @@ object SettingsBackup {
     private val NEVER = listOf(
         "user_key", "ai_key_", "drive_uri", "drive_label", "ble_addr", "ble_name", "link_method",
         "user_stopped", "preview_action", "asked_", "last_import", "last_seen_version",
+        "live_path", "live_probe_", "recognizer_service",
     )
 
     fun isSecret(key: String): Boolean = NEVER.any { key == it || (it.endsWith("_") && key.startsWith(it)) }

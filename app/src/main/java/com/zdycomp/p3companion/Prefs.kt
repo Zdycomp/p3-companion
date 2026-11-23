@@ -111,6 +111,45 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
         get() = sp.getInt("preview_action", Xk.ACTION_EXECUTE)
         set(v) = sp.edit().putInt("preview_action", v).apply()
 
+    /** Live view command the probe found working ("5720/3", "5710/2"…), "none", or null if never tested. */
+    var livePath: String?
+        get() = sp.getString("live_path", null)
+        set(v) = sp.edit().putString("live_path", v).apply()
+
+    /** The live view probe's plain-English result, and when it ran (ms since 1970, 0 = never). */
+    var liveProbeSummary: String?
+        get() = sp.getString("live_probe_summary", null)
+        set(v) = sp.edit().putString("live_probe_summary", v).apply()
+
+    var liveProbeAt: Long
+        get() = sp.getLong("live_probe_at", 0L)
+        set(v) = sp.edit().putLong("live_probe_at", v).apply()
+
+    /** Snapshot view: keep every snapshot in the gallery (off deletes each one after it's shown). */
+    var keepSnapshots: Boolean
+        get() = sp.getBoolean("keep_snapshots", false)
+        set(v) = sp.edit().putBoolean("keep_snapshots", v).apply()
+
+    /** The speech recognition service that last worked ("package/class"), tried first next time. */
+    var recognizerService: String?
+        get() = sp.getString("recognizer_service", null)
+        set(v) = sp.edit().putString("recognizer_service", v).apply()
+
+    enum class SpeakThrough { FAST, CALL }
+
+    /**
+     * Where spoken answers play. FAST: the media stream (the glasses' stereo audio when connected), no
+     * waiting for the call link. CALL: the hands-free call link, like before 3.1.
+     */
+    var speakThrough: SpeakThrough
+        get() = enumOr(sp.getString("speak_through", null), SpeakThrough.FAST)
+        set(v) = sp.edit().putString("speak_through", v.name).apply()
+
+    /** Offline voice commands ("take a photo", "battery") are handled before asking the AI. */
+    var voiceCommands: Boolean
+        get() = sp.getBoolean("voice_commands", true)
+        set(v) = sp.edit().putBoolean("voice_commands", v).apply()
+
     /** Whether Android has asked for this permission before (to spot "don't ask again"). */
     fun wasAsked(permission: String): Boolean = sp.getBoolean("asked_$permission", false)
     fun markAsked(permission: String) = sp.edit().putBoolean("asked_$permission", true).apply()
@@ -384,6 +423,7 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
         val keep = sp.all.filterKeys { k ->
             k == "user_key" || k.startsWith("ai_key_") || k == "drive_uri" || k == "drive_label" ||
                 k == "ble_addr" || k == "ble_name" || k == "link_method" || k == "preview_action" ||
+                k == "live_path" || k == "live_probe_summary" || k == "live_probe_at" || k == "recognizer_service" ||
                 k.startsWith("asked_") || k == "last_import" || k == "last_seen_version" || k == "user_stopped"
         }
         val e = sp.edit().clear()

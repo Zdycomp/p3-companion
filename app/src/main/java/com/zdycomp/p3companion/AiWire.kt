@@ -243,7 +243,7 @@ object AiWire {
         )
     }
 
-    fun claudeBody(model: String, system: String, turns: List<AiTurn>, imageJpeg: ByteArray?): String {
+    fun claudeBody(model: String, system: String, turns: List<AiTurn>, imageJpeg: ByteArray?, stream: Boolean = false): String {
         val conv = normalize(turns)
         val messages = conv.mapIndexed { i, t ->
             val content: Any = if (imageJpeg != null && i == conv.lastIndex) {
@@ -264,7 +264,92 @@ object AiWire {
             "messages" to messages,
         )
         if (claudeFallbackSupported(model)) body["fallbacks"] = "default"
+        if (stream) body["stream"] = true
         return Json.write(body)
+    }
+
+    // ---------------- streaming (3.1) ----------------
+
+    /**
+     * The same question as [build], asked as a stream so the first sentence can be spoken while the
+     * rest is still being written: Gemini streamGenerateContent with alt=sse, Claude with stream=true.
+     */
+    fun buildStream(provider: AiProvider, apiKey: String, model: String, system: String, turns: List<AiTurn>): AiHttpRequest {
+        val base = build(provider, apiKey, model, system, turns, null)
+        val m = cleanModel(model, provider)
+        val headers = base.headers + ("Accept" to "text/event-stream")
+        return when (provider) {
+            AiProvider.GEMINI -> base.copy(url = GEMINI_BASE + m + ":streamGenerateContent?alt=sse", headers = headers)
+            AiProvider.CLAUDE -> base.copy(headers = headers, body = claudeBody(m, system, turns, null, stream = true))
+        }
+    }
+
+    /** One thing a stream said: more answer text, the reason it stopped, or a failure for people. */
+    sealed class StreamEvent {
+        data class Text(val text: String) : StreamEvent()
+        data class Stop(val reason: String?) : StreamEvent()
+        data class Failed(val message: String) : StreamEvent()
+    }
+
+    /** Reads one server-sent event's data (a JSON object) from Gemini or Claude. */
+    fun parseStreamData(provider: AiProvider, data: String): List<StreamEvent> {
+        val d = data.trim()
+        if (d.isEmpty() || d == "[DONE]") return emptyList()
+        val root = runCatching { Json.parse(d) as? Map<*, *> }.getOrNull() ?: return emptyList()
+        val out = mutableListOf<StreamEvent>()
+        when (provider) {
+            AiProvider.GEMINI -> {
+                (root["error"] as? Map<*, *>)?.let { e ->
+                    out += StreamEvent.Failed("Gemini stopped: " + ((e["message"] as? String)?.let { clip(it) } ?: "unknown error") + ".")
+                    return out
+                }
+                val first = (root["candidates"] as? List<*>)?.firstOrNull() as? Map<*, *>
+                if (first == null) {
+                    val reason = (root["promptFeedback"] as? Map<*, *>)?.get("blockReason") as? String
+                    if (reason != null) out += StreamEvent.Failed("Gemini wouldn't answer that (${reason.lowercase(Locale.US)}). Try asking another way.")
+                    return out
+                }
+                val parts = (first["content"] as? Map<*, *>)?.get("parts") as? List<*>
+                val text = parts.orEmpty().mapNotNull { p ->
+                    val m = p as? Map<*, *> ?: return@mapNotNull null
+                    if (m["thought"] == true) null else m["text"] as? String
+                }.joinToString("")
+                if (text.isNotEmpty()) out += StreamEvent.Text(text)
+                (first["finishReason"] as? String)?.let { out += StreamEvent.Stop(it) }
+            }
+            AiProvider.CLAUDE -> when (root["type"]) {
+                "content_block_delta" -> {
+                    val delta = root["delta"] as? Map<*, *>
+                    if (delta?.get("type") == "text_delta") (delta["text"] as? String)?.takeIf { it.isNotEmpty() }?.let { out += StreamEvent.Text(it) }
+                }
+                "message_delta" -> {
+                    val reason = (root["delta"] as? Map<*, *>)?.get("stop_reason") as? String
+                    if (reason == "refusal") out += StreamEvent.Failed("Claude declined to answer that. Try asking another way.")
+                    else if (reason != null) out += StreamEvent.Stop(reason)
+                }
+                "error" -> {
+                    val e = root["error"] as? Map<*, *>
+                    val type = e?.get("type") as? String
+                    out += StreamEvent.Failed(
+                        if (type == "overloaded_error") "Anthropic Claude is busy right now. Try again in a moment."
+                        else "Claude stopped: " + ((e?.get("message") as? String)?.let { clip(it) } ?: "unknown error") + "."
+                    )
+                }
+            }
+        }
+        return out
+    }
+
+    /** Why a stream that ended with no text gave none, in plain words. */
+    fun emptyStreamMessage(provider: AiProvider, reason: String?): String = when (provider) {
+        AiProvider.GEMINI -> when (reason) {
+            "SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "IMAGE_SAFETY" -> "Gemini wouldn't answer that for safety reasons. Try asking another way."
+            "RECITATION" -> "Gemini stopped because the answer would copy protected text."
+            "MAX_TOKENS" -> "Gemini ran out of room before answering. Try a shorter question."
+            else -> "Gemini sent back an empty answer. Try again."
+        }
+        AiProvider.CLAUDE -> if (reason == "max_tokens") "Claude ran out of room before answering. Try a shorter question."
+        else "Claude sent back an empty answer. Try again."
     }
 
     /** Models that accept server-side fallback when a safety check declines a request. */
@@ -532,5 +617,105 @@ object Json {
             if (t.isEmpty() || t == "-") fail()
             return t.toLongOrNull() ?: t.toDoubleOrNull() ?: fail()
         }
+    }
+}
+
+/**
+ * Collects server-sent event lines ("data: …", blank line ends the event) and hands back each
+ * event's data. Comment lines and "event:" names are skipped; the JSON says what it is.
+ */
+class SseParser {
+    private val data = StringBuilder()
+    private var has = false
+
+    /** Feed one line without its line break; returns an event's data when a blank line ends it. */
+    fun line(raw: String): String? {
+        val l = raw.removeSuffix("\r")
+        if (l.isEmpty()) return flush()
+        if (l.startsWith(":")) return null
+        if (l.startsWith("data:")) {
+            if (has) data.append('\n')
+            data.append(l.removePrefix("data:").removePrefix(" "))
+            has = true
+        }
+        return null
+    }
+
+    /** The data of an event the stream ended in the middle of, if any. */
+    fun flush(): String? {
+        if (!has) return null
+        val s = data.toString()
+        data.setLength(0)
+        has = false
+        return s
+    }
+}
+
+/**
+ * Cuts streamed answer text into sentences, so each can be spoken the moment it's complete. A
+ * sentence ends at . ! ? … followed by a space or line break (not "Dr. " or "e.g. "), at a line
+ * break, or after CJK end punctuation. Very long runs without an end are cut at a comma.
+ */
+class SentenceSplitter(private val softLimit: Int = 200) {
+    private val buf = StringBuilder()
+
+    fun feed(delta: String): List<String> {
+        buf.append(delta)
+        val out = mutableListOf<String>()
+        while (true) {
+            val end = boundary() ?: break
+            val sentence = buf.substring(0, end).trim()
+            buf.delete(0, end)
+            if (sentence.any { it.isLetterOrDigit() }) out += sentence
+        }
+        if (buf.length > softLimit) {
+            val window = buf.substring(0, softLimit)
+            val cut = listOf(", ", "; ", ": ", " - ", " ").map { window.lastIndexOf(it) }.firstOrNull { it > softLimit / 2 }
+            if (cut != null) {
+                val piece = buf.substring(0, cut + 1).trim()
+                buf.delete(0, cut + 1)
+                if (piece.isNotEmpty()) out += piece
+            }
+        }
+        return out
+    }
+
+    /** Whatever is left when the answer is complete. */
+    fun flush(): String? {
+        val rest = buf.toString().trim()
+        buf.setLength(0)
+        return rest.takeIf { r -> r.any { it.isLetterOrDigit() } }
+    }
+
+    private fun boundary(): Int? {
+        var i = 0
+        while (i < buf.length) {
+            val c = buf[i]
+            if (c == '\n') { if (i > 0) return i + 1; i++; continue }
+            if (c == '。' || c == '！' || c == '？') return i + 1
+            if (c == '.' || c == '!' || c == '?' || c == '…') {
+                var j = i + 1
+                while (j < buf.length && buf[j] in CLOSERS) j++
+                if (j >= buf.length) return null // wait: the next delta may continue it
+                if (buf[j] == ' ' || buf[j] == '\n') {
+                    if (c == '.' && abbreviation(i)) { i = j; continue }
+                    return j
+                }
+            }
+            i++
+        }
+        return null
+    }
+
+    private fun abbreviation(dot: Int): Boolean {
+        var k = dot - 1
+        while (k >= 0 && (buf[k].isLetter() || buf[k] == '.')) k--
+        val word = buf.substring(k + 1, dot).lowercase(Locale.ROOT)
+        return word.length == 1 || word in ABBREV
+    }
+
+    private companion object {
+        const val CLOSERS = "\"')]”’"
+        val ABBREV = setOf("mr", "mrs", "ms", "dr", "st", "vs", "e.g", "i.e", "etc", "no", "jr", "sr", "approx", "fig", "mt")
     }
 }

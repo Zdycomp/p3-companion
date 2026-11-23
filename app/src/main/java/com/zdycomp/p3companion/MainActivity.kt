@@ -170,7 +170,7 @@ class MainActivity : Activity() {
     }
 
     /** Runs [then] once the glasses are connected, connecting first when needed (25 s limit). */
-    private fun whenConnected(what: String, then: () -> Unit) {
+    fun whenConnected(what: String, then: () -> Unit) {
         if (glasses.state == XkGlasses.State.READY) { then(); return }
         val addr = prefs.glassesAddress
         if (addr == null || prefs.userKey == null) { snack("Set up your glasses first to $what."); return }
@@ -373,8 +373,21 @@ class MainActivity : Activity() {
 
     fun show(index: Int) = show(index, animate = true)
 
+    /** The tab or screen on show (TAB_* or SCREEN_*), for voice commands. */
+    val currentScreen: Int get() = current
+
+    /** The Live view screen, for "save a snapshot". */
+    fun liveView(): LiveViewScreen? = screens.getOrNull(SCREEN_LIVE) as? LiveViewScreen
+
+    /** Opens the Assistant tab on one of its sections. */
+    fun openAssistant(section: Int) {
+        (screens[TAB_ASSISTANT] as? AssistantScreen)?.section = section
+        if (current == TAB_ASSISTANT) refresh() else show(TAB_ASSISTANT)
+    }
+
     private fun show(index: Int, animate: Boolean) {
         val switching = index != current
+        if (switching && current >= 0) assistant.clearPendingConfirm()
         val drillIn = switching && index >= TAB_COUNT && current < TAB_COUNT
         val drillOut = switching && current >= TAB_COUNT && index < TAB_COUNT
         if (current in screens.indices) screens[current].onHidden()
@@ -445,6 +458,10 @@ class MainActivity : Activity() {
         glasses.addListener(glassesListener)
         // Tapping the glasses starts a voice question while the app is on screen.
         glasses.onTouch = { onGlassesTapped() }
+        // Offline voice commands, and the system speech dialog when no recognition service works.
+        assistant.commands?.release()
+        assistant.commands = CommandRunner(this)
+        assistant.speech.activityFallback = { tag, deliver -> openSpeechDialog(tag, deliver) }
         if (!AppLock.prompting) { if (AppLock.shouldLock(this, prefs)) lock() else AppLock.onStarted() }
         if (!prefs.keepConnectedInBackground) glasses.resumeIfPaused()
     }
@@ -454,7 +471,13 @@ class MainActivity : Activity() {
         glasses.removeListener(glassesListener)
         glasses.onTouch = null
         // The microphone can't be used from the background, so end any voice turn.
-        if (assistant.phase != Assistant.Phase.IDLE) assistant.stop()
+        // (Not while the system speech dialog is open for this voice turn: it hands back the words.)
+        if (speechDelivery == null) {
+            if (assistant.phase != Assistant.Phase.IDLE) assistant.stop()
+            assistant.commands?.release()
+            assistant.commands = null
+            assistant.speech.activityFallback = null
+        }
         AppLock.onStop(isChangingConfigurations)
         if (!prefs.keepConnectedInBackground && !isChangingConfigurations && !AppLock.expectingReturn && !AppLock.prompting) {
             glasses.pause()
@@ -464,6 +487,8 @@ class MainActivity : Activity() {
 
     private fun onGlassesTapped() {
         if (!prefs.tapToTalk || lockCover != null) return
+        // A tap while a voice memo records stops the memo instead of starting a question.
+        if (recorder.recording) { recorder.stop(); toast("Memo saved."); return }
         val screen = screens[TAB_ASSISTANT] as? AssistantScreen
         if (current != TAB_ASSISTANT || screen?.section != AssistantScreen.SECTION_VOICE) {
             screen?.section = AssistantScreen.SECTION_VOICE
@@ -611,6 +636,35 @@ class MainActivity : Activity() {
             }
             REQ_BACKUP_SAVE -> data?.data?.takeIf { resultCode == RESULT_OK }?.let { writeBackup(it) }
             REQ_BACKUP_OPEN -> data?.data?.takeIf { resultCode == RESULT_OK }?.let { readBackup(it) }
+            REQ_SPEECH -> {
+                val cb = speechDelivery
+                speechDelivery = null
+                val text = data?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+                cb?.invoke(text.takeIf { resultCode == RESULT_OK }, if (resultCode == RESULT_OK) null else "Listening was cancelled.")
+            }
+        }
+    }
+
+    private var speechDelivery: ((String?, String?) -> Unit)? = null
+
+    /** Last resort for voice input: the system speech dialog (Google's "Speak now"). */
+    private fun openSpeechDialog(tag: String, deliver: (String?, String?) -> Unit): Boolean {
+        val i = Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, tag)
+            putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "Speak now")
+            putExtra(android.speech.RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        }
+        return try {
+            AppLock.expectingReturn = true
+            speechDelivery = deliver
+            @Suppress("DEPRECATION")
+            startActivityForResult(i, REQ_SPEECH)
+            true
+        } catch (e: Exception) {
+            AppLock.expectingReturn = false
+            speechDelivery = null
+            false
         }
     }
 
@@ -956,6 +1010,7 @@ class MainActivity : Activity() {
         private const val REQ_IMAGE = 45
         private const val REQ_BACKUP_SAVE = 46
         private const val REQ_BACKUP_OPEN = 47
+        private const val REQ_SPEECH = 48
 
         const val TAB_IMPORT = 0
         const val TAB_GALLERY = 1

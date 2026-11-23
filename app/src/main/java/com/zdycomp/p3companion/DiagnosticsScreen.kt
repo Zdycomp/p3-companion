@@ -71,6 +71,28 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
         ).apply { setPadding(0, ui.dp(4), 0, 0) })
         col.addView(card)
 
+        // 3.1: the live view test and the voice test, each with its own shareable log.
+        val tests = ui.card()
+        tests.addView(ui.heading("Live view and voice", R.drawable.ic_videocam))
+        tests.addView(ui.body(
+            "Test live view tries every live view command your glasses might use and listens for video after each " +
+                "(about 40 seconds), then saves the one that works. Test voice listens once and shows which speech service answered.",
+            muted = true, sizeSp = 13f,
+        ))
+        a.prefs.liveProbeSummary?.let { sum ->
+            tests.addView(ui.text("Last live view test: $sum", Type.BODY_SMALL, ui.s.onSurfaceVariant).apply { setPadding(0, ui.dp(6), 0, 0) })
+        }
+        tests.addView(ui.buttonRow(
+            ui.button("Test live view", Btn.TONAL, R.drawable.ic_videocam, full = false) { liveTest() }.apply { isEnabled = !running },
+            ui.button("Test voice", Btn.TONAL, R.drawable.ic_mic, full = false) { a.withMic { voiceTest() } }.apply { isEnabled = !running },
+        ).apply { setPadding(0, ui.dp(8), 0, 0) })
+        if (testLog != null) {
+            tests.addView(ui.button("Share this test's log", Btn.TEXT, R.drawable.ic_share, full = false) {
+                a.shareText("P3 Companion test log", redact(testLog ?: ""))
+            })
+        }
+        col.addView(tests)
+
         val results = ui.card()
         results.addView(ui.heading("Results", R.drawable.ic_check_circle))
         val box = ui.column()
@@ -195,6 +217,90 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
             running = false
             main.post { if (visible) a.refresh() }
         }.start()
+    }
+
+    @Volatile private var testLog: String? = null
+
+    /** Live view test: every open command in turn; the result is saved and the full log can be shared. */
+    private fun liveTest() {
+        if (running) return
+        val g = a.glasses
+        if (g.state != XkGlasses.State.READY) { a.toast("Connect the glasses first (they must not be busy)."); return }
+        running = true
+        liveReport = null
+        testLog = null
+        val sb = StringBuilder()
+        fun line(s: String) {
+            sb.appendLine(s)
+            val text = sb.toString()
+            liveReport = text
+            if (visible) renderResults(text)
+        }
+        a.refresh()
+        line("Live view test")
+        line("INFO  about 40 seconds; keep the glasses on and connected")
+        g.runLiveProbe(onLine = { l -> line("INFO  $l") }) { res ->
+            line(when {
+                res.path != null -> "PASS  ${res.summary}"
+                res.complete -> "WARN  ${res.summary}"
+                else -> "FAIL  ${res.summary}"
+            })
+            line("Done.")
+            val log = buildString {
+                appendLine("P3 Companion live view test")
+                appendLine("Phone: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE}, app ${a.appVersion()}")
+                appendLine("Glasses: ${g.model ?: "?"}, firmware ${g.firmware ?: "?"}")
+                res.log.forEach { appendLine(it) }
+            }
+            testLog = log
+            report = redact(sb.toString())
+            running = false
+            if (visible) a.refresh()
+        }
+    }
+
+    /** Voice test: one sentence through the normal service chain, with the phone's mic. */
+    private fun voiceTest() {
+        if (running) return
+        val asst = a.assistant
+        if (asst.phase != Assistant.Phase.IDLE) asst.stop()
+        running = true
+        liveReport = null
+        testLog = null
+        val sb = StringBuilder()
+        fun line(s: String) {
+            sb.appendLine(s)
+            val text = sb.toString()
+            liveReport = text
+            if (visible) renderResults(text)
+        }
+        a.refresh()
+        val sp = asst.speech
+        line("Voice test")
+        sp.serviceReport().forEach { line("INFO  $it") }
+        line("INFO  say something now, for example \"what time is it\"")
+        val t0 = SystemClock.elapsedRealtime()
+        fun end(ok: Boolean, what: String) {
+            sp.lastAttempts.forEach { line("INFO  tried $it") }
+            line((if (ok) "PASS  " else "FAIL  ") + what)
+            if (ok) line("INFO  " + (VoiceCommands.match(what.substringAfter("heard \"").substringBeforeLast('"'))?.let { "that is the voice command ${it.id}" }
+                ?: "that would go to the AI"))
+            line("Done.")
+            testLog = buildString {
+                appendLine("P3 Companion voice test")
+                appendLine("Phone: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE}, app ${a.appVersion()}")
+                append(sb)
+            }
+            report = sb.toString()
+            running = false
+            if (visible) a.refresh()
+        }
+        sp.listen(
+            Languages.byName(a.prefs.replyLanguage).tag,
+            onPartial = {},
+            onResult = { text -> end(true, "heard \"$text\" in ${SystemClock.elapsedRealtime() - t0} ms using ${sp.lastService ?: "?"}") },
+            onError = { msg, code -> end(false, "$msg (${Speech.errorName(code)}${sp.lastErrorDetail?.let { ", $it" } ?: ""})") },
+        )
     }
 
     /** Learns whether these glasses really need the key: 1003, 1001 and 57B0 without 102E. */
@@ -342,7 +448,15 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
         }
         line("INFO  link health: ${g.parserDropped} stray bytes, ${g.parserBadCrc} bad checksums, largest media frame ${g.maxMediaFrame} B")
         synchronized(g.linkLosses) { g.linkLosses.toList() }.takeLast(5).forEach { line("INFO  link lost $it") }
-        line("INFO  live view ${g.preview.name.lowercase()}, ${g.videoFrames} video frames this session")
+        line("INFO  live view ${g.preview.name.lowercase()}, ${g.videoFrames} video frames this session, ${g.mediaFramesSeen} media frames in all")
+        if (g.previewInfo.isNotEmpty()) line("INFO  preview info from the glasses: " + g.previewInfo.entries.joinToString(", ") { "${it.key}=${it.value}" })
+        g.previewState57A0?.let { line("INFO  video preview state (57A0): $it") }
+        val lp = p.livePath
+        line(when {
+            lp == null -> "INFO  live view test: not run yet (Test live view above)"
+            lp == XkGlasses.LIVE_NONE -> "WARN  live view test: no video over Bluetooth; Live view uses snapshot view"
+            else -> "PASS  live view test: video works with command $lp"
+        })
 
         // Audio
         val am = a.getSystemService(AudioManager::class.java)
@@ -351,7 +465,13 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
         val a2dpOut = am?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)?.any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP } == true
         line("INFO  Bluetooth media audio output: ${if (a2dpOut) "yes" else "no"}")
         val sr = SpeechRecognizer.isRecognitionAvailable(a)
-        line("${if (sr) "PASS" else "WARN"}  speech recognition ${if (sr) "available" else "not available"}")
+        line("${if (sr) "PASS" else "WARN"}  speech recognition ${if (sr) "available" else "not available"} (phone default)")
+        a.assistant.speech.serviceReport().forEach { line("INFO  $it") }
+        a.assistant.speech.lastErrorDetail?.let { line("WARN  last listening problem: $it") }
+        line("INFO  answers speak through: " + if (p.speakThrough == Prefs.SpeakThrough.CALL) "call audio" else "glasses audio (fast)")
+        line("INFO  voice commands: " + if (p.voiceCommands) "on (${VoiceCommands.rules.size})" else "off")
+        a.assistant.route.lastReport?.let { line("INFO  last mic link: $it") }
+        a.assistant.lastTiming?.let { line("INFO  last voice timing: $it") }
         line("Done.")
     }
 

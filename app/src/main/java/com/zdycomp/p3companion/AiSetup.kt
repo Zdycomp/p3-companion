@@ -106,6 +106,22 @@ object AiSetup {
             "When the glasses are connected as your phone's Bluetooth headset",
             p.useGlassesAudio, R.drawable.ic_mic,
         ) { p.useGlassesAudio = it })
+        g.addView(padded(a, ui.choiceRow("Speak through", listOf("Glasses audio (fast)", "Call audio"),
+            if (p.speakThrough == Prefs.SpeakThrough.CALL) 1 else 0) {
+            p.speakThrough = if (it == 1) Prefs.SpeakThrough.CALL else Prefs.SpeakThrough.FAST
+        }))
+        g.addView(ui.text(
+            "Glasses audio plays answers on the glasses' media sound right away; the call link is only used for the mic. " +
+                "Call audio keeps the hands-free call link open for the whole conversation (slower to start, sounds like a phone call).",
+            Type.BODY_SMALL, ui.s.onSurfaceVariant,
+        ).apply { setPadding(ui.dp(16), 0, ui.dp(16), ui.dp(8)) })
+        g.addView(ui.switchRow(
+            "Voice commands",
+            "\"Take a picture\", \"battery\", \"set a timer for 5 minutes\"… are done on the phone before asking the AI",
+            p.voiceCommands, R.drawable.ic_mic,
+        ) { p.voiceCommands = it })
+        g.addView(ui.listRow("What can I say?", "${VoiceCommands.rules.size} voice commands", R.drawable.ic_info,
+            ui.icon(R.drawable.ic_chevron_right, ui.s.onSurfaceVariant)) { showCommands(a) })
         g.addView(ui.switchRow("Speak voice chat answers", "Off shows the answer without reading it aloud", p.speakChatAnswers, R.drawable.ic_volume_up) {
             p.speakChatAnswers = it
         })
@@ -140,6 +156,23 @@ object AiSetup {
         g.addView(ui.listRow("Quick photo questions", "${p.photoPresets.size} questions · edit, reorder or add your own", R.drawable.ic_edit,
             ui.icon(R.drawable.ic_chevron_right, ui.s.onSurfaceVariant)) { editPresets(a) })
         return g
+    }
+
+    /** The full list of voice commands, grouped. */
+    fun showCommands(a: MainActivity) {
+        val ui = a.ui
+        val body = ui.column()
+        VoiceCommands.rules.groupBy { it.group }.forEach { (group, list) ->
+            body.addView(ui.text(group, Type.TITLE_SMALL, ui.s.primary).apply { setPadding(0, ui.dp(12), 0, ui.dp(4)) })
+            body.addView(ui.text(list.joinToString("\n") { "• \"${it.helpLabel}\"" + if (it.needsConfirm) " (asks first)" else "" },
+                Type.BODY_MEDIUM, ui.s.onSurface))
+        }
+        body.addView(ui.text(
+            "Say them after a tap on the glasses or the mic button. Anything else goes to the AI as before. " +
+                "Commands that delete something ask you to say yes first.",
+            Type.BODY_SMALL, ui.s.onSurfaceVariant,
+        ).apply { setPadding(0, ui.dp(12), 0, 0) })
+        ui.dialog("What can I say?", view = body, confirm = "Close") { true }
     }
 
     private fun padded(a: MainActivity, v: LinearLayout): LinearLayout = v.apply { setPadding(a.ui.dp(16), paddingTop, a.ui.dp(16), paddingBottom) }

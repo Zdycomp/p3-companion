@@ -1,5 +1,45 @@
 # Changelog
 
+## 3.1.0 (versionCode 4)
+
+Connect, pairing, sign-in and photo transfer are unchanged. All changes to `XkGlasses.kt` are additive (see
+`docs/REGRESSION-CHECKLIST.md` §8).
+
+**Live view**
+- Live view test (`XkGlasses.runLiveProbe`): reads the 1001 `preview_*` fields, `57A0` (video-preview state), `2410` and
+  `2420`, then tries `5720` action 3 and 2, `5710` action 3 and 2, `102A` and `102C` with `[01]`, listens 5 s after each
+  for `0x4A` media (video elements, divideType 5), logs every reply's type and status byte in hex, and closes each with
+  `[00]`. The working command is saved (`live_path`) and used by the live view from then on; "none" when no video came.
+- Runs by itself when the live view shows no video within 6 s, and from Diagnostics › Test live view (Share sends the
+  full log as text, key and address masked).
+- Snapshot view when the glasses send no video over Bluetooth: takes a photo, shows it, takes the next (never while the
+  glasses record, the voice recorder runs or an import runs). Snapshots are deleted after they're shown unless kept.
+- The screen says which mode is active (live video, testing, snapshot view) and why.
+- `57A0` pushes are recorded (the SDK's preview-state node); `takePhoto(onDone, announce)` per R-C5.
+
+**Speaking (delay)**
+- One TextToSpeech engine started with the app; language, rate, pitch and audio usage are only set when they change.
+- AI answers are streamed (Gemini `streamGenerateContent?alt=sse`, Claude `stream: true`, read with `HttpURLConnection`
+  and an SSE parser) and spoken sentence by sentence; plain requests remain the fallback.
+- Settings › Speak through: Glasses audio (fast, default) plays answers on the media stream and lets go of the call link
+  right after listening; Call audio keeps the link up for the whole session (10 s after the last turn).
+- Timing lines in the connection log: recognised words → first text → first audio.
+
+**Listening (voice service)**
+- Recognition services are enumerated (`RecognitionService` intent) and tried in order: the one that worked last,
+  Google (`googlequicksearchbox`, `tts`, `as`), the on-phone recognizer, others such as Samsung's, then the default.
+  Service-side errors (client, server, busy, permissions, language, network, no answer in 4 s) move to the next one;
+  last resort is the system speech dialog (`ACTION_RECOGNIZE_SPEECH`).
+- The glasses' mic link is waited for (SCO broadcasts or communication-device change, up to 1.5 s), then the phone's
+  mic is used; an audio error on the glasses' mic retries once with the phone's mic.
+- The service used and the exact error (name, code, service) show in the Assistant and Diagnostics; Diagnostics › Test voice.
+
+**Voice commands**: 47 offline commands plus help (`VoiceCommands.kt`, pure Kotlin; `CommandRunner.kt`), checked before
+the AI, with a spoken yes for deleting a photo and clearing the chat. Settings › Voice commands and What can I say.
+
+**Tests**: 104 JVM tests (82 before): the full voice-command table from `docs/VOICE-COMMANDS.md`, streaming and SSE
+parsing, sentence splitting, and the new settings.
+
 ## 3.0.0 (versionCode 3)
 
 The connection path (pairing, sign-in, link, photo transfer, live view) is unchanged from 2.0.0.
