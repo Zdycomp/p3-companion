@@ -78,8 +78,16 @@ class AudioRoute private constructor(context: Context, private val prefs: Prefs)
         waiting += onReady
         if (connecting) return
         if (!willUseGlasses()) { finish(false); return }
+        val glasses = XkGlasses.get(app, prefs)
+        // 3.3: never during a connect, a photo transfer or the live view test, nor in the first 3 s of a link.
+        glasses.audioBlocker()?.let { why ->
+            lastReport = "glasses mic not used: $why; using the phone's mic"
+            glasses.addLog("Voice: $lastReport")
+            finish(false)
+            return
+        }
         // The glasses can't stream live video while their mic link is up: close the live view first.
-        XkGlasses.get(app, prefs).micWillStart()
+        glasses.micWillStart()
         connecting = true
         savedMode = am.mode
         val gen = ++generation

@@ -146,6 +146,16 @@ class VideoAu(val annexB: ByteArray, val arrivalNs: Long) {
             return VideoAu(body, arrivalNs).takeIf { it.picture || it.sps != null }
         }
 
+        /**
+         * 3.3: H.264 behind an unknown header (another element type, a 2B or unknown-head frame):
+         * the first start code within the first 64 bytes, if what follows holds a picture or an SPS.
+         */
+        fun scan(e: ByteArray, arrivalNs: Long): VideoAu? {
+            if (e.size < 8 || e.size > 2 * 1024 * 1024) return null
+            val at = findStart(e, 0)?.takeIf { it <= 64 } ?: return null
+            return VideoAu(e.copyOfRange(at, e.size), arrivalNs).takeIf { it.picture || it.sps != null }
+        }
+
         private fun findStart(b: ByteArray, from: Int): Int? {
             var i = from
             while (i + 3 < b.size) {

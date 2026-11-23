@@ -1,5 +1,58 @@
 # Changelog
 
+## 3.3.0 (versionCode 6)
+
+From the owner's Diagnostics log of 3.1.0 (`docs/LOG-2026-11-23.txt`, moto g 2025 on Android 15, E13C-5 firmware 1.0.0).
+3.2.0 is reserved for the server work. Connect order, pairing, the link attempts, framing defaults, photos, battery,
+reconnect, gallery, import and all 48 voice commands are unchanged.
+
+**Reply matching (root cause of every "← X 00" followed by "✕ X: no answer")**
+- The glasses answer a successful execute (57B0, 7500, 5720 action 3, 102E…) with a device-numbered frame: payload
+  action `0x8004` and the glasses' own counter in the request-id field (captured: 57A0 executed with id `0xB3` answered
+  `1E 00 … 04 80 … 00 01 00 00`). Only read and error answers echo our id (action `0x8064`). 3.1 accepted another id
+  only with action `0x8002`, so these answers were taken for pushes and the request timed out (2-4 s each); the
+  glasses' counter colliding with a timed-out id also produced "Ignored a late 7500 reply".
+- `Xk.matchReply`: same node and our id → exact; device-numbered (0x8004) → the answer, whatever number it carries;
+  an echoed id of a request on the same node that timed out in the last 15 s → late; anything else for the node →
+  the answer. The first three node-matched answers per node are logged with id and action. State nodes
+  (5710, 5711, 57A0, 5750, 5790) still go through the push handling when they answer.
+- 102E's "02 00" now completes sign-in at once; 7110 follows no sooner than 300 ms after 102E was sent (the
+  validated harness used 150 ms). Order unchanged, 102E still never blocks a connect.
+- `Xk.ackFor`: the link ack for every device control frame (replies and pushes alike) and the media ack on last
+  fragments, byte-identical to 3.1.
+
+**Live view**
+- Receive sniffer while live view is open or tested: counts every byte read, bytes inside frames and skipped runs;
+  logs (rate-limited, first 48 bytes) each skipped run with head/cmd/divide/length, every 0x4A frame outside a photo
+  download, 2B frames and frames with an unknown head. The parser accepts an unknown head or small unknown cmd only
+  then, and only with a matching CRC and a length under 16 KB.
+- Any media element while preview is wanted goes to the live view: whole JPEG pictures (shown on the Live view
+  screen) and H.264 behind an unknown header (`VideoAu.scan`).
+- Probe: 102A (it started the glasses' mic) and 102C dropped; a refused command is skipped at once; after an accepted
+  open it waits for the 5710 push, on 02 (busy) waits up to 4 s and opens once more, listens 10 s when 5710 = 01,
+  then tries 5711 [00]/[01]/read, 5750 read and 7300 [01] (released with 7500), logging each reply and what arrived.
+  Touches are ignored during the test. With Nearby Wi-Fi devices allowed (asked when the test starts, never for
+  location), it scans for an access point or Wi-Fi Direct peer named like the glasses (name, model, last 4 of the
+  address, P3/E13C/XK/Shenju) and logs matches only; it doesn't connect.
+- Opening live view also waits for 5710: busy → wait and retry once. A pull the test found useful is repeated.
+- A "none" saved by the 3.1 test is tested again (`live_probe_version`). Snapshot view asks for the next picture at
+  once (no timeout stalls left), 1 s after a failure.
+
+**Voice**
+- Android 13+: the app records the mic itself (`MicCapture`, 16 kHz mono PCM through a pipe in
+  `EXTRA_AUDIO_SOURCE`): the glasses' SCO input via `setPreferredDevice`, measured for 400 ms, and the phone's mic in
+  the same stream when it's silent (below -60 dBFS). No match, speech timeout or an audio error retries once with
+  the phone's mic and the recognizer's own recording. The chosen mic and its level are logged.
+- Call audio (SCO) never starts while connecting, during a photo transfer or the live view test, or in the first
+  3 s of a link; a glasses tap waits for that.
+- Speaking: with the call audio up after a question, the answer plays on it at once (no switch to media audio, no
+  lead-in), then the call audio is let go (Call audio mode keeps it 10 s as before). A command that starts a photo
+  transfer lets the call audio go first.
+
+**Tests**: 125 JVM tests (104 before): reply matching on captured and constructed bytes, push acks, sniffer skip
+reports and lenient parsing, JPEG/H.264 detection, mic choice and levels, the audio gate and tap delay, the phone-mic
+retry rule and Wi-Fi name matching.
+
 ## 3.1.0 (versionCode 4)
 
 Connect, pairing, sign-in and photo transfer are unchanged. All changes to `XkGlasses.kt` are additive (see

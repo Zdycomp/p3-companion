@@ -238,8 +238,8 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
         }
         a.refresh()
         line("Live view test")
-        line("INFO  about 40 seconds; keep the glasses on and connected")
-        g.runLiveProbe(onLine = { l -> line("INFO  $l") }) { res ->
+        line("INFO  about a minute; keep the glasses on and connected (taps on the glasses are ignored meanwhile)")
+        a.withNearbyWifi { wifi -> g.runLiveProbe(onLine = { l -> line("INFO  $l") }, wifi = wifi) { res ->
             line(when {
                 res.path != null -> "PASS  ${res.summary}"
                 res.complete -> "WARN  ${res.summary}"
@@ -256,7 +256,7 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
             report = redact(sb.toString())
             running = false
             if (visible) a.refresh()
-        }
+        } }
     }
 
     /** Voice test: one sentence through the normal service chain, with the phone's mic. */

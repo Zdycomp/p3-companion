@@ -337,6 +337,10 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
     private var mode = Mode.VIDEO
     private var autoProbed = false
     private var videoSeen = false
+    /** 3.3: small JPEG live pictures shown (some firmware sends the preview as pictures). */
+    @Volatile private var jpegShown = 0L
+    @Volatile private var jpegDecoding = false
+    private var lastJpegShown = 0L
 
     // Snapshot view
     private var snapRunning = false
@@ -489,6 +493,8 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
             override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
         }
         g.videoSink = { p.offer(it) }
+        jpegShown = 0
+        g.jpegSink = { bytes -> showJpegFrame(bytes) }
         g.previewStateSink = { open ->
             if (!open && active && mode == Mode.VIDEO) {
                 p.stopRecording("The glasses stopped the video; the recording was saved.")
@@ -519,9 +525,31 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         return ui.screen("Live view", col, back = { a.goBack() })
     }
 
-    /** Video when it can work on these glasses, otherwise straight to Snapshot view. */
+    /** Video when it can work on these glasses, otherwise straight to Snapshot view (a "none" from an older test is tested again). */
     private fun start() {
-        if (a.prefs.livePath == XkGlasses.LIVE_NONE) startSnapshots() else open()
+        val p = a.prefs
+        if (p.livePath == XkGlasses.LIVE_NONE && p.liveProbeVersion >= XkGlasses.PROBE_VERSION) startSnapshots() else open()
+    }
+
+    /** A whole JPEG live picture from the glasses (reader thread): decoded off the main thread, extra ones dropped. */
+    private fun showJpegFrame(bytes: ByteArray) {
+        if (jpegDecoding || !active) return
+        jpegDecoding = true
+        Thread {
+            val bmp = runCatching { android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }.getOrNull()
+            a.runOnUiThread {
+                jpegDecoding = false
+                if (bmp == null) return@runOnUiThread
+                if (!active || mode == Mode.SNAPSHOT) { bmp.recycle(); return@runOnUiThread }
+                val old = snapBitmap
+                snapImage?.setImageBitmap(bmp)
+                snapImage?.visibility = View.VISIBLE
+                snapBitmap = bmp
+                old?.recycle()
+                jpegShown++
+                statusBox?.visibility = View.GONE
+            }
+        }.start()
     }
 
     private fun showStatus(text: String, spinning: Boolean) {
@@ -568,8 +596,9 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
             Mode.TESTING -> {
                 card.addView(ui.statusChip("Mode: testing live view", Tone.BUSY, pulse = true))
                 card.addView(ui.body(
-                    "No video arrived, so the app is trying each live view command these glasses might use, listening about " +
-                        "5 seconds for each and closing it again. This takes about 40 seconds.",
+                    "No video arrived, so the app is trying each live view command these glasses might use, listening up to " +
+                        "10 seconds after each one the glasses accept, asking for frames and closing it again. This takes about a minute; " +
+                        "taps on the glasses are ignored meanwhile.",
                     muted = true, sizeSp = 13f,
                 ).apply { setPadding(0, ui.dp(8), 0, 0) })
                 val line = ui.mono("Starting…").apply { setPadding(0, ui.dp(8), 0, 0); maxLines = 3 }
@@ -586,6 +615,10 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
                     muted = true, sizeSp = 13f,
                 ).apply { setPadding(0, ui.dp(8), 0, 0) })
                 snapNote?.let { card.addView(ui.text(it, Type.BODY_SMALL, s.onSurfaceVariant).apply { setPadding(0, ui.dp(6), 0, 0) }) }
+                a.glasses.wifiFound.takeIf { it.isNotEmpty() }?.let { w ->
+                    card.addView(ui.text("On Wi-Fi the glasses show up as ${w.joinToString(", ")}. The app doesn't use that yet.",
+                        Type.BODY_SMALL, s.onSurfaceVariant).apply { setPadding(0, ui.dp(6), 0, 0) })
+                }
                 card.addView(ui.buttonRow(
                     if (snapRunning) ui.button("Stop", Btn.TONAL, R.drawable.ic_stop, full = false) { stopSnapshots(); renderMode() }
                     else ui.button("Start", Btn.FILLED, R.drawable.ic_play, full = false) { startSnapshots() },
@@ -617,15 +650,17 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
             else "Testing which live view command your glasses answer…",
             spinning = true,
         )
-        g.runLiveProbe(onLine = { line -> if (active && mode == Mode.TESTING) probeLine?.text = line }) { res ->
-            if (!active) return@runLiveProbe
-            when {
-                res.path != null -> { a.toast("Live video works with command ${res.path}."); open() }
-                res.complete -> startSnapshots()
-                else -> {
-                    mode = Mode.VIDEO
-                    renderMode()
-                    showStatus(res.summary, spinning = false)
+        a.withNearbyWifi { wifi ->
+            g.runLiveProbe(onLine = { line -> if (active && mode == Mode.TESTING) probeLine?.text = line }, wifi = wifi) { res ->
+                if (!active) return@runLiveProbe
+                when {
+                    res.path != null -> { a.toast("Live video works with command ${res.path}."); open() }
+                    res.complete -> startSnapshots()
+                    else -> {
+                        mode = Mode.VIDEO
+                        renderMode()
+                        showStatus(res.summary, spinning = false)
+                    }
                 }
             }
         }
@@ -688,14 +723,15 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
             if (uri == null) {
                 snapNote = "That picture didn't arrive: ${a.glasses.lastError ?: "no answer"}. Trying again…"
                 renderMode()
-                main.postDelayed({ nextSnap(token) }, 2_000)
+                main.postDelayed({ nextSnap(token) }, 1_000)
                 return@takePhoto
             }
             val now = SystemClock.elapsedRealtime()
             snapEveryMs = if (snapLastAt == 0L) now - startedAt else now - snapLastAt
             snapLastAt = now
             showSnapshot(uri)
-            main.postDelayed({ nextSnap(token) }, 300)
+            // 3.3: replies no longer time out, so the next picture can be asked for at once.
+            main.post { nextSnap(token) }
         }, announce = false)
     }
 
@@ -747,8 +783,15 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         val fps = shownNow - lastShown
         lastShown = shownNow
         val (w, h) = p.size
-        stats?.text = if (mode == Mode.TESTING) "Testing…" else "${w}×$h · $fps fps" + if (p.dropped > 0) " · ${p.dropped} dropped" else ""
-        if (p.received > 0) {
+        val jpegs = jpegShown
+        val jfps = jpegs - lastJpegShown
+        lastJpegShown = jpegs
+        stats?.text = when {
+            mode == Mode.TESTING -> "Testing…"
+            jpegs > 0 && p.received == 0L -> "Pictures · $jfps fps"
+            else -> "${w}×$h · $fps fps" + if (p.dropped > 0) " · ${p.dropped} dropped" else ""
+        }
+        if (p.received > 0 || jpegs > 0) {
             statusBox?.visibility = View.GONE
             if (!videoSeen) { videoSeen = true; if (mode == Mode.VIDEO) renderMode() }
         } else if (mode == Mode.VIDEO && openedAt != 0L && !autoProbed && SystemClock.elapsedRealtime() - openedAt > AUTO_PROBE_MS &&
@@ -792,7 +835,9 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
     /** Saves what's on screen (live video), or keeps the current snapshot. Also used by "save a snapshot". */
     internal fun snapshot() {
         if (mode == Mode.SNAPSHOT) { keepCurrent(); return }
-        val bmp = texture?.bitmap ?: run { a.toast("No picture yet."); return }
+        val jpegOnly = jpegShown > 0 && (pipeline?.received ?: 0L) == 0L
+        val bmp = (if (jpegOnly) snapBitmap?.let { it.copy(Bitmap.Config.ARGB_8888, false) } else texture?.bitmap)
+            ?: run { a.toast("No picture yet."); return }
         flashView?.let { f ->
             if (!a.ui.reduceMotion) {
                 f.alpha = 0f
@@ -854,6 +899,7 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         snapLastAt = 0L
         val g = a.glasses
         g.videoSink = null
+        g.jpegSink = null
         g.previewStateSink = null
         pipeline?.close()
         pipeline = null

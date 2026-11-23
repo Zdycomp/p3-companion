@@ -1,0 +1,90 @@
+Owner's Diagnostics log from P3 Companion 3.1.0, Nov 23 2026.
+Phone: motorola moto g - 2025 (Android 15). Glasses: NovaSight P3_D6BE, model E13C-5, firmware 1.0.0.
+Excerpts, verbatim lines.
+
+--- Live view probe (run 1) ---
+03:16:34  Live test: 1001 preview fields at sign-in: preview_width=160, preview_height=120
+03:16:34  → 57A0
+03:16:34  ← 57A0 03 (the glasses don't accept that command from the app)
+03:16:34  → 2410
+03:16:34  ← 2410 65 6E 00 00 00 00 65 6E 00 00 00 00 7A 68 2D 63 6E 00
+03:16:34  → 2420
+03:16:34  ← 2420 65 6E 00 00 00 00
+03:16:34  → 5720 01
+03:16:34  ← 5720 00
+03:16:34  ← 5710 02
+03:16:37  ✕ 5720: no answer in 3000 ms
+03:16:37  Live test: 5720/3 open [01]: no answer
+03:16:42  Live test:   heard for 5 s: 0 media frame(s), 0 video picture(s), 0 divideType-5 frame(s)
+03:16:42  → 5720 00
+03:16:42  ← 5720 00
+03:16:42  ← 5710 02
+03:16:44  ✕ 5720: no answer in 2000 ms
+03:16:45  → 5720 01            (action 2)
+03:16:45  ← 5720 03 (the glasses don't accept that command from the app)
+03:16:50  → 5710 01
+03:16:50  ← 5710 04 (the glasses don't support this)
+03:17:02  → 102A 01
+03:17:03  ← C107
+03:17:03  Closing live view: the mic is starting
+03:17:05  ✕ 102A: no answer in 3000 ms
+03:17:13  → 102C 01
+03:17:13  ← 102C 05 (the glasses rejected the data)
+03:17:19  Live test: The glasses sent no video over Bluetooth. Snapshot view will be used instead.
+03:17:24  Voice: ERROR_NO_MATCH (7) from Speech Recognition and Synthesis
+
+--- Live view probe (run 2) ---
+03:23:18  → 5720 01
+03:23:18  ← 5720 00
+03:23:18  ← 5710 01          <-- glasses report preview state 1 (ON) this time
+03:23:21  ✕ 5720: no answer in 3000 ms
+03:23:26  Live test:   heard for 5 s: 0 media frame(s), 0 video picture(s), 0 divideType-5 frame(s)
+03:23:26  → 5720 00
+03:23:26  ← 5720 00
+03:23:26  ← 5710 00          <-- preview OFF after close
+03:23:28  ✕ 5720: no answer in 2000 ms
+(rest identical to run 1)
+
+--- Voice / speech ---
+03:19:05  Voice timing: command glasses.connect: first audio 1545 ms after the words were recognised, through media audio (the glasses when they're the phone's audio device)
+03:22:14  Voice: ERROR_NO_MATCH (7) from Speech Recognition and Synthesis
+
+--- Link drop right after a touch (C107) ---
+03:22:06  ← C107
+03:22:06  Link lost: read failed (bt socket closed, read return: -1)
+03:22:09  Opening link ... Link open (sdp-secure) in 2834 ms, packet sizes 0/0
+03:22:12  → 0001 / ← 0001 / → 0002 / ← 0002
+03:22:13  → 102E
+03:22:13  ← 102E 02 00
+03:22:13  ← 2B frame (7 B)
+03:22:13  ← 1003 00 4D 00 00 00 00 00 00 00 00
+03:22:13  Link lost: read failed (bt socket closed, read return: -1)
+03:22:24  Link sdp-secure failed in 503 ms; Link open (ch8-secure) in 79 ms
+03:22:27  → 102E
+03:22:27  ← 102E 02 00
+03:22:29  ✕ 102E: no answer in 2500 ms
+03:22:29  → 7110
+03:22:29  ← 7110 10 37 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 64 00 02 08 0C
+03:22:29  Signed in, battery 77%
+
+--- Photos (work, but every request with a 00 reply still times out) ---
+05:31:15  ← C107
+05:31:21  ← 57B1 01
+05:31:23  ← 7320 05
+05:31:23  ← 7300 00   (x5)
+05:31:24  Photo 54 KB in 5 parts, 1153 ms, 48 KB/s, 0 retries
+05:31:24  → 7500
+05:31:24  ← 7500 00
+05:31:26  ✕ 7500: no answer in 2000 ms
+05:32:44  → 57B0
+05:32:44  ← 57B0 00
+05:32:47  ← 57B1 01
+05:32:48  ✕ 57B0: no answer in 4000 ms
+05:32:48  ← 7320 06
+05:32:50  Photo 73 KB in 6 parts, 1142 ms, 65 KB/s, 0 retries
+06:04:20  Ignored a late 7300 reply
+06:04:29  ← 7500 00
+06:04:29  Ignored a late 7500 reply
+06:04:31  ✕ 7500: no answer in 2000 ms
+
+--- Battery: pushes every ~6 min, 1003 00 4D = 77% (data[1]) ---

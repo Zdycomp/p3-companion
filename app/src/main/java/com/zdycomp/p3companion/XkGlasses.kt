@@ -101,6 +101,24 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     @Volatile var probing = false; private set
     /** The probe path the open live view used ("5710/3"…), or null for the standard 5720 open. */
     @Volatile private var openedWith: String? = null
+    // Receive sniffer (3.3): every byte read, and what the parser skipped or couldn't route.
+    /** Every byte read from the socket since the app started. */
+    @Volatile var rxBytes = 0L; private set
+    @Volatile var skippedRuns = 0L; private set
+    @Volatile var skippedBytes = 0L; private set
+    /** Frames with a head other than 30/4A/2B (only accepted while the sniffer runs). */
+    @Volatile var otherFrames = 0L; private set
+    /** Whole JPEG pictures that arrived as live view frames (a small preview, 160×120 on some firmware). */
+    @Volatile var jpegFrames = 0L; private set
+    /** Gets each JPEG live view frame (reader thread; must not block). */
+    @Volatile var jpegSink: ((ByteArray) -> Unit)? = null
+    @Volatile private var sniffing = false
+    private var sniffLines = 0
+    private var sniffLastAt = 0L
+    /** What the last Wi-Fi check during the live view test found (names only). */
+    @Volatile var wifiFound: List<String> = emptyList(); private set
+    /** When the link last became ready after a connect (elapsedRealtime), for the audio gate. */
+    @Volatile var readySince = 0L; private set
     /** Snapshot view takes photos without the shutter sound, notification or "last photo" update. */
     @Volatile private var quietCapture = false
 
@@ -123,7 +141,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     // ---------------- link (one per connection) ----------------
 
     private inner class Link(val socket: BluetoothSocket, val session: Int) {
-        val parser = Xk.Parser()
+        val parser = Xk.Parser().apply { onSkip = ::onSkipped; lenient = sniffing }
         val demux = Xk.MediaDemux(::onMediaElement, ::onMediaBroken)
         private val outQ = LinkedBlockingQueue<ByteArray>(512)
         @Volatile var lastRxAt = SystemClock.elapsedRealtime()
@@ -173,6 +191,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                     val n = ins.read(buf)
                     if (n < 0) { close("the glasses closed the link"); break }
                     if (n == 0) continue
+                    rxBytes += n
                     lastRxAt = SystemClock.elapsedRealtime()
                     parser.feed(buf, n).forEach { f -> synchronized(this) { handle(this, f) } }
                 }
@@ -222,7 +241,10 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
 
     private val pending = ConcurrentHashMap<String, Pending>()
     private val pushWaiters = ConcurrentHashMap<String, LinkedBlockingQueue<Xk.Frame>>()
-    private val staleIds = Collections.newSetFromMap(ConcurrentHashMap<Int, Boolean>())
+    /** Request ids that timed out: id → node and when, so only a late echo for the same node is dropped. */
+    private val staleIds = ConcurrentHashMap<Int, Pair<String, Long>>()
+    /** How many node-matched replies were logged per node this session (the log keeps the first few). */
+    private val byNodeLogged = ConcurrentHashMap<String, Int>()
     private val linkDown = Xk.Frame(0, 0, 0, 0, ByteArray(0))
     private val mediaDone = LinkedBlockingQueue<Boolean>()
 
@@ -240,7 +262,11 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
 
     private fun send(f: Xk.Frame) = (link ?: throw LinkException("Not connected.")).send(f.encode())
 
-    /** Sends a request and waits for its reply, matched by request id (falling back to the node). */
+    /**
+     * Sends a request and waits for its reply. 3.3: any reply for the node completes it (see
+     * [Xk.matchReply]): the glasses answer a successful execute with a device-numbered frame
+     * (action 0x8004, their own counter in the id field), and only error and read replies echo our id.
+     */
     private fun request(
         node: String, action: Int, data: ByteArray, timeoutMs: Long,
         logData: Boolean = true, rid: Int = nextRequestId(),
@@ -255,7 +281,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
             if (f === linkDown) throw LinkException("Lost the connection to the glasses.")
             if (f == null) {
                 if (staleIds.size > 64) staleIds.clear()
-                staleIds += rid
+                staleIds[rid] = node to SystemClock.elapsedRealtime()
                 addLog("✕ $node: no answer in $timeoutMs ms")
             }
             return f
@@ -324,6 +350,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         signedIn = false
         keylessReport = emptyList()
         infoRead = false
+        byNodeLogged.clear()
         state = State.CONNECTING
         val mine = session.incrementAndGet()
         main.removeCallbacks(retry)
@@ -338,6 +365,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                 if (key != null) signInWith(key) else probeWithoutKey(testPhoto)
                 if (mine != session.get()) { dropLink("cancelled"); return@execute }
                 state = State.READY
+                readySince = SystemClock.elapsedRealtime()
                 lastMessage = if (signedIn) "Connected." else "Connected without your key. " + keylessSummary()
                 attempt = 0
                 main.removeCallbacks(retry)
@@ -556,7 +584,12 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
      * session is then proved with the normal setup reads; an error-code answer means the key was refused.
      */
     private fun signInWith(userKey: String) {
+        val sentAt = SystemClock.elapsedRealtime()
         val r = request("102E", Xk.ACTION_EXECUTE, Xk.userBindData(userKey), 2_500, logData = false)
+        // 3.3: the 102E answer (device-numbered, "02 00") now completes the request at once instead of
+        // after 2.5 s; keep at least the validated setup spacing before 7110 so the glasses can settle.
+        val gap = BIND_SETTLE_MS - (SystemClock.elapsedRealtime() - sentAt)
+        if (r != null && gap > 0) Thread.sleep(gap)
         val outcome = Xk.bindOutcome(r)
         lastBind = "102E reply: " + (r?.let { "type ${it.replyType}, code ${it.errCode ?: "-"}" } ?: "none") + " → $outcome"
         addLog(lastBind!!)
@@ -835,11 +868,13 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                     burstOpen = f.fragment == 1 || f.fragment == 2
                     // The glasses wait for this on every last fragment, so it goes first, whatever happens next.
                     if (f.fragment == 3) l.trySend(Xk.mediaAck(nextOrder()).encode())
+                    if (sniffing && assembler == null) sniffLog("0x4A frame divide %04X, %d B: %s".format(f.divide, f.payload.size, hex(f.payload.take(24).toByteArray())))
                     l.demux.feed(f)
                 }
                 Xk.HEAD_CONTROL -> {
                     if (f.isAck || !f.fromDevice) return
-                    l.trySend(Xk.ack(nextOrder(), f.order).encode())
+                    // Replies and pushes alike (5710, 5711, 57A0, 5750, 7320, C107…): ack with the frame's own order.
+                    Xk.ackFor(f, nextOrder())?.let { l.trySend(it.encode()) }
                     val key = (f.order shl 16) or (f.requestId and 0xFFFF)
                     val now = SystemClock.elapsedRealtime()
                     if (key == lastRxKey && now - lastRxKeyAt < 1_500) return // a repeat of the frame just handled
@@ -850,27 +885,48 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                         (f.errCode?.let { " (${Xk.errorText(it)})" } ?: ""))
                     onControl(f, node)
                 }
-                Xk.HEAD_CUSTOM -> addLog("← 2B frame (${f.payload.size} B)")
+                Xk.HEAD_CUSTOM -> {
+                    addLog("← 2B frame (${f.payload.size} B)")
+                    if (sniffing) sniffLog("2B " + Xk.describeRaw(f.payload))
+                    if (previewWanted) liveElement(f.payload, "a 2B frame")
+                }
+                else -> {
+                    otherFrames++
+                    sniffLog("frame with head %02X cmd %04X divide %04X, %d B: %s".format(
+                        f.head, f.cmd, f.divide, f.payload.size, hex(f.payload.take(24).toByteArray())))
+                    if (previewWanted) liveElement(f.payload, "a head-%02X frame".format(f.head))
+                }
             }
         } catch (e: Exception) {
             addLog("Bad frame: ${e.message}")
         }
     }
 
+    /** A state node the glasses also push: a non-error frame on it still goes through the push handling. */
+    private fun alsoPush(f: Xk.Frame, node: String) = node in PUSH_NODES && f.replyType != Xk.FMT_ERRCODE
+
+    /** The node of a request that timed out in the last 15 s with this id, or null. */
+    private fun staleNodeFor(rid: Int): String? {
+        val e = staleIds[rid] ?: return null
+        if (SystemClock.elapsedRealtime() - e.second > STALE_MS) { staleIds.remove(rid); return null }
+        return e.first
+    }
+
     private fun onControl(f: Xk.Frame, node: String) {
         // A reply to something we're waiting for?
         val p = pending[node]
-        if (p != null) {
-            when {
-                f.requestId == p.rid -> { p.q.offer(f); afterReply(f, node); return }
-                f.requestId in staleIds -> { addLog("Ignored a late $node reply"); return }
-                f.action == 0x8002 || f.action == -1 -> {
-                    addLog("$node reply id %04X, expected %04X".format(f.requestId, p.rid))
-                    p.q.offer(f); afterReply(f, node); return
-                }
+        when (Xk.matchReply(p?.rid, f, staleNodeFor(f.requestId))) {
+            Xk.ReplyMatch.EXACT -> { p!!.q.offer(f); afterReply(f, node); if (!alsoPush(f, node)) return }
+            Xk.ReplyMatch.BY_NODE -> {
+                val n = byNodeLogged.merge(node, 1, Int::plus) ?: 1
+                if (n <= 3) addLog("$node answered in the device-numbered form (id %04X, ours %04X, action %04X)".format(f.requestId, p!!.rid, f.action and 0xFFFF))
+                p!!.q.offer(f); afterReply(f, node)
+                // 5710/57A0/5790… are pushes too: the live view and recording state must still see them.
+                if (!alsoPush(f, node)) return
             }
+            Xk.ReplyMatch.LATE -> { addLog("Ignored a late $node reply"); return }
+            Xk.ReplyMatch.NONE -> afterReply(f, node)
         }
-        afterReply(f, node)
         when (node) {
             "7320" -> {
                 val waiter = pushWaiters["7320"]
@@ -882,7 +938,8 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                 return
             }
             // Assistant touch hook: a tap on the glasses starts a voice question.
-            "C101", "C107" -> onTouch?.let { cb -> main.post { cb() } }
+            "C101", "C107" -> if (probing) addLog("Touch ignored: the live view test is running")
+                else onTouch?.let { cb -> main.post { cb() } }
             "57B1" -> {
                 if (!quietCapture) onShutter?.let { cb -> main.post { cb() } } // 2.1 hook: phone-side shutter sound
                 if (capturing) { busyText = "Processing the photo…"; changed() }
@@ -928,11 +985,17 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     private val busyFlag = AtomicBoolean(false)
     private var mediaNotes = 0
 
+    /** Live view is open, opening or being tested: media that isn't a photo download goes to it. */
+    private val previewWanted get() = preview != Preview.OFF || probing
+
     private fun onMediaElement(type: Int, e: ByteArray) {
         when (type) {
             Xk.MEDIA_PHOTO -> {
                 val asm = assembler
-                if (asm == null) { note("Photo data arrived with no download running (${e.size} B)"); return }
+                if (asm == null) {
+                    if (previewWanted && liveElement(e, "a photo-type element")) return
+                    note("Photo data arrived with no download running (${e.size} B)"); return
+                }
                 when (asm.offer(e)) {
                     Xk.PhotoAssembler.Result.DONE -> mediaDone.offer(true)
                     Xk.PhotoAssembler.Result.FAILED -> mediaDone.offer(false)
@@ -941,14 +1004,109 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
             }
             Xk.MEDIA_H264 -> {
                 val au = VideoAu.fromElement(e, SystemClock.elapsedRealtimeNanos())
-                if (au == null) { note("Unreadable video element (${e.size} B)"); return }
+                if (au == null) {
+                    if (previewWanted && liveElement(e, "a type-2 element")) return
+                    note("Unreadable video element (${e.size} B)"); return
+                }
                 videoFrames++
                 if (preview != Preview.ON) { preview = Preview.ON; changed() }
                 videoSink?.invoke(au)
             }
-            else -> note("Unknown media type $type (${e.size} B)")
+            else -> if (!(previewWanted && liveElement(e, "a type-$type element"))) note("Unknown media type $type (${e.size} B)")
         }
     }
+
+    /**
+     * 3.3: anything that might be a live view picture, whatever carried it: a whole JPEG (small
+     * previews may be sent as pictures) or H.264 behind an unknown header. True when it was used.
+     */
+    private fun liveElement(e: ByteArray, what: String): Boolean {
+        val j = Xk.jpegStart(e)
+        if (j >= 0) {
+            val last = e.size - 1
+            val whole = (maxOf(j, last - 16) until last).any { e[it] == 0xFF.toByte() && e[it + 1] == 0xD9.toByte() }
+            if (!whole) { sniffLog("part of a JPEG in $what (${e.size} B)"); return false }
+            jpegFrames++
+            if (jpegFrames <= 3) addLog("Live view: a whole JPEG picture arrived in $what (${e.size - j} B)")
+            if (preview != Preview.ON && preview != Preview.OFF) { preview = Preview.ON; changed() }
+            jpegSink?.invoke(e.copyOfRange(j, e.size))
+            return true
+        }
+        val au = VideoAu.scan(e, SystemClock.elapsedRealtimeNanos())
+        if (au != null) {
+            videoFrames++
+            if (videoFrames <= 3) addLog("Live view: H.264 found in $what (${e.size} B)")
+            if (preview != Preview.ON && preview != Preview.OFF) { preview = Preview.ON; changed() }
+            videoSink?.invoke(au)
+            return true
+        }
+        sniffLog("$what not used: " + Xk.describeRaw(e))
+        return false
+    }
+
+    // ---------------- receive sniffer (3.3) ----------------
+
+    private fun onSkipped(first: ByteArray, length: Int) {
+        skippedRuns++
+        skippedBytes += length
+        sniffLog("skipped " + Xk.describeRaw(first, length))
+    }
+
+    /** Logs while the sniffer runs: at most 60 lines a session, one per 150 ms after the first ten. */
+    private fun sniffLog(line: String) {
+        if (!sniffing) return
+        val now = SystemClock.elapsedRealtime()
+        synchronized(this) {
+            if (sniffLines >= 60) return
+            if (sniffLines >= 10 && now - sniffLastAt < 150) return
+            sniffLines++
+            sniffLastAt = now
+        }
+        addLog("Sniffer: $line")
+    }
+
+    private fun startSniff(why: String) {
+        synchronized(this) { sniffLines = 0 }
+        mediaNotes = 0
+        sniffing = true
+        link?.parser?.lenient = true
+        addLog("Sniffer on ($why): ${rxBytes} B read so far, ${skippedBytes} B skipped")
+    }
+
+    private fun stopSniff() {
+        if (!sniffing) return
+        sniffing = false
+        link?.parser?.lenient = false
+    }
+
+    /** Counters for one listening window, so the log shows what the radio carried. */
+    private inner class RxWindow {
+        val rx0 = rxBytes; val skip0 = skippedBytes; val other0 = otherFrames; val media0 = mediaFramesSeen
+        val video0 = videoFrames; val jpeg0 = jpegFrames; val f50 = mediaFrag5
+        val frameBytes0 = link?.parser?.frameBytes ?: 0L
+        val media get() = mediaFramesSeen - media0
+        val pictures get() = (videoFrames - video0) + (jpegFrames - jpeg0)
+        fun text(): String {
+            val fb = (link?.parser?.frameBytes ?: 0L) - frameBytes0
+            return "${rxBytes - rx0} B read, $fb B in frames, ${skippedBytes - skip0} B skipped, $media media frame(s), " +
+                "${videoFrames - video0} video picture(s), ${jpegFrames - jpeg0} JPEG picture(s), ${mediaFrag5 - f50} divideType-5, " +
+                "${otherFrames - other0} unknown-head frame(s)"
+        }
+    }
+
+    // ---------------- audio gate (3.3) ----------------
+
+    /**
+     * Why the glasses' call audio (SCO) must not start right now, or null. Starting it during a
+     * connect, a photo transfer or the live view test, or in the first seconds of a new link, has
+     * dropped the Bluetooth link on the owner's phone.
+     */
+    fun audioBlocker(): String? = audioBlockerFor(
+        state, probing, capturing || assembler != null, SystemClock.elapsedRealtime() - readySince,
+    )
+
+    /** How long a glasses tap should wait before starting a voice question: 0 now, null to drop it. */
+    fun tapDelayMs(): Long? = tapDelayFor(state, probing, SystemClock.elapsedRealtime() - readySince)
 
     private fun onMediaBroken(type: Int?, why: String) {
         note("Media element dropped: $why")
@@ -1199,6 +1357,47 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         preview = Preview.OPENING
         videoFrames = 0
         changed()
+        startSniff("live view")
+        val q5710 = expectPush("5710")
+        try {
+            val msg = openPreviewInner()
+            if (preview == Preview.ON) afterOpen(q5710)
+            return msg
+        } finally {
+            pushWaiters.remove("5710", q5710)
+        }
+    }
+
+    /**
+     * After an accepted open: the glasses push 5710 (01 on, 02 busy). Busy right after a touch means
+     * the mic had them: wait up to 4 s for 00/01 and open once more. A pull the test found useful is sent.
+     */
+    private fun afterOpen(q: LinkedBlockingQueue<Xk.Frame>) {
+        val st = awaitPush("5710", q, 2_000)?.data?.firstOrNull()?.toInt()
+        if (st == 2) {
+            addLog("Live view: the glasses are busy (5710 = 02); waiting for them")
+            val end = SystemClock.elapsedRealtime() + 4_000
+            var v: Int? = 2
+            while (v == 2 && SystemClock.elapsedRealtime() < end) {
+                v = awaitPush("5710", q, maxOf(1L, end - SystemClock.elapsedRealtime()))?.data?.firstOrNull()?.toInt()
+            }
+            if (v == 0 || v == 1) {
+                addLog("Live view: 5710 = %02X, opening once more".format(v))
+                val via = openedWith
+                val r = if (via != null) request(probeNode(via), probeAction(via), byteArrayOf(1), 4_000)
+                else request("5720", prefs.previewAction, byteArrayOf(1), 4_000)
+                if ((r?.errCode ?: 0) == 0) preview = Preview.ON
+            }
+        }
+        prefs.livePull?.let { name ->
+            PULL_TRIES.firstOrNull { pullName(it) == name }?.let { t ->
+                request(t.first, t.second, t.third, 1_500)?.let { addLog("Live view: ${pullName(t)} → ${describeReply(it)}") }
+            }
+        }
+        changed()
+    }
+
+    private fun openPreviewInner(): String? {
         // 3.1: a command the live view probe found working on these glasses goes first.
         val learned = prefs.livePath
         if (learned != null && learned in PROBE_PATHS && !learned.startsWith("5720/")) return openVia(learned)
@@ -1232,6 +1431,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     fun closePreview() = io.execute { closePreviewNow() }
 
     private fun closePreviewNow() {
+        if (!probing) stopSniff()
         if (preview == Preview.OFF) return
         preview = Preview.OFF
         val via = openedWith
@@ -1284,11 +1484,14 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
 
     /**
      * Learns how (and whether) these glasses send live video over Bluetooth: reads the preview info
-     * (1001 preview_*, 57A0, 2410, 2420), then tries each open command in turn, listening about 5 s
-     * for video, and closes it again after each. The working command is saved for next time, or
-     * "none" when no video arrived. [onLine] and [done] run on the main thread.
+     * (1001 preview_*, 57A0, 2410, 2420), then tries each open command in turn. 3.3: a refused command
+     * is skipped at once; after an accepted one it waits for the 5710 push (busy → waits and opens once
+     * more), listens 10 s when the glasses say the preview is on (5 s otherwise) with the receive
+     * sniffer on, then tries requests that might pull frames ([PULL_TRIES]) and, when [wifi] is
+     * allowed, looks for the glasses on Wi-Fi. Touches on the glasses are ignored meanwhile. The working
+     * command is saved for next time, or "none". [onLine] and [done] run on the main thread.
      */
-    fun runLiveProbe(onLine: ((String) -> Unit)?, done: (LiveProbe) -> Unit) {
+    fun runLiveProbe(onLine: ((String) -> Unit)?, wifi: Boolean = false, done: (LiveProbe) -> Unit) {
         if (state != State.READY || recording || capturing || !busyFlag.compareAndSet(false, true)) {
             val why = when {
                 state == State.IDLE || state == State.CONNECTING -> "Connect the glasses first."
@@ -1308,10 +1511,13 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                 onLine?.let { cb -> main.post { cb(s) } }
             }
             var found: String? = null
+            var foundPull: String? = null
             var complete = false
             var anyMedia = false
+            var wifiTried = false
             try {
                 if (preview != Preview.OFF) closePreviewNow()
+                startSniff("live view test")
                 say("Phone model ${Build.MANUFACTURER} ${Build.MODEL}; glasses ${model ?: "?"}, firmware ${firmware ?: "?"}")
                 say("1001 preview fields at sign-in: " +
                     (previewInfo.takeIf { it.isNotEmpty() }?.entries?.joinToString(", ") { "${it.key}=${it.value}" } ?: "none"))
@@ -1329,32 +1535,75 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                     if (link == null) throw LinkException("Lost the connection to the glasses.")
                     val node = probeNode(path)
                     val action = probeAction(path)
-                    val m0 = mediaFramesSeen
-                    val v0 = videoFrames
-                    val f0 = mediaFrag5
                     preview = Preview.OPENING
                     changed()
-                    val r = request(node, action, byteArrayOf(1), 3_000)
-                    say("$path open [01]: ${describeReply(r)}")
-                    val end = SystemClock.elapsedRealtime() + PROBE_LISTEN_MS
-                    while (SystemClock.elapsedRealtime() < end && videoFrames - v0 < 3 && link != null) Thread.sleep(100)
-                    val media = mediaFramesSeen - m0
-                    val video = videoFrames - v0
-                    val f5 = mediaFrag5 - f0
-                    if (media > 0) anyMedia = true
-                    if (link != null) {
-                        val st = request("57A0", Xk.ACTION_READ, ByteArray(0), 1_000)
-                        if (st != null) say("  57A0 while open: ${describeReply(st)}")
-                    }
-                    say("  heard for ${PROBE_LISTEN_MS / 1000} s: $media media frame(s), $video video picture(s), $f5 divideType-5 frame(s)")
-                    if (link != null) {
-                        val c = runCatching { request(node, action, byteArrayOf(0), 2_000) }.getOrNull()
-                        say("  close [00]: ${describeReply(c)}")
+                    val q5710 = expectPush("5710")
+                    try {
+                        var w = RxWindow()
+                        var r = request(node, action, byteArrayOf(1), 3_000)
+                        say("$path open [01]: ${describeReply(r)}")
+                        val code = r?.errCode
+                        if (code != null && code != 0 && code != 2) {
+                            say("  refused, not listening")
+                            preview = Preview.OFF
+                            changed()
+                            continue
+                        }
+                        // What the glasses say about the preview: 01 on, 02 busy (the mic had them), 00 off.
+                        var st = awaitPush("5710", q5710, 2_500)?.data?.firstOrNull()?.toInt()
+                        say("  5710 after open: " + (st?.let { "%02X".format(it) } ?: "no push"))
+                        if (st == 2 || code == 2) {
+                            say("  busy: waiting up to 4 s for the glasses, then opening once more")
+                            val end = SystemClock.elapsedRealtime() + 4_000
+                            while (st == 2 && SystemClock.elapsedRealtime() < end) {
+                                st = awaitPush("5710", q5710, maxOf(1L, end - SystemClock.elapsedRealtime()))?.data?.firstOrNull()?.toInt() ?: st
+                            }
+                            r = request(node, action, byteArrayOf(1), 3_000)
+                            say("  $path open again [01]: ${describeReply(r)}")
+                            st = awaitPush("5710", q5710, 2_500)?.data?.firstOrNull()?.toInt() ?: st
+                            say("  5710 after the second open: " + (st?.let { "%02X".format(it) } ?: "no push"))
+                        }
+                        // Wi-Fi: the preview might go over the glasses' own access point or Wi-Fi Direct.
+                        val finder = if (wifi && !wifiTried) { wifiTried = true; WifiFinder(app).also { it.start(wifiTokens()) } } else null
+                        val listen = if (st == 1) PROBE_LISTEN_ON_MS else PROBE_LISTEN_MS
+                        val end = SystemClock.elapsedRealtime() + listen
+                        while (SystemClock.elapsedRealtime() < end && w.pictures < 3 && link != null) Thread.sleep(100)
+                        say("  heard for ${listen / 1000} s: ${w.text()}")
+                        if (w.media > 0) anyMedia = true
+                        if (w.pictures >= 3) { found = path; break }
+                        // Maybe the preview is fetched like photos are: ask, then listen.
+                        if (w.media == 0L) {
+                            for (t in PULL_TRIES) {
+                                if (link == null) break
+                                w = RxWindow()
+                                val pr = request(t.first, t.second, t.third, 1_500)
+                                val listenEnd = SystemClock.elapsedRealtime() + 1_500
+                                while (SystemClock.elapsedRealtime() < listenEnd && w.pictures < 3 && link != null) Thread.sleep(100)
+                                say("  pull ${pullName(t)}: ${describeReply(pr)}; ${w.text()}")
+                                if (t.first == "7300") release("live view test asked for a photo part")
+                                if (w.media > 0) anyMedia = true
+                                if (w.pictures >= 2) { foundPull = pullName(t); break }
+                            }
+                            if (foundPull != null) { found = path; say("  frames came after ${foundPull}") }
+                        }
+                        if (finder != null) {
+                            val res = finder.finish(3_000)
+                            wifiFound = res.matches
+                            res.lines.forEach { say("  Wi-Fi: $it") }
+                        }
+                        if (link != null) {
+                            val st57 = request("57A0", Xk.ACTION_READ, ByteArray(0), 1_000)
+                            if (st57 != null) say("  57A0 while open: ${describeReply(st57)}")
+                            val c = runCatching { request(node, action, byteArrayOf(0), 2_000) }.getOrNull()
+                            say("  close [00]: ${describeReply(c)}")
+                        }
+                    } finally {
+                        pushWaiters.remove("5710", q5710)
                     }
                     preview = Preview.OFF
                     changed()
                     Thread.sleep(400)
-                    if (video > 0 || f5 > 0) { found = path; break }
+                    if (found != null) break
                 }
                 complete = true
             } catch (e: Exception) {
@@ -1363,26 +1612,33 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                 preview = Preview.OFF
                 openedWith = null
                 probing = false
+                stopSniff()
                 busyFlag.set(false)
                 setReady()
             }
+            val wifiNote = wifiFound.takeIf { it.isNotEmpty() }?.let { " On Wi-Fi the glasses show up as ${it.joinToString(", ")}; the app doesn't connect to that yet." } ?: ""
             val summary = when {
-                found != null -> "Live video works with command $found. The app will use it from now on."
+                found != null -> "Live video works with command $found" + (foundPull?.let { " (frames follow $it)" } ?: "") + ". The app will use it from now on."
                 !complete -> "The test didn't finish, so nothing was changed. Try again with the glasses connected."
-                anyMedia -> "The glasses sent some media data but no video the phone could show. Snapshot view will be used."
-                else -> "The glasses sent no video over Bluetooth. Snapshot view will be used instead."
+                anyMedia -> "The glasses sent some media data but no video the phone could show. Snapshot view will be used." + wifiNote
+                else -> "The glasses sent no video over Bluetooth. Snapshot view will be used instead." + wifiNote
             }
             say(summary)
             if (complete) {
                 found?.takeIf { it.startsWith("5720/") }?.let { prefs.previewAction = probeAction(it) }
                 prefs.livePath = found ?: LIVE_NONE
+                prefs.livePull = foundPull
                 prefs.liveProbeSummary = summary
                 prefs.liveProbeAt = System.currentTimeMillis()
+                prefs.liveProbeVersion = PROBE_VERSION
             }
             val result = LiveProbe(found, summary, synchronized(lines) { lines.toList() }, complete)
             main.post { done(result) }
         }
     }
+
+    /** Names the glasses might use on Wi-Fi: their Bluetooth name, model, last 4 hex of the address, brand words. */
+    private fun wifiTokens(): List<String> = WifiFinder.tokens(deviceName ?: prefs.glassesName, model, prefs.glassesAddress)
 
     private fun onPreviewState(v: Int) {
         when (v) {
@@ -1397,6 +1653,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     }
 
     private fun setPreviewOff() {
+        if (!probing) stopSniff()
         if (preview == Preview.OFF) return
         preview = Preview.OFF
         main.post { previewStateSink?.invoke(false) }
@@ -1462,10 +1719,54 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         private const val ELEMENT_CAP_MS = 15_000L
 
         /** Live view open commands tried by the probe, in order: node/action, data [01] to open, [00] to close. */
-        val PROBE_PATHS = listOf("5720/3", "5720/2", "5710/3", "5710/2", "102A/3", "102C/3")
+        /**
+         * 3.3 dropped 102A (it starts the glasses' own mic: a touch, then the live view closes) and 102C
+         * (rejected the data). 5720/3 is the one the owner's E13C-5 accepts.
+         */
+        val PROBE_PATHS = listOf("5720/3", "5720/2", "5710/3", "5710/2")
+        /** Bumped when the probe learns new tricks, so an old "none" result is tested again. */
+        const val PROBE_VERSION = 3
         /** Saved when the probe found that no command makes the glasses send video. */
         const val LIVE_NONE = "none"
+        /** Least time between sending 102E and the first setup read (validated harness: 150 ms spacing). */
+        private const val BIND_SETTLE_MS = 300L
+        /** A timed-out request id only marks a reply as late for this long. */
+        private const val STALE_MS = 15_000L
+        /** State nodes the glasses push by themselves (also when one of them answers a request). */
+        private val PUSH_NODES = setOf("5710", "5711", "57A0", "5750", "5790")
         private const val PROBE_LISTEN_MS = 5_000L
+        /** Listening time after the glasses pushed 5710 = 01 (preview on). */
+        private const val PROBE_LISTEN_ON_MS = 10_000L
+        /** Requests that might pull preview frames, tried after an accepted open: node, action, data. */
+        val PULL_TRIES: List<Triple<String, Int, ByteArray>> = listOf(
+            Triple("5711", Xk.ACTION_EXECUTE, byteArrayOf(0)),
+            Triple("5711", Xk.ACTION_EXECUTE, byteArrayOf(1)),
+            Triple("5711", Xk.ACTION_READ, ByteArray(0)),
+            Triple("5750", Xk.ACTION_READ, ByteArray(0)),
+            Triple("7300", Xk.ACTION_WRITE, byteArrayOf(1)),
+        )
+
+        fun pullName(t: Triple<String, Int, ByteArray>) = "${t.first}/${t.second}" + if (t.third.isNotEmpty()) " " + hex(t.third) else ""
+
+        /** The glasses' call audio may start only this long after the link became ready. */
+        const val AUDIO_SETTLE_MS = 3_000L
+
+        /** Pure rule behind [audioBlocker]. [readyForMs] is the time since the link became ready. */
+        fun audioBlockerFor(state: State, probing: Boolean, transferring: Boolean, readyForMs: Long): String? = when {
+            state == State.CONNECTING -> "the glasses are still connecting"
+            probing -> "the live view test is running"
+            transferring -> "a photo is coming over Bluetooth"
+            (state == State.READY || state == State.BUSY) && readyForMs < AUDIO_SETTLE_MS -> "the glasses connected a moment ago"
+            else -> null
+        }
+
+        /** Pure rule behind [tapDelayMs]. */
+        fun tapDelayFor(state: State, probing: Boolean, readyForMs: Long): Long? = when {
+            probing -> null
+            state == State.CONNECTING -> 500L
+            (state == State.READY || state == State.BUSY) && readyForMs < AUDIO_SETTLE_MS -> AUDIO_SETTLE_MS - readyForMs
+            else -> 0L
+        }
 
         fun probeNode(path: String) = path.substringBefore('/')
         fun probeAction(path: String) = path.substringAfter('/').toIntOrNull() ?: Xk.ACTION_EXECUTE

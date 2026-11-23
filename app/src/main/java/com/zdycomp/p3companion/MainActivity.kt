@@ -485,10 +485,23 @@ class MainActivity : Activity() {
         super.onStop()
     }
 
+    private var tapWaiting = false
+
     private fun onGlassesTapped() {
         if (!prefs.tapToTalk || lockCover != null) return
         // A tap while a voice memo records stops the memo instead of starting a question.
         if (recorder.recording) { recorder.stop(); toast("Memo saved."); return }
+        // 3.3: no voice question during the live view test, and none in the first 3 s of a new link
+        // (starting the glasses' call audio then has dropped the Bluetooth link).
+        val wait = glasses.tapDelayMs()
+        if (wait == null) { glasses.addLog("Tap-to-talk ignored: the live view test is running"); return }
+        if (wait > 0 && assistant.phase == Assistant.Phase.IDLE) {
+            if (tapWaiting) return
+            tapWaiting = true
+            glasses.addLog("Tap-to-talk waits $wait ms for the link to settle")
+            main.postDelayed({ tapWaiting = false; if (glasses.state != XkGlasses.State.IDLE) onGlassesTapped() }, wait)
+            return
+        }
         val screen = screens[TAB_ASSISTANT] as? AssistantScreen
         if (current != TAB_ASSISTANT || screen?.section != AssistantScreen.SECTION_VOICE) {
             screen?.section = AssistantScreen.SECTION_VOICE
@@ -905,6 +918,14 @@ class MainActivity : Activity() {
             denied = "Microphone permission is needed for this.",
             action = action,
         )
+
+    /** 3.3 live view test: Nearby Wi-Fi devices (Android 13+, never for location), asked only when the test starts; never required. */
+    fun withNearbyWifi(action: (Boolean) -> Unit) =
+        withPermissions(
+            emptyList(),
+            optional = if (Build.VERSION.SDK_INT >= 33) listOf(Manifest.permission.NEARBY_WIFI_DEVICES) else emptyList(),
+            denied = "",
+        ) { action(Build.VERSION.SDK_INT >= 33 && granted(Manifest.permission.NEARBY_WIFI_DEVICES)) }
 
     /** Notifications for photo and battery alerts (Android 13+); asked once, never required. */
     fun withNotifications(action: () -> Unit) =

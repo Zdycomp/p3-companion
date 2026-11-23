@@ -2,36 +2,36 @@ package com.zdycomp.p3companion
 
 /** What's new in this version, shown once after an update and on the About screen. */
 object WhatsNew {
-    const val VERSION = "3.1.0"
+    const val VERSION = "3.3.0"
 
     val headlines = listOf(
-        "Live view finds out what your glasses can do, and shows snapshots when they can't stream video",
-        "Answers start speaking sooner: the first sentence plays while the rest is still coming",
-        "Voice input works on more phones: if one speech service fails, the next one is tried",
-        "48 voice commands that work offline: \"take a picture\", \"battery\", \"set a timer for 5 minutes\" and more",
-        "New Speak through option: glasses audio (fast) or call audio",
+        "Commands no longer wait for an answer that already came: photos, snapshots and sign-in are quicker",
+        "Live view listens longer, logs everything the glasses send, and also looks for the glasses on Wi-Fi",
+        "Voice questions: the app records the mic itself and switches to the phone's mic if the glasses' mic is silent",
+        "Answers to voice questions start speaking right away on the glasses",
+        "Tapping the glasses no longer upsets the Bluetooth link",
     )
 
     val details = listOf(
-        "Live view" to listOf(
-            "If no video arrives within 6 seconds, the app tests every live view command your glasses might use and remembers the one that works.",
-            "When your glasses don't send video over Bluetooth, Live view switches to Snapshot view: a new picture every few seconds, with Stop and Save.",
-            "Snapshots are deleted after they're shown unless you tap Save this one or turn on Keep every snapshot.",
-            "Diagnostics › Test live view runs the same test and lets you share its full log.",
+        "Glasses link" to listOf(
+            "The glasses answer most commands in a form the app didn't recognise, so it waited 2 to 4 seconds for nothing each time. Every answer is now recognised at once.",
+            "Taking a photo, saving it and Snapshot view no longer pause between steps.",
         ),
-        "Speaking" to listOf(
-            "The voice is ready as soon as the app opens, and answers are streamed and read sentence by sentence.",
-            "Glasses audio (fast) plays answers on the glasses' media sound without waiting for the call link; Call audio keeps the old behaviour for the whole conversation.",
-            "The connection log shows how long each answer took to start.",
+        "Live view" to listOf(
+            "The live view test runs again on glasses that said \"no video\" before, now that the glasses' answers are understood.",
+            "It waits for the glasses to say the preview is on, listens 10 seconds, asks for frames in several ways, and logs every byte the glasses send.",
+            "Small pictures sent as the preview are shown too, not only video.",
+            "With your OK (Nearby devices), it looks for the glasses on Wi-Fi and tells you if they show up there.",
+            "Taps on the glasses are ignored while the test runs, so the mic can't close the live view.",
         ),
         "Listening" to listOf(
-            "The app picks a speech service that works on your phone (Google's first), tries the next one if it fails, and remembers the good one.",
-            "If the glasses' mic isn't ready within 1.5 seconds, the phone's mic is used instead.",
-            "The Assistant shows which speech service listened and the exact error; Diagnostics › Test voice checks it in one tap.",
+            "On Android 13 and later the app records the mic itself: the glasses' mic first, and the phone's mic at once if the glasses' mic is silent.",
+            "If the speech service didn't catch anything, it listens once more with the phone's mic by itself.",
+            "The glasses' call audio never starts while they connect, during a photo transfer or the live view test, or in the first 3 seconds of a new link.",
         ),
-        "Voice commands" to listOf(
-            "Camera, recording, gallery, translation, timers and alarms, flashlight, volume, navigation, settings and accessibility, all handled on the phone.",
-            "Say \"what can I say\" for the list. Deleting a photo or clearing the chat asks you to say yes first.",
+        "Speaking" to listOf(
+            "When the glasses' call audio is already up after a question, the answer plays on it straight away instead of switching to media audio first, then the call audio is let go.",
+            "The connection log shows which mic was used and how long the answer took to start.",
         ),
     )
 

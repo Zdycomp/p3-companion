@@ -173,3 +173,23 @@ None of these touch connect, pairing, sign-in, the link, framing or the photo tr
 
 Phone check additions: Live view on glasses without video → test runs after 6 s → Snapshot view; Diagnostics › Test
 voice reports the service; one voice question shows a timing line in the connection log.
+
+---
+
+## 9. 3.3.0: changes to frozen code, and why
+
+Evidence: `docs/LOG-2026-11-23.txt` and the captured 57A0 answer in `src/test/resources/vectors/replies_captured_misc.hex`.
+
+| Where | Change |
+|---|---|
+| `onControl()` | Reply matching moved to `Xk.matchReply`: exact id → deliver; device-numbered frame (payload action `0x8004`) → deliver whatever its id; echoed id of a request **on the same node** that timed out in the last 15 s → ignore; any other frame for the node → deliver. Replaces "action `0x8002` or `-1` with another id". State nodes 5710/5711/57A0/5750/5790 also go through the push handling when they answer (error-code answers don't). |
+| `request()` | `staleIds` keeps id → node and time. |
+| `handle()` | Acks built by `Xk.ackFor` (same bytes as before). Counts bytes read; 2B and unknown-head frames go to the live view path while preview is wanted. Touches are ignored during the live view test. |
+| `Parser` | Optional `onSkip` observer and `lenient` mode (sniffer); both off by default, so default parsing is byte-for-byte the same. |
+| `signInWith` | 102E now completes on its device-numbered answer; at least 300 ms from sending 102E to 7110. Order unchanged. |
+| `connect` | Records `readySince`; clears the per-node log counter. |
+| `openPreviewNow` / `closePreviewNow` | Sniffer on/off; 5710 push awaited after an open (busy → wait 4 s, open once more). |
+| `AudioRoute.acquire` | Refuses SCO (phone mic instead) while connecting, during a photo transfer or the live view test, and in the first 3 s of a link. |
+
+Phone check additions: one photo shows no "no answer" line; the live view test log has "Sniffer" and "heard for"
+lines with byte counts; a voice question logs "Voice mic: …" and a timing line with the mic.

@@ -114,8 +114,14 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
 
     private fun callAudio() = prefs.speakThrough == Prefs.SpeakThrough.CALL
 
-    /** Answers go down the call link only with "Call audio" and while the link is really up. */
-    private fun throughCallNow() = callAudio() && holdingRoute && route.active
+    /**
+     * 3.3: while this voice session's call link (SCO) is up, the answer is spoken on it right away: no
+     * switch to media audio (that switch cost about 1.5 s). Media audio only when the link isn't up.
+     */
+    private fun throughCallNow() = holdingRoute && route.active
+
+    /** Which mic the current turn listens with, for the log and the timing line. */
+    private var micNote: String? = null
 
     /** A short silence first when the call link was let go a moment ago, so the headset can switch. */
     private fun leadIn(): Long = if (!throughCallNow() && SystemClock.elapsedRealtime() - route.releasedAt < 1_200) 350 else 0
@@ -139,18 +145,48 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
         partial = null
         lastVoiceError = null
         retriedPhoneMic = false
+        micNote = null
         changed()
         holdRoute { via ->
             if (my != turn) return@holdRoute
             throughGlasses = via
+            if (!via && route.willUseGlasses() && route.lastReport != null) glasses.addLog("Voice: ${route.lastReport}")
             changed()
             listenNow(my, m)
         }
     }
 
-    private fun listenNow(my: Int, m: Mode) {
+    /**
+     * 3.3 on Android 13+: the app records the mic itself (the glasses' SCO input when it's up and not
+     * silent, else the phone's) and feeds the recognizer; [phoneOnly] is the retry with the phone's mic
+     * and the recognizer's own recording.
+     */
+    private fun micFeed(my: Int, phoneOnly: Boolean): (() -> MicCapture?)? {
+        if (phoneOnly || !MicCapture.supported()) {
+            micNote = if (throughGlasses) "glasses (recognizer's own recording)" else "phone"
+            return null
+        }
+        return {
+            val input = if (throughGlasses && route.active) route.glassesInput() else null
+            MicCapture(app, input) { mic, db ->
+                if (my != turn) return@MicCapture
+                val level = db?.let { " (RMS %.0f dBFS)".format(it) } ?: ""
+                micNote = if (mic == MicCapture.Mic.GLASSES) "glasses$level" else if (input != null) "phone, the glasses' mic was silent$level" else "phone"
+                glasses.addLog("Voice mic: $micNote")
+                if (mic == MicCapture.Mic.PHONE && throughGlasses) {
+                    // The glasses' mic gave nothing: let their call link go, so the answer plays on media audio.
+                    throughGlasses = false
+                    releaseRouteNow()
+                    changed()
+                }
+            }
+        }
+    }
+
+    private fun listenNow(my: Int, m: Mode, phoneOnly: Boolean = false) {
         val lines = log(m)
         val tag = Languages.byName(if (m == Mode.CHAT) prefs.replyLanguage else prefs.translateFrom).tag
+        val feed = micFeed(my, phoneOnly)
         speech.listen(
             tag,
             onPartial = { text ->
@@ -161,17 +197,18 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
             onResult = { text -> if (my == turn) heard(my, m, text) },
             onError = { msg, code ->
                 if (my != turn) return@listen
-                // The glasses' mic may not be ready yet: try once more with the phone's mic.
-                if (code == SpeechRecognizer.ERROR_AUDIO && throughGlasses && !retriedPhoneMic) {
+                // The glasses' mic may not be ready or may be silent: try once more with the phone's mic.
+                if (shouldRetryWithPhone(code, throughGlasses || speech.lastFed, retriedPhoneMic)) {
                     retriedPhoneMic = true
                     releaseRouteNow()
                     throughGlasses = false
-                    glasses.addLog("Voice: the glasses' mic failed, listening with the phone's mic")
+                    glasses.addLog("Voice: ${Speech.errorName(code)} ($code) with the ${micNote ?: "glasses"} mic, listening again with the phone's mic")
                     changed()
-                    listenNow(my, m)
+                    listenNow(my, m, phoneOnly = true)
                     return@listen
                 }
                 lastVoiceError = speech.lastErrorDetail?.let { "$msg ($it)" } ?: msg
+                micNote?.let { glasses.addLog("Voice: that try used the $it mic") }
                 speech.lastErrorDetail?.let { glasses.addLog("Voice: $it") }
                 if (pendingConfirm != null) {
                     pendingConfirm = null
@@ -179,6 +216,7 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
                 } else add(lines, Who.ERROR, msg + (speech.lastErrorDetail?.let { "\n[$it]" } ?: ""))
                 endTurn()
             },
+            audio = feed,
         )
     }
 
@@ -186,8 +224,9 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
         val lines = log(m)
         partial = null
         add(lines, Who.YOU, text)
-        // Glasses audio (fast): the call link was only for the mic; let it go so the answer plays on media audio.
-        if (!callAudio()) releaseRouteNow()
+        // 3.3: a call link that is up stays up and carries the answer at once (released after speaking);
+        // one that never came up is let go so the answer plays on media audio.
+        if (holdingRoute && !route.active) releaseRouteNow()
         if (m == Mode.TRANSLATE) {
             if (prefs.voiceCommands && VoiceCommands.isStop(text)) { stop(); return }
             askAi(my, m, text)
@@ -239,6 +278,8 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
             CommandRunner.Reply("That didn't work: ${e.message ?: e.javaClass.simpleName}.")
         }
         if (my != turn) return
+        // 3.3: a command that keeps the Bluetooth link busy (a photo coming over) gets the call link let go first.
+        if (holdingRoute && (glasses.state == XkGlasses.State.BUSY || glasses.audioBlocker() != null)) releaseRouteNow()
         commandSay(my, match.id, reply.say, reply.languageTag, reply.after)
     }
 
@@ -284,7 +325,8 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
         else -> ", through the phone"
     }
 
-    private fun logTiming(line: String) {
+    private fun logTiming(raw: String) {
+        val line = raw + (micNote?.let { "; mic: $it" } ?: "")
         lastTiming = line
         glasses.addLog("Voice timing: $line")
         changed()
@@ -623,6 +665,15 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
     }
 
     companion object {
+        /**
+         * 3.3: listen once more with the phone's mic after "didn't catch that" (no match, timeout) or an
+         * audio error, when the first try used the glasses' mic or the app's own recording. Only once.
+         */
+        fun shouldRetryWithPhone(code: Int, glassesOrFed: Boolean, alreadyRetried: Boolean): Boolean =
+            !alreadyRetried && glassesOrFed && code in setOf(
+                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT, SpeechRecognizer.ERROR_AUDIO,
+            )
+
         /** Call audio keeps the glasses' link this long after a turn, for the next question. */
         const val SESSION_LINGER_MS = 10_000L
 

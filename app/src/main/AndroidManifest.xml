@@ -11,6 +11,13 @@
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
 
+    <!-- Live view test (3.3): looks for the glasses on Wi-Fi (names only, never your location); asked only when the test runs -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" />
+
     <!-- Assistant: talks to the AI service you choose -->
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Voice questions, translation and the voice recorder, through the glasses' headset link when connected -->

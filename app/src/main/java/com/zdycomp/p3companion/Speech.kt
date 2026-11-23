@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
+import android.media.AudioFormat
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -55,6 +56,16 @@ class Speech(context: Context, private val prefs: Prefs) {
 
     private var recognizer: SpeechRecognizer? = null
     private var recognizerKey: String? = null
+    /** 3.3: makes the app's own mic recording for one attempt (Android 13+), or null for the recognizer's own mic. */
+    private var audioFactory: (() -> MicCapture?)? = null
+    private var activeFeed: MicCapture? = null
+    /** True when the last listen was fed by the app's own recording. */
+    var lastFed = false; private set
+
+    private fun endFeed() {
+        activeFeed?.stop()
+        activeFeed = null
+    }
     private var listenToken = 0
     private var attemptId = 0
 
@@ -116,11 +127,15 @@ class Speech(context: Context, private val prefs: Prefs) {
         onPartial: (String) -> Unit,
         onResult: (String) -> Unit,
         onError: (String, Int) -> Unit,
+        audio: (() -> MicCapture?)? = null,
     ) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            main.post { listen(languageTag, onPartial, onResult, onError) }
+            main.post { listen(languageTag, onPartial, onResult, onError, audio) }
             return
         }
+        endFeed()
+        audioFactory = audio
+        lastFed = false
         val token = ++listenToken
         lastAttempts = emptyList()
         lastErrorDetail = null
@@ -181,6 +196,7 @@ class Speech(context: Context, private val prefs: Prefs) {
         fun next(code: Int, why: String) {
             if (finished) return
             finished = true
+            endFeed()
             destroyRecognizer()
             if (reuse) {
                 // A kept recognizer can go stale: try the same service once more, freshly made.
@@ -214,6 +230,7 @@ class Speech(context: Context, private val prefs: Prefs) {
             override fun onResults(results: Bundle?) {
                 if (token != listenToken || myAttempt != attemptId || finished) return
                 finished = true
+                endFeed()
                 resultAt = SystemClock.elapsedRealtime()
                 val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()
                 works()
@@ -237,6 +254,7 @@ class Speech(context: Context, private val prefs: Prefs) {
                     next(error, "${errorName(error)} ($error)" + if (!ready) " before listening" else "")
                 } else {
                     finished = true
+                    endFeed()
                     destroyRecognizer()
                     note("${svc.label}: ${errorName(error)} ($error)")
                     if (ready) works()
@@ -260,6 +278,20 @@ class Speech(context: Context, private val prefs: Prefs) {
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 700L)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 500L)
         }
+        // 3.3: the app's own recording (glasses' mic, or the phone's when the glasses are silent).
+        endFeed()
+        if (Build.VERSION.SDK_INT >= 33) {
+            val feed = runCatching { audioFactory?.invoke() }.getOrNull()
+            if (feed != null && feed.start()) {
+                activeFeed = feed
+                lastFed = true
+                intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, feed.readFd)
+                intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
+                intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
+                intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, MicCapture.RATE)
+                note("${svc.label}: fed by the app's own recording")
+            }
+        }
         try {
             r.startListening(intent)
         } catch (e: Exception) {
@@ -276,6 +308,7 @@ class Speech(context: Context, private val prefs: Prefs) {
     fun cancelListening() {
         listenToken++
         attemptId++
+        endFeed()
         runCatching { recognizer?.cancel() }
     }
 
