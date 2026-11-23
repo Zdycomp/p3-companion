@@ -125,6 +125,16 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
         get() = sp.getLong("live_probe_at", 0L)
         set(v) = sp.edit().putLong("live_probe_at", v).apply()
 
+    /** 3.3: a request after the open that made the glasses send frames ("5711/3 01"…), or null. */
+    var livePull: String?
+        get() = sp.getString("live_probe_pull", null)
+        set(v) = sp.edit().putString("live_probe_pull", v).apply()
+
+    /** Which version of the live view test produced [livePath] (0 = 3.1, whose "none" is tested again). */
+    var liveProbeVersion: Int
+        get() = sp.getInt("live_probe_version", 0)
+        set(v) = sp.edit().putInt("live_probe_version", v).apply()
+
     /** Snapshot view: keep every snapshot in the gallery (off deletes each one after it's shown). */
     var keepSnapshots: Boolean
         get() = sp.getBoolean("keep_snapshots", false)
@@ -138,8 +148,9 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
     enum class SpeakThrough { FAST, CALL }
 
     /**
-     * Where spoken answers play. FAST: the media stream (the glasses' stereo audio when connected), no
-     * waiting for the call link. CALL: the hands-free call link, like before 3.1.
+     * Where spoken answers play. FAST: 3.3, a voice answer plays at once on the call link the mic opened
+     * (no switch to media audio), which is let go right after; anything else on the media stream.
+     * CALL: the hands-free call link stays up for the whole session, like before 3.1.
      */
     var speakThrough: SpeakThrough
         get() = enumOr(sp.getString("speak_through", null), SpeakThrough.FAST)
@@ -447,7 +458,7 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
         val keep = sp.all.filterKeys { k ->
             k == "user_key" || k.startsWith("ai_key_") || k == "sr_token" || k == "sr_url" || k == "sr_http_ok" || k == "drive_uri" || k == "drive_label" ||
                 k == "ble_addr" || k == "ble_name" || k == "link_method" || k == "preview_action" ||
-                k == "live_path" || k == "live_probe_summary" || k == "live_probe_at" || k == "recognizer_service" ||
+                k == "live_path" || k.startsWith("live_probe_") || k == "recognizer_service" ||
                 k.startsWith("asked_") || k == "last_import" || k == "last_seen_version" || k == "user_stopped"
         }
         val e = sp.edit().clear()

@@ -47,6 +47,9 @@ object Xk {
     /** Largest photo element count: 7300 takes a one-byte index. */
     const val MAX_ELEMENTS = 255
 
+    /** Largest payload the lenient (sniffer) parser accepts for an unknown head or cmd. */
+    const val LENIENT_MAX = 16 * 1024
+
     /** Every cmd value seen from either side. Anything else is not a frame header. */
     private val KNOWN_CMDS = setOf(0x0001, 0x8001, 0x8002, 0x0004, 0x8004, 0x0009, 0x8009)
 
@@ -211,6 +214,70 @@ object Xk {
         else -> Bind.UNKNOWN
     }
 
+    /** Payload action of a reply that echoes our request id (captured on 1003, 1001, 1017 and error codes). */
+    const val ACTION_REPLY = 0x8064
+    /**
+     * Payload action of a device-numbered frame: pushes AND the success answer to an execute request.
+     * Captured: 57A0 executed with request id 0xB3 came back as `... 1E 00 FF FF FF FF 04 80 00 01 "57A0" 00 01 00 00`,
+     * so its request-id field holds the glasses' own counter, never ours.
+     */
+    const val ACTION_DEVICE = 0x8004
+
+    enum class ReplyMatch {
+        /** Same node and our request id. */
+        EXACT,
+        /** Same node in another form (device-numbered success answer, push, other id): completes the request. */
+        BY_NODE,
+        /** The echoed id of a request on this node that already timed out: not for the current one. */
+        LATE,
+        /** Nothing is waiting on this node. */
+        NONE,
+    }
+
+    /**
+     * Does device frame [f] answer the request waiting on its node ([pendingRid], or null when none)?
+     * [staleNode] is the node of a recently timed-out request that used f's request id, or null.
+     * A device-numbered frame (action 0x8004) carries the glasses' own counter, so it is never
+     * treated as late, whatever number it happens to carry.
+     */
+    fun matchReply(pendingRid: Int?, f: Frame, staleNode: String?): ReplyMatch = when {
+        pendingRid == null -> ReplyMatch.NONE
+        f.requestId == pendingRid -> ReplyMatch.EXACT
+        f.action == ACTION_DEVICE -> ReplyMatch.BY_NODE
+        staleNode != null && staleNode == f.node -> ReplyMatch.LATE
+        else -> ReplyMatch.BY_NODE
+    }
+
+    /**
+     * The link-level acknowledgement the glasses expect for [f], or null. Every device control frame
+     * (replies and pushes such as 5710, 5711, 57A0, 5750, 7320, C107) gets `30 · 0004 · [01, f.order]`;
+     * a media frame that ends an element (divide low bits 3) gets `4A · 0009 · [01]`. Never an ack for an ack.
+     */
+    fun ackFor(f: Frame, order: Int): Frame? = when {
+        f.isAck || !f.fromDevice -> null
+        f.head == HEAD_CONTROL -> ack(order, f.order)
+        f.head == HEAD_MEDIA && f.fragment == 3 -> mediaAck(order)
+        else -> null
+    }
+
+    /** One line about raw bytes the parser skipped or didn't route: head, cmd, divide, length, first 48 bytes. */
+    fun describeRaw(b: ByteArray, total: Int = b.size): String {
+        fun u16(at: Int) = if (b.size >= at + 2) (b[at].toInt() and 0xFF) or ((b[at + 1].toInt() and 0xFF) shl 8) else -1
+        val head = if (b.isNotEmpty()) "%02X".format(b[0].toInt() and 0xFF) else "--"
+        val hdr = if (b.size >= 8) " head $head cmd %04X divide %04X len %d".format(u16(2), u16(4), u16(6)) else " head $head"
+        return "$total B:$hdr: " + b.take(48).joinToString(" ") { "%02X".format(it) }
+    }
+
+    /** Offset of a JPEG start (FF D8 FF) within the first [within] bytes of [e], or -1. */
+    fun jpegStart(e: ByteArray, within: Int = 24): Int {
+        var i = 0
+        while (i + 2 < e.size && i <= within) {
+            if (e[i] == 0xFF.toByte() && e[i + 1] == 0xD8.toByte() && e[i + 2] == 0xFF.toByte()) return i
+            i++
+        }
+        return -1
+    }
+
     fun errorText(code: Int): String = when (code) {
         0 -> "OK"
         1 -> "the glasses said it failed"
@@ -238,6 +305,20 @@ object Xk {
     class Parser(private val maxControlPayload: Int = 32 * 1024) {
         private var buf = ByteArray(16 * 1024)
         private var len = 0
+        /**
+         * Sniffer (3.3): told about every run of bytes skipped while looking for the next frame, with
+         * its first 64 bytes and its full length. Runs on the reader thread inside [feed]; keep it cheap.
+         */
+        @Volatile var onSkip: ((first: ByteArray, length: Int) -> Unit)? = null
+        /**
+         * While live view is open or tested (3.3): also accept a frame with an unknown head byte or an
+         * unknown small cmd, as long as the offset is zero, the length is under 16 KB and the CRC matches.
+         */
+        @Volatile var lenient = false
+        /** Bytes that ended up inside frames. */
+        var frameBytes = 0L
+            private set
+        private var skipFrom = -1
         /** Bytes skipped while finding the next real frame. */
         var dropped = 0L
             private set
@@ -266,42 +347,68 @@ object Xk {
         @Synchronized
         fun skipStalled(): List<Frame> {
             val out = ArrayList<Frame>()
+            val start = len
+            val first = if (onSkip != null) buf.copyOf(minOf(len, 64)) else null
+            var skipped = 0
             while (len >= 16) {
                 compact(1)
                 dropped++
+                skipped++
                 out += drain()
             }
             dropped += len
+            skipped += len
             len = 0
+            if (first != null && skipped > 0) onSkip?.invoke(first, minOf(skipped, start))
             return out
         }
 
         private fun drain(): List<Frame> {
             val out = ArrayList<Frame>(2)
             var pos = 0
+            skipFrom = -1
             while (len - pos >= 16) {
                 val plen = plausibleLength(pos)
-                if (plen < 0) { pos++; dropped++; continue }
+                if (plen < 0) { skip(pos); pos++; dropped++; continue }
                 if (len - pos < 16 + plen) break
-                if (crc16(buf, pos + 16, pos + 16 + plen) != u16(pos + 12)) { pos++; dropped++; badCrc++; continue }
+                if (crc16(buf, pos + 16, pos + 16 + plen) != u16(pos + 12)) { skip(pos); pos++; dropped++; badCrc++; continue }
+                reportSkip(pos)
                 val head = buf[pos].toInt() and 0xFF
                 if (head == HEAD_MEDIA && plen > maxMediaPayload) maxMediaPayload = plen
                 out += Frame(head, buf[pos + 1].toInt() and 0xFF, u16(pos + 2), u16(pos + 4), buf.copyOfRange(pos + 16, pos + 16 + plen))
+                frameBytes += 16 + plen
                 pos += 16 + plen
             }
+            reportSkip(pos)
             compact(pos)
             if (len == 0 && buf.size > 256 * 1024) buf = ByteArray(16 * 1024)
             return out
         }
 
+        private fun skip(p: Int) { if (skipFrom < 0) skipFrom = p }
+
+        /** Hands a finished skipped run [skipFrom, end) to [onSkip]. */
+        private fun reportSkip(end: Int) {
+            val from = skipFrom
+            skipFrom = -1
+            if (from < 0 || end <= from) return
+            onSkip?.invoke(buf.copyOfRange(from, minOf(end, from + 64)), end - from)
+        }
+
         /** Payload length if a real frame could start at [p], else -1. */
         private fun plausibleLength(p: Int): Int {
             val head = buf[p].toInt() and 0xFF
-            if (head != HEAD_CONTROL && head != HEAD_MEDIA && head != HEAD_CUSTOM) return -1
-            if (u16(p + 2) !in KNOWN_CMDS) return -1
+            val known = head == HEAD_CONTROL || head == HEAD_MEDIA || head == HEAD_CUSTOM
+            val cmd = u16(p + 2)
             if (buf[p + 8].toInt() or buf[p + 9].toInt() or buf[p + 10].toInt() or buf[p + 11].toInt() != 0) return -1
             val plen = u16(p + 6)
-            if (head != HEAD_MEDIA && plen > maxControlPayload) return -1
+            if (known && cmd in KNOWN_CMDS) {
+                if (head != HEAD_MEDIA && plen > maxControlPayload) return -1
+                return plen
+            }
+            // Sniffer mode: an unknown head or a small unknown cmd, checked by its CRC afterwards.
+            if (!lenient || plen > LENIENT_MAX || plen == 0) return -1
+            if ((cmd and 0x7FFF) !in 1..0x0F) return -1
             return plen
         }
 

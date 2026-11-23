@@ -43,7 +43,8 @@ class LiveVoicePrefsTest {
     }
 
     @Test fun probePathsCoverEveryOpenCommandInOrder() {
-        assertEquals(listOf("5720/3", "5720/2", "5710/3", "5710/2", "102A/3", "102C/3"), XkGlasses.PROBE_PATHS)
+        // 3.3: 102A/102C left the list (102A started the glasses' own mic on the owner's E13C-5; 102C rejected the data).
+        assertEquals(listOf("5720/3", "5720/2", "5710/3", "5710/2"), XkGlasses.PROBE_PATHS)
         assertEquals("5710", XkGlasses.probeNode("5710/2"))
         assertEquals(Xk.ACTION_WRITE, XkGlasses.probeAction("5710/2"))
         assertEquals(Xk.ACTION_EXECUTE, XkGlasses.probeAction("102A"))

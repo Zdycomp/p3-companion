@@ -111,8 +111,8 @@ object AiSetup {
             p.speakThrough = if (it == 1) Prefs.SpeakThrough.CALL else Prefs.SpeakThrough.FAST
         }))
         g.addView(ui.text(
-            "Glasses audio plays answers on the glasses' media sound right away; the call link is only used for the mic. " +
-                "Call audio keeps the hands-free call link open for the whole conversation (slower to start, sounds like a phone call).",
+            "Glasses audio: after a voice question the answer plays at once on the call link the mic already opened, which is then " +
+                "let go; other answers play on the glasses' media sound. Call audio keeps the call link open for the whole conversation.",
             Type.BODY_SMALL, ui.s.onSurfaceVariant,
         ).apply { setPadding(ui.dp(16), 0, ui.dp(16), ui.dp(8)) })
         g.addView(ui.switchRow(
