@@ -1,0 +1,46 @@
+Analyze this text for manipulative language and hidden or predatory terms. Return ONLY valid JSON (no markdown, no explanations).
+
+Text to analyze:
+${text}
+
+Return this exact JSON structure:
+{
+  "overall_risk_score": <0-100>,
+  "deceptive_language": {
+    "severity": "critical|high|medium|low",
+    "detections": [
+      { "type": "description", "phrase": "exact phrase", "explanation": "why this is deceptive", "severity": "critical|high|medium|low" }
+    ]
+  },
+  "tone_manipulation": {
+    "severity": "critical|high|medium|low",
+    "detections": [
+      { "type": "fear_appeal|emotional_appeal|greed_appeal|false_authority|false_consensus", "phrase": "exact phrase", "explanation": "how it manipulates", "severity": "critical|high|medium|low" }
+    ]
+  },
+  "scare_tactics": {
+    "severity": "critical|high|medium|low",
+    "detections": [
+      { "type": "negative_consequence|threat|worst_case_framing|social_harm", "phrase": "exact phrase", "explanation": "the scare tactic", "severity": "critical|high|medium|low" }
+    ]
+  },
+  "artificial_urgency": {
+    "severity": "critical|high|medium|low",
+    "detections": [
+      { "type": "time_pressure|scarcity_claim|now_or_never|limited_quantity", "phrase": "exact phrase", "explanation": "the urgency tactic", "severity": "critical|high|medium|low" }
+    ]
+  },
+  "hidden_terms_and_costs": {
+    "severity": "critical|high|medium|low",
+    "detections": [
+      { "type": "hidden_fee|auto_renewal|forced_continuity|cancellation_obstruction|buried_limitation", "phrase": "exact phrase", "explanation": "what cost or obligation is buried or hard to escape", "severity": "critical|high|medium|low" }
+    ]
+  },
+  "contract_traps": {
+    "severity": "critical|high|medium|low",
+    "detections": [
+      { "type": "arbitration_clause|indemnification|liability_waiver|jurisdiction_shopping|class_action_waiver|unilateral_modification|confession_of_judgment", "phrase": "exact phrase", "explanation": "what right this clause takes away and why it matters if this ever goes wrong", "severity": "critical|high|medium|low" }
+    ]
+  },
+  "synthesis": "1-2 sentence summary of the overall manipulation profile and recommendations"
+}

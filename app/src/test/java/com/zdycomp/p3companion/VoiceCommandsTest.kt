@@ -1,6 +1,7 @@
 package com.zdycomp.p3companion
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -78,6 +79,12 @@ class VoiceCommandsTest {
         Row(60, "tell me a joke about pizza", none, null),
         Row(61, "can you take a picture of the moon and tell me how far away it is", none, null),
         Row(62, "what is the capital of France", none, null),
+        Row(63, "scan this", none, "suprevolt.scan"),
+        Row(64, "SupRevolt scan", none, "suprevolt.scan"),
+        Row(65, "hey could you run a scan please", none, "suprevolt.scan"),
+        Row(66, "super revolt scan that", none, "suprevolt.scan"),
+        Row(67, "scan it with SupRevolt", none, "suprevolt.scan"),
+        Row(68, "scan the whole room and tell me what is dangerous", none, null),
     )
 
     @Test fun specTable() {
@@ -137,6 +144,16 @@ class VoiceCommandsTest {
         assertTrue(!VoiceCommands.isEarlyStop("yes"))
         assertTrue(VoiceCommands.isStop("never mind"))
         assertTrue(!VoiceCommands.isStop("hello"))
+    }
+
+    @Test fun scanThisIsANetCommandAndIsNotHeardDuringTranslation() {
+        val rule = VoiceCommands.rule("suprevolt.scan")!!
+        assertTrue(rule.needsNet)
+        assertEquals("scan this", rule.helpLabel)
+        // In translation mode only a stop word is a command (Assistant checks isStop); "scan this" is translated.
+        assertFalse(VoiceCommands.isStop("scan this"))
+        assertFalse(VoiceCommands.isStop("SupRevolt scan"))
+        assertTrue(VoiceCommands.helpText().contains("SupRevolt: \"scan this\""))
     }
 
     @Test fun atLeast34CommandsWithUniqueIds() {

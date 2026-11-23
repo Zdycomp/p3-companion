@@ -31,6 +31,7 @@ class SettingsScreen(private val a: MainActivity) : Screen {
         capture(col)
         import(col)
         assistant(col)
+        supRevolt(col)
         privacy(col)
         storage(col)
         backup(col)
@@ -296,6 +297,22 @@ class SettingsScreen(private val a: MainActivity) : Screen {
         col.addView(ui.sectionLabel("Assistant"))
         col.addView(AiSetup.card(a).apply { (layoutParams as LinearLayout.LayoutParams).bottomMargin = ui.dp(8) })
         col.addView(AiSetup.optionsGroup(a))
+    }
+
+    // ---------------- SupRevolt ----------------
+
+    private fun supRevolt(col: LinearLayout) {
+        val ui = a.ui
+        val p = a.prefs
+        col.addView(ui.sectionLabel("SupRevolt"))
+        val g = ui.group()
+        val sub = when {
+            p.srReady -> p.srUrl
+            else -> "Scan photos, documents and text on your own server"
+        }
+        g.addView(ui.listRow("SupRevolt server and scans", sub, R.drawable.ic_shield_scan,
+            ui.icon(R.drawable.ic_chevron_right, ui.s.onSurfaceVariant)) { a.showSupRevolt() })
+        col.addView(g)
     }
 
     // ---------------- Privacy ----------------

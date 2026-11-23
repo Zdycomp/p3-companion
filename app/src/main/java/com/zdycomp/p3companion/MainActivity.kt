@@ -78,7 +78,7 @@ class MainActivity : Activity() {
 
         screens = listOf(
             ImportScreen(this), GalleryScreen(this), GlassesScreen(this), AssistantScreen(this), SettingsScreen(this),
-            DiagnosticsScreen(this), LiveViewScreen(this), AboutScreen(this),
+            DiagnosticsScreen(this), LiveViewScreen(this), AboutScreen(this), SupRevoltScreen(this),
         )
 
         overlay = FrameLayout(this).apply { setBackgroundColor(ui.s.surface) }
@@ -430,6 +430,23 @@ class MainActivity : Activity() {
     fun showDiagnostics() = show(SCREEN_DIAGNOSTICS)
     fun showLiveView() = show(SCREEN_LIVE)
     fun showAbout() = show(SCREEN_ABOUT)
+    fun showSupRevolt() = show(SCREEN_SUPREVOLT)
+
+    /** Scans one gallery photo or file with SupRevolt and shows the result screen. */
+    fun sendToSupRevolt(uri: Uri) {
+        if (!prefs.srReady) { snack("Set up your SupRevolt server first."); showSupRevolt(); return }
+        SupRevolt.get(prefs).scanUri(contentResolver, uri)
+        showSupRevolt()
+    }
+
+    /** System document picker (any type) for SupRevolt. */
+    fun pickDocumentForSupRevolt() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+        launchForResult(intent, REQ_SR_DOC, "This phone has no file picker.")
+    }
 
     @Deprecated("Framework back handling")
     override fun onBackPressed() {
@@ -632,6 +649,13 @@ class MainActivity : Activity() {
                 if (resultCode == RESULT_OK && uri != null) {
                     runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
                     askAboutPhoto(uri)
+                }
+            }
+            REQ_SR_DOC -> {
+                val uri = data?.data
+                if (resultCode == RESULT_OK && uri != null) {
+                    SupRevolt.get(prefs).scanUri(contentResolver, uri)
+                    if (current != SCREEN_SUPREVOLT) showSupRevolt()
                 }
             }
             REQ_BACKUP_SAVE -> data?.data?.takeIf { resultCode == RESULT_OK }?.let { writeBackup(it) }
@@ -1011,6 +1035,7 @@ class MainActivity : Activity() {
         private const val REQ_BACKUP_SAVE = 46
         private const val REQ_BACKUP_OPEN = 47
         private const val REQ_SPEECH = 48
+        private const val REQ_SR_DOC = 49
 
         const val TAB_IMPORT = 0
         const val TAB_GALLERY = 1
@@ -1021,6 +1046,7 @@ class MainActivity : Activity() {
         const val SCREEN_DIAGNOSTICS = 5
         const val SCREEN_LIVE = 6
         const val SCREEN_ABOUT = 7
+        const val SCREEN_SUPREVOLT = 8
 
         const val ACTION_PHOTO = "com.zdycomp.p3companion.action.PHOTO"
         const val ACTION_LIVE = "com.zdycomp.p3companion.action.LIVE"

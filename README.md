@@ -12,7 +12,18 @@ which talks only to the AI service you choose, with your own key.
 | **Gallery** | Everything imported, newest first, filter by photos, videos or audio. Tap to open, press and hold to share or delete. |
 | **Glasses** | **Pair new glasses** in the app (Classic Bluetooth search, low-energy duplicates hidden), then connect (even before the key is added: the app shows what the glasses answer and walks you through finishing setup) and sign in with your own key. Battery and charging, **Take photo** (saved straight to the gallery), photos from the glasses' own button saved automatically, even with the app closed (a notification keeps the link up and it reconnects by itself when the glasses come back). **Live view and record to phone**: the glasses' camera streamed live, recorded as MP4 to Movies › album, with snapshots. **Voice recorder** using the glasses' microphone when they're your phone's headset. Record on the glasses for models that store video. **Diagnostics** checks every step and makes a shareable report (key and address hidden). |
 | **Assistant** | AI with Google Gemini (free key from Google AI Studio) or Anthropic Claude. **Voice chat**: tap, ask, hear the answer through the glasses (or tap the glasses' touch pad). **Live translation** between two languages with a swap button. **Ask about a photo**: pick one, use the glasses' last photo, or take a new one with the glasses; presets for describing a scene, identifying plants and animals, food and calories, and reading and translating text. Answers always come in your chosen reply language. |
+| **SupRevolt** (3.2) | Send a glasses photo, any document or typed text to **your own SupRevolt server**, which runs every scan you've built (fine-print traps, Jargonary, photo text, Gradle fixes, code fixes, Ever, Accord, DNA) in a fixed order and answers with a verdict and a 0 to 256 confidence per scan. Say **"scan this"** and the glasses take the photo and the verdict is read back. Open it from Settings, the Glasses or Assistant tab, or the Gallery (Send to SupRevolt). |
 | **Settings** | Grouped into Appearance, Glasses, Capture, Import, Assistant, Privacy, Storage, Backup and About. Every change saves instantly. |
+
+## New in 3.2: SupRevolt
+
+- **One server, every scan.** The server lives in [`server/`](server/README.md) (Python standard library, nothing to
+  install). Same input, same answer; AI scans use your own Gemini or Claude key on the server and say "unknown" without one.
+- **In the app:** Settings › SupRevolt takes the server's https:// address and the token it prints once (kept private,
+  shown masked, never in a settings backup). Pick scans or All, see the verdict and a confidence bar per scan, share a
+  report without the address or token.
+- **Free hosting:** step-by-step Oracle Cloud Always Free setup from a phone, or Render as a fallback, in
+  [server/README.md](server/README.md). Design: [docs/SUPREVOLT-ARCHITECTURE.md](docs/SUPREVOLT-ARCHITECTURE.md).
 
 ## New in 3.0
 

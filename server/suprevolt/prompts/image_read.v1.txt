@@ -1,0 +1,8 @@
+Read all the text in this photo exactly as written, keeping its line breaks. Then translate it into English. If it is already in English, the translation is the same text.
+
+Return ONLY valid JSON (no markdown, no explanations):
+{
+  "text": "every word visible in the photo, exactly as written, or an empty string if there is no text",
+  "language": "the language the text is written in, in English, for example Spanish",
+  "translation": "the English translation"
+}

@@ -1,5 +1,42 @@
 # Changelog
 
+## 3.2.0 (versionCode 5)
+
+SupRevolt: P3 Companion becomes the front door to one scan server (docs/SUPREVOLT-ARCHITECTURE.md). The glasses
+connect path (`XkGlasses.kt`) is untouched.
+
+**Server (`server/`, Python 3.11+, standard library only)**
+- `python -m suprevolt`: sqlite (WAL) job loop, one worker, scans in fixed catalog order, sha256-addressed blobs
+  (text normalized CRLF → LF), results cached by (blob, scan version, config hash), daily sweep that re-runs stale
+  results and audits 20 cached results for determinism (`/v1/health` shows `determinism: broken` on a mismatch).
+- 12 scans: `blob.fingerprint`, `refix.gradle` (Python port of ReFix `match.js`), `dna.sequence`, `dna.binary`,
+  `code.edapt`, `ever.heal`, `ever.run` (off by default; sandboxed child process, fixed argv, rlimits, 5 s),
+  `accord.check`, `fineprint.lexicon` (offline, 34 of 34 planted traps in the analyzer corpus, controls clear),
+  `fineprint.ai`, `jargonary.ai`, `image.read` (owner's Gemini or Claude key from the environment; UNKNOWN without one).
+- Confidence 0 to 256 with everconf semantics: one unknown makes the verdict UNKNOWN with the reason; AI results enter
+  at 120 and reach 200 only when the offline lexicon saw the same phrase. Verdict CLEAR / CAUTION / DANGER,
+  `_UNCONFIRMED` under 128.
+- REST: `/v1/health`, `/v1/catalog`, `POST /v1/scans` (JSON text or raw upload), `GET /v1/scans/{id}`. Bearer token
+  generated on first run, printed once, stored as sha256; size limits (8 MB body, 256 KB text, 64 KB code,
+  8 MB / 20 MP images); 30 requests a minute; the request log never holds headers or query strings.
+- Vendored code frozen with hashes (`server/suprevolt/vendor/VENDORED.md`); golden outputs, run-twice and fresh-process
+  determinism tests, API tests on a random port (`python -m unittest discover -s tests`); CI workflow `server.yml`.
+- Deployment files: Dockerfile (arm64 friendly, non-root), docker-compose.yml, systemd unit, Caddyfile; phone-only
+  Oracle Cloud Always Free steps and the Render fallback with its limits in `server/README.md`.
+
+**App**
+- SupRevolt screen (Settings › SupRevolt, Glasses tab, Assistant top bar, Gallery › Send to SupRevolt): server address
+  and token (app-private, masked, excluded from settings backups and kept on reset), Test (health then catalog), scan a
+  new or the last glasses photo (2048 px JPEG), a picked document (any type) or typed text; scan chips from the
+  catalog (greyed without a key on the server); verdict header, one row per scan with a 0 to 256 confidence bar
+  (hatched when unknown), cached/live tag, tap for details, skipped scans hidden; Share report without address or token.
+- HTTPS required; plain http only to this phone or a private IPv4 address, after a warning, over a small socket client
+  (no cleartext exception in the manifest).
+- Voice command `suprevolt.scan` ("scan this", "run a scan", "SupRevolt scan"): takes a glasses photo, scans it and
+  says e.g. "Caution. Three flags. Confidence 182 of 256." Translated, not run, during live translation.
+- New files: `SupRevoltWire.kt` (pure, JVM-tested), `SupRevoltClient.kt`, `SupRevolt.kt`, `SupRevoltScreen.kt`,
+  `ConfidenceBar.kt`, `ic_shield_scan.xml`. Tests: `SupRevoltWireTest`, `SupRevoltClientTest`, 6 new voice rows.
+
 ## 3.1.0 (versionCode 4)
 
 Connect, pairing, sign-in and photo transfer are unchanged. All changes to `XkGlasses.kt` are additive (see

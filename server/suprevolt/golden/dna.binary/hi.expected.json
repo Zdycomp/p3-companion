@@ -1,0 +1,1 @@
+{"confidence":256,"note":"8 bases, round trip exact","output":{"byte_count":2,"codon_count":2,"dna":"TACATCCT","dna_length":8,"dna_sha256":"dcbde94bf9978b7add327df50ee28411ad7912895ee2f9a581cefa46087de27b","dna_truncated":false,"gc_content":0.375,"round_trip":true,"trailing_partial":"CT"},"state":"ok","value":0}

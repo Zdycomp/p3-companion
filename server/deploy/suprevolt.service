@@ -1,0 +1,27 @@
+# /etc/systemd/system/suprevolt.service  (see README.md, "Without Docker")
+[Unit]
+Description=SupRevolt scan server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=suprevolt
+WorkingDirectory=/opt/suprevolt
+# SUPREVOLT_ANTHROPIC_KEY=... or SUPREVOLT_GEMINI_KEY=...   (chmod 600, owned by root)
+EnvironmentFile=-/etc/suprevolt.env
+ExecStart=/usr/bin/python3 -m suprevolt --host 127.0.0.1 --port 8787 --data /var/lib/suprevolt
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/suprevolt
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

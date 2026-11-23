@@ -1,0 +1,28 @@
+# docker compose up -d --build
+# The access token is printed once:  docker compose logs suprevolt | grep -A3 "shown once"
+services:
+  suprevolt:
+    build: .
+    image: suprevolt:1.0.0
+    container_name: suprevolt
+    restart: unless-stopped
+    # Only this machine can reach the server directly. HTTPS goes in front (Caddy or a
+    # Cloudflare Tunnel, see README.md); the token must never cross plain HTTP on the internet.
+    ports:
+      - "127.0.0.1:8787:8787"
+    env_file:
+      - ./suprevolt.env      # your AI keys (copy deploy/suprevolt.env.example); chmod 600; never committed
+    volumes:
+      - suprevolt-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 2g
+    pids_limit: 128
+
+volumes:
+  suprevolt-data:

@@ -2,36 +2,25 @@ package com.zdycomp.p3companion
 
 /** What's new in this version, shown once after an update and on the About screen. */
 object WhatsNew {
-    const val VERSION = "3.1.0"
+    const val VERSION = "3.2.0"
 
     val headlines = listOf(
-        "Live view finds out what your glasses can do, and shows snapshots when they can't stream video",
-        "Answers start speaking sooner: the first sentence plays while the rest is still coming",
-        "Voice input works on more phones: if one speech service fails, the next one is tried",
-        "48 voice commands that work offline: \"take a picture\", \"battery\", \"set a timer for 5 minutes\" and more",
-        "New Speak through option: glasses audio (fast) or call audio",
+        "SupRevolt: scan a glasses photo, a document or text on your own server, with a verdict you can trust",
+        "Every scan shows its confidence out of 256, and says \"unknown\" instead of guessing",
+        "Say \"scan this\": the glasses take a photo and the verdict is read back to you",
+        "Send to SupRevolt from the Gallery; open it from Settings, Glasses or the Assistant",
     )
 
     val details = listOf(
-        "Live view" to listOf(
-            "If no video arrives within 6 seconds, the app tests every live view command your glasses might use and remembers the one that works.",
-            "When your glasses don't send video over Bluetooth, Live view switches to Snapshot view: a new picture every few seconds, with Stop and Save.",
-            "Snapshots are deleted after they're shown unless you tap Save this one or turn on Keep every snapshot.",
-            "Diagnostics › Test live view runs the same test and lets you share its full log.",
+        "SupRevolt" to listOf(
+            "Settings › SupRevolt: your server's https:// address and the access token it printed once. The token stays in the app's private storage, is shown masked and is never written to a settings file.",
+            "Scan a new or the last glasses photo, any document you pick, or text you type. Pick which scans to run, or All.",
+            "Results show the verdict (Clear, Caution, Danger, or Unknown with the reason), and one row per scan with a 0 to 256 confidence bar. Tap a row for details. Skipped scans are behind Show skipped.",
+            "Share report makes a plain summary without the server address or token.",
+            "Plain http:// is only allowed for this phone or your home network, after a warning.",
         ),
-        "Speaking" to listOf(
-            "The voice is ready as soon as the app opens, and answers are streamed and read sentence by sentence.",
-            "Glasses audio (fast) plays answers on the glasses' media sound without waiting for the call link; Call audio keeps the old behaviour for the whole conversation.",
-            "The connection log shows how long each answer took to start.",
-        ),
-        "Listening" to listOf(
-            "The app picks a speech service that works on your phone (Google's first), tries the next one if it fails, and remembers the good one.",
-            "If the glasses' mic isn't ready within 1.5 seconds, the phone's mic is used instead.",
-            "The Assistant shows which speech service listened and the exact error; Diagnostics › Test voice checks it in one tap.",
-        ),
-        "Voice commands" to listOf(
-            "Camera, recording, gallery, translation, timers and alarms, flashlight, volume, navigation, settings and accessibility, all handled on the phone.",
-            "Say \"what can I say\" for the list. Deleting a photo or clearing the chat asks you to say yes first.",
+        "Voice" to listOf(
+            "\"Scan this\", \"run a scan\" or \"SupRevolt scan\" takes a photo with the glasses, scans it and says the verdict.",
         ),
     )
 

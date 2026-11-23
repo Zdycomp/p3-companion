@@ -378,6 +378,30 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
     /** Masks a key for display, honouring [hideKeys]. */
     fun maskForDisplay(key: String): String = if (hideKeys) "Saved" else KeyFinder.mask(key)
 
+    // ---------- SupRevolt (3.2) ----------
+
+    /** The SupRevolt server's address, already checked by [SupRevoltWire.checkUrl]. */
+    var srUrl: String?
+        get() = sp.getString("sr_url", null)?.takeIf { it.isNotBlank() }
+        set(v) = sp.edit().putString("sr_url", v?.trim()?.takeIf { it.isNotEmpty() }).apply()
+
+    /** The server's access token. App-private storage only, shown masked, never in a backup file. */
+    var srToken: String?
+        get() = sp.getString("sr_token", null)?.takeIf { it.isNotBlank() }
+        set(v) = sp.edit().putString("sr_token", v?.trim()?.takeIf { it.isNotEmpty() }).apply()
+
+    /** The person accepted the warning for a plain http:// address on their own network. */
+    var srHttpOk: Boolean
+        get() = sp.getBoolean("sr_http_ok", false)
+        set(v) = sp.edit().putBoolean("sr_http_ok", v).apply()
+
+    /** Scans to run: empty means all of them. */
+    var srScans: List<String>
+        get() = sp.getString("sr_scans", null)?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList()
+        set(v) = sp.edit().putString("sr_scans", v.filter { Regex("^[a-z0-9_.]+$").matches(it) }.distinct().joinToString(",")).apply()
+
+    val srReady: Boolean get() = srUrl != null && srToken != null
+
     // ---------- backup and reset ----------
 
     /** Every saved value, for [SettingsBackup.export] (which keeps only the whitelisted keys). */
@@ -421,7 +445,7 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
     /** Back to defaults, keeping the glasses key, AI keys, saved glasses, drive and import history. */
     fun resetToDefaults() {
         val keep = sp.all.filterKeys { k ->
-            k == "user_key" || k.startsWith("ai_key_") || k == "drive_uri" || k == "drive_label" ||
+            k == "user_key" || k.startsWith("ai_key_") || k == "sr_token" || k == "sr_url" || k == "sr_http_ok" || k == "drive_uri" || k == "drive_label" ||
                 k == "ble_addr" || k == "ble_name" || k == "link_method" || k == "preview_action" ||
                 k == "live_path" || k == "live_probe_summary" || k == "live_probe_at" || k == "recognizer_service" ||
                 k.startsWith("asked_") || k == "last_import" || k == "last_seen_version" || k == "user_stopped"

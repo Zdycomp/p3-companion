@@ -76,6 +76,7 @@ class AssistantScreen(private val a: MainActivity) : Screen {
 
         render()
         return ui.screen("Assistant", col, actions = listOf(
+            BarAction(R.drawable.ic_shield_scan, "SupRevolt scan") { a.showSupRevolt() },
             BarAction(R.drawable.ic_settings, "AI setup") { showSetup = !showSetup; a.refresh() },
         ))
     }

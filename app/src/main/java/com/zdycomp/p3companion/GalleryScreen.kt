@@ -210,6 +210,9 @@ class GalleryScreen(private val a: MainActivity) : Screen {
             if (one != null) add(SheetItem("Open", R.drawable.ic_open_in_new) { open(one) })
             if (one != null && one.kind == MediaKind.PHOTO) {
                 add(SheetItem("Ask the Assistant about it", R.drawable.ic_auto_awesome) { selecting = false; selected.clear(); a.askAboutPhoto(one.uri) })
+                add(SheetItem("Send to SupRevolt", R.drawable.ic_shield_scan, "Scan it on your own server") {
+                    selecting = false; selected.clear(); a.sendToSupRevolt(one.uri)
+                })
             }
             add(SheetItem(if (selected.size == shown.size) "Select none" else "Select all", R.drawable.ic_select_all) {
                 if (selected.size == shown.size) selected.clear() else selected.addAll(shown.map { it.uri })

@@ -1,0 +1,1 @@
+{"confidence":224,"note":"looks clean","output":{"bracket_problems":[],"changed":false,"code":"fun add(a: Int, b: Int): Int {\n    return a + b\n}\n","fixes":[],"language":"kotlin"},"state":"ok","value":0}

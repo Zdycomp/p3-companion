@@ -150,6 +150,17 @@ class CommandRunner(private val a: MainActivity) {
             val lang = m.slots["lang"] ?: prefs.replyLanguage
             photoQuestion("Translating.", "Read all the text in this photo and translate it into $lang. Answer in $lang.")
         }
+        "suprevolt.scan" -> when {
+            !prefs.srReady -> Reply("Server not set up.", after = { a.showSupRevolt() })
+            SupRevolt.get(prefs).busy -> Reply("A scan is already running.")
+            else -> Reply("Scanning.", after = {
+                a.whenConnected("scan") {
+                    SupRevolt.get(prefs).scanNewGlassesPhoto(a) { job, err ->
+                        assistant.say(job?.takeIf { it.done }?.let { SupRevoltWire.spoken(it) } ?: err ?: "The scan didn't finish.")
+                    }
+                }
+            })
+        }
         "ai.repeat" -> assistant.lastAiLine()?.let { Reply(it) } ?: Reply("Nothing to repeat yet.")
         "ai.clear" -> { assistant.clearChat(); Reply("Cleared.") }
 

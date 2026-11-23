@@ -1,0 +1,1 @@
+{"confidence":256,"note":"invalid strand: 1 non-ACGT bases","output":{"codon_count":1,"codons":[{"bases":"ATC","complement":"TAG","start":0}],"codons_truncated":false,"error_count":1,"gc_content":0.5,"length":5,"lexer_errors":[{"base":"X","index":4}],"parser_errors":[{"base":"X","index":4}],"trailing_partial":"GX","valid":false},"state":"ok","value":30}

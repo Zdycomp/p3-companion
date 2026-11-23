@@ -431,6 +431,12 @@ object VoiceCommands {
             "(?:describe|explain) (?:my |the )?(?:last|latest) $PHOTO", "what is in (?:my |the )?(?:last|latest) $PHOTO",
             "tell me about (?:that|my last|the last) $PHOTO",
         ), "describe my last photo", "Gallery", needsNet = true),
+        // SupRevolt (3.2): a glasses photo sent to your own scan server. In translation mode these words
+        // are translated like any other sentence (only "stop" is heard there).
+        Rule("suprevolt.scan", P4, r(
+            "scan (?:this|that|it)", "run a scan", "(?:sup|super) ?revolt scan(?: this| that)?",
+            "scan (?:this|that|it) with (?:sup|super) ?revolt", "(?:sup|super) ?revolt this",
+        ), "scan this", "SupRevolt", needsNet = true),
         Rule("tr.say_in", P4, r(
             "how (?:do|would|can) (?:you|i) say (?<phrase>.+?) in (?<lang>$LANG)", "say (?<phrase>.+?) in (?<lang>$LANG)",
             "translate (?<phrase>.+?) (?:to|into) (?<lang>$LANG)", "what is (?<phrase>.+?) in (?<lang>$LANG)",

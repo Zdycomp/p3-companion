@@ -23,6 +23,9 @@ class SettingsBackupTest {
         "asked_android.permission.RECORD_AUDIO" to true,
         "last_import" to "Imported 3 photos",
         "last_seen_version" to 2,
+        "sr_token" to "Zx9-supRevolt-token-for-tests-0123456789abcdef",
+        "sr_url" to "https://scan.example.org",
+        "sr_http_ok" to true,
     )
 
     private fun fullPrefs(): Prefs {

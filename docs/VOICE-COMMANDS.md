@@ -110,6 +110,14 @@ None of these commands sends a message, places a call, shares, emails or posts. 
 | `ai.stop` | "stop", "cancel", "never mind", "be quiet", "shut up", "quiet" | `assistant.stop()`, and cancel any pending `photo_timer` / confirmation | Nothing (silence is the confirmation). Optional short earcon. | no | no |
 | `ai.clear` | "clear the chat", "start over", "new conversation", "forget this conversation" | After a spoken yes: `assistant.clearChat()` | Ask: "Clear this conversation? Say yes or no." Then "Cleared." | no | **yes** (it deletes history) |
 
+#### SupRevolt (3.2, 1)
+
+| id | Example phrasings | Action | Speaks back | Net | Confirm |
+|---|---|---|---|---|---|
+| `suprevolt.scan` | "scan this", "run a scan", "SupRevolt scan", "scan it with SupRevolt" | `MainActivity.whenConnected` → `SupRevolt.scanNewGlassesPhoto()`: a new glasses photo, shrunk to 2048 px, uploaded with `scans=all&wait=20` (or the scans picked on the SupRevolt screen) | "Scanning." then `SupRevoltWire.spoken()`: "Caution. Three flags. Confidence 182 of 256." / "Server not set up." / "Unknown: no AI key on the server." | **yes** | no |
+
+In `Mode.TRANSLATE` only a stop word is a command, so "scan this" said while translating is translated, not run.
+
 ### 2.5 Translation (5)
 
 | id | Example phrasings | Action | Speaks back | Net | Confirm |
@@ -328,12 +336,19 @@ Default state = `CommandState()` unless a state column is filled. `null` = falls
 | 60 | tell me a joke about pizza | | null | |
 | 61 | can you take a picture of the moon and tell me how far away it is | | null | (longer than 14 words → AI) |
 | 62 | what is the capital of France | | null | |
+| 63 | scan this | | `suprevolt.scan` | 3.2 |
+| 64 | SupRevolt scan | | `suprevolt.scan` | |
+| 65 | hey could you run a scan please | | `suprevolt.scan` | politeness stripped |
+| 66 | super revolt scan that | | `suprevolt.scan` | how speech services often spell it |
+| 67 | scan it with SupRevolt | | `suprevolt.scan` | |
+| 68 | scan the whole room and tell me what is dangerous | | null | → AI |
+| — | scan this (while translating) | `Mode.TRANSLATE` | translated, not run | only `isStop()` is checked there |
 
 Extra test classes:
 - `normalize()` unit tests: rows 2, 26 and 38 show punctuation, politeness and contraction handling.
 - Every `Rule.helpLabel` must match its own rule (a self-test loop over `rules`).
 - No two rules may match the same `helpLabel` (an ambiguity guard).
-- Speed: `match()` over all 62 rows × 1,000 iterations must average under 0.5 ms per call on the JVM.
+- Speed: `match()` over all 68 rows × 1,000 iterations must average under 0.5 ms per call on the JVM.
 
 ---
 

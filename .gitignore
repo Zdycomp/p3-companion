@@ -6,3 +6,6 @@ local.properties
 typecheck/.gradle/
 typecheck/build/
 *.keystore
+__pycache__/
+*.pyc
+server/suprevolt.env
