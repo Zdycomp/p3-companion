@@ -33,7 +33,8 @@ class VoiceRoutesTest {
         assertEquals(listOf(spp, phone), VoiceChoice.routeOrder(tested, headset = true, linked = true, useGlasses = true))
         // The data-link stream needs the glasses' data link.
         assertEquals(listOf(phone), VoiceChoice.routeOrder(tested, headset = true, linked = false, useGlasses = true))
-        assertEquals(listOf(spp, sco, phone), VoiceChoice.routeOrder(mapOf(spp to 1, sco to 1), true, true, true))
+        // 3.7: both proven: call audio first (it opens in under a second, the data link takes about 4 s).
+        assertEquals(listOf(sco, spp, phone), VoiceChoice.routeOrder(mapOf(spp to 1, sco to 1), true, true, true))
         // A proven call-audio mic before an unproven stream; one failure still tries it.
         assertEquals(listOf(sco, phone), VoiceChoice.routeOrder(mapOf(sco to 1, spp to 0), true, true, true))
         assertEquals(listOf(sco, phone), VoiceChoice.routeOrder(mapOf(sco to -1), true, true, true))
@@ -96,7 +97,8 @@ class VoiceRoutesTest {
     @Test fun ourOwnAudioSkipsServicesThatRefusedIt() {
         val piped = VoiceChoice.recognizerOrder(listOf(tts, gsa), onDevice = true, defaultAvailable = true,
             remembered = null, noMatch = emptySet(), noPipe = setOf(gsa.key, VoiceChoice.DEFAULT), piped = true)
-        assertEquals(listOf(tts.key, VoiceChoice.ON_DEVICE), piped)
+        // 3.7: our own audio never goes to the on-phone recognizer.
+        assertEquals(listOf(tts.key), piped)
         val unpiped = VoiceChoice.recognizerOrder(listOf(tts, gsa), true, true, null, emptySet(), setOf(gsa.key), piped = false)
         assertTrue(gsa.key in unpiped)
         assertEquals(listOf(VoiceChoice.DEFAULT), VoiceChoice.recognizerOrder(emptyList(), false, false, null, emptySet(), emptySet(), false))
@@ -236,7 +238,8 @@ class VoiceRoutesTest {
         val out = ArrayList<Short>()
         var p = 0
         while (p < stereo48.size) { val n = minOf(1_920, stereo48.size - p); out += r.process(stereo48.copyOfRange(p, p + n)).toList(); p += n }
-        assertTrue("got ${out.size}", abs(out.size - 16_000) <= 2)
+        // 3.7: the low-pass filter holds back half its length (48 input samples = 16 output samples) until more comes.
+        assertTrue("got ${out.size}", abs(out.size - 16_000) <= 20)
         val db = Level.of(out.toShortArray())
         assertEquals(Level.of(ShortArray(16_000) { (8_000 * sin(2 * PI * 440 * it / 16_000.0)).toInt().toShort() }), db, 0.5)
         // Already 16 kHz mono: unchanged.

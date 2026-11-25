@@ -225,6 +225,59 @@ object AiWire {
         }
     }
 
+    // ---------------- 3.7: transcribing the glasses' own audio ----------------
+
+    /** The model that transcribes the glasses' data-link audio (Claude doesn't take audio). */
+    const val TRANSCRIBE_MODEL = "gemini-2.5-flash"
+    /** What Gemini says when the clip has no speech in it. */
+    const val NO_SPEECH = "(no speech)"
+
+    fun transcribeInstruction(languageName: String): String =
+        "Transcribe exactly what is said in this audio recording. It is most likely in $languageName. " +
+            "Reply with the text only: no quotes, labels, timestamps or comments. If nobody speaks, reply with exactly $NO_SPEECH"
+
+    /** A Gemini request with a WAV clip inline (audio/wav, base64) and the transcribe instruction. */
+    fun geminiTranscribe(apiKey: String, wav: ByteArray, languageName: String): AiHttpRequest {
+        val key = apiKey.trim()
+        if (key.isEmpty()) throw AiException("Add your ${AiProvider.GEMINI.label} key first.")
+        val body = Json.write(
+            mapOf(
+                "contents" to listOf(
+                    mapOf(
+                        "role" to "user",
+                        "parts" to listOf(
+                            mapOf("inline_data" to mapOf("mime_type" to "audio/wav", "data" to b64(wav))),
+                            mapOf("text" to transcribeInstruction(languageName)),
+                        ),
+                    )
+                ),
+                "generationConfig" to mapOf("temperature" to 0),
+            )
+        )
+        return AiHttpRequest(
+            GEMINI_BASE + TRANSCRIBE_MODEL + ":generateContent",
+            listOf("x-goog-api-key" to key, "Content-Type" to "application/json"),
+            body,
+        )
+    }
+
+    /** The words Gemini heard, or null when it heard none (an empty answer or [NO_SPEECH]). */
+    fun parseTranscript(body: String): String? {
+        val text = try {
+            parseGemini(body)
+        } catch (e: AiException) {
+            val root = runCatching { parseObject(body) }.getOrNull()
+            val first = (root?.get("candidates") as? List<*>)?.firstOrNull() as? Map<*, *>
+            val finish = first?.get("finishReason") as? String
+            if (first != null && (finish == null || finish == "STOP")) return null
+            throw e
+        }
+        val clean = text.trim().trim('"', '“', '”').trim()
+        val letters = clean.filter { it.isLetter() }.lowercase(Locale.US)
+        if (clean.isEmpty() || letters == "nospeech") return null
+        return clean
+    }
+
     fun geminiBody(system: String, turns: List<AiTurn>, imageJpeg: ByteArray?): String {
         val conv = normalize(turns)
         val contents = conv.mapIndexed { i, t ->

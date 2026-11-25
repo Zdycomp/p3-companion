@@ -1,5 +1,66 @@
 # Changelog
 
+## 3.7.0 (versionCode 10)
+
+Goal: the glasses' own mic as a usable voice input. Owner's 3.6.0 log (moto g 2025, E13C-5): the phone mic worked;
+call audio (SCO) connected in 751 ms but the recognizer answered ERROR_TOO_MANY_REQUESTS; the data link (5750,
+head-0x1F Opus) delivered 700 packets but the piped recognizer answered ERROR_NO_MATCH. Live view, photos,
+connect, the phone-mic route, SupRevolt and translation are unchanged.
+
+**Call audio (SCO)**
+- One SpeechRecognizer app-wide (`RecognizerGate`, `Speech`): a fresh recognizer per attempt, made only when none
+  exists and 300 ms after the last was cancelled and destroyed; destroyed as soon as its listen ends (3.6 kept the
+  phone-mic test's recognizer alive and reused it); `cancelListening()` destroys too; a new `listen()` ends the one
+  before; a recognizer never gets a second `startListening()`.
+- `listen(networkFirst = true)` for call audio: Google's network recognizer (`com.google.android.googlequicksearchbox`)
+  first, then the remembered one, the on-phone one and the rest. The recognizer opens the mic itself with the glasses
+  as the communication device. `ERROR_TOO_MANY_REQUESTS` moves to the next service (after the cooldown).
+- Every attempt is logged with the service, its kind (Google network / on-phone / service) and its result.
+
+**Data link (5750, head 0x1F)**
+- Record layout checked against the log: a frame is one type byte `02`, then whole records `[len 0x28][40-byte
+  Opus packet]` (411 B = 1 + 10 × 41, 83 B = 1 + 2 × 41; TOC 0x48 = SILK WB 20 ms code 0, 0x4B = code 3 with
+  padding, e.g. `4B 41 1E` = 1 frame, 30 bytes of padding). 3.6 read the frames as one byte stream, so each frame's
+  `02` was "skipped" and unlocked the framer, and the first frame's second packet was lost (the 112 B skipped).
+  `MicRecords.split` now splits each frame on its own (`OpusFramer.feedRecords`); it also takes `02` before every
+  record.
+- Opus decoder setup (`OpusCsd.csd`): OpusHead with pre-skip 312 (6.5 ms at 48 kHz) and input rate 16000, csd-1
+  codec delay 6 500 000 ns (3.6: pre-skip 0 and delay 0), csd-2 seek pre-roll 80 ms.
+- `Resampler`: Blackman windowed-sinc low-pass (97 taps at 48 kHz, cut-off 6.8 kHz) before the rate change, so
+  48 kHz → 16 kHz is a low-pass and decimation by 3 (3.6 averaged 3 samples: 11 kHz came through at -7.5 dB, now
+  under -50 dB). Non-whole ratios interpolate between filtered samples.
+- Pipe (`PcmPipe`, `PipePacer`): 16 kHz mono PCM16 little-endian written in real time every 20 ms, after 200 ms
+  of pre-buffer, at most 100 ms ahead. Silence only when the input stalls for over 300 ms (3.6 slipped 20 ms of
+  silence in after every 60 ms without data, between the glasses' 200 ms bursts). The write end stays open until
+  our end-of-speech detector ends it. Encoding, channel count and sample rate extras set. Piped audio goes to
+  Google's network recognizer first and never to the on-phone one.
+- Pipe self-test (Test voice): 3 s of the phone's mic recorded with AudioRecord and piped in. If that gives no match
+  while the recognizer's own phone mic worked, `Prefs.pipeState` = UNUSABLE and pipes are no longer used
+  (`VoiceChoice.pipeVerdict`). Test voice forgets the 3.5/3.6 per-service "no pipe" marks before it.
+- Gemini route (`VoiceChoice.sppMode`): when the pipe is unusable (or Android < 13) and a Gemini key is set, the
+  glasses' audio is recorded with our VAD (`Vad.clip()`: 800 ms of quiet after speech, at most 15 s), sent to
+  `gemini-2.5-flash` as inline `audio/wav` base64 with "transcribe exactly, reply with the text only"
+  (`AiWire.geminiTranscribe`, `AiClient.transcribe`, `AiWire.parseTranscript`, "(no speech)" → nothing heard). The
+  log and the Assistant screen say so. With only a Claude key: "the glasses' data-link mic needs a Gemini key
+  (Claude doesn't take audio)" and the phone mic is used. A tap while listening ends the recording.
+
+**Test voice**
+- Order: phone mic, glasses call audio, glasses data link (pipe self-test, the glasses clip through the pipe, then
+  Gemini), with 1.5 s between routes. The default is a glasses route if one worked (call audio first, it opens in
+  under a second; the data link takes about 4 s), else the phone mic (`VoiceChoice.defaultRoute`). `routeOrder` now
+  puts proven call audio before the proven data link. One summary line, as before.
+- "Play back what the glasses heard" (Diagnostics): the last 8 s from each glasses route (the data-link stream's
+  ring buffer, the call-audio recording) saved as WAV in `cache/voice/`, played with MediaPlayer on the phone's
+  built-in speaker (not the glasses, which are the media output), and Share (ACTION_SEND_MULTIPLE through
+  `ClipProvider`, a framework-only read-only provider serving `cache/voice/*.wav`).
+
+**Tests**: 24 new JVM tests (`GlassesMicTest`): the 1F splitter with the log's exact byte prefixes and built frames,
+the old framer's loss shown, OpusHead/CSD, the resampler (tone in at 440 Hz/1/3 kHz → same frequency and level out,
+11 kHz removed, pieces = whole, 44.1 kHz), the WAV writer, the clip ring, the clip VAD, the recognizer gate, the
+pipe pacer, `sppMode`, `pipeVerdict`, `defaultRoute`, the network-first service order, the Gemini request and reply,
+the clip provider's names. Three 3.5 tests changed with the behaviour (call audio first, no on-phone recognizer for
+piped audio, the filter's 16-sample lag).
+
 ## 3.6.0 (versionCode 9)
 
 The owner asked for the best real-world live video and a translation log that can be read or spoken back.

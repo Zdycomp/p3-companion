@@ -30,6 +30,11 @@ import java.util.Locale
  * is opened through [activityFallback]. The service used and every error are kept for diagnostics.
  * 3.5: a service that listened and understood nothing hands over once to the next one (Google's
  * network recognizer after the on-phone one), and only words make a service "the one that works".
+ * 3.7: one recognizer app-wide ([RecognizerGate]): each attempt makes a fresh one only after the last
+ * one was cancelled and destroyed and 300 ms have passed, a new listen first ends the one before, and
+ * a recognizer is destroyed as soon as its listen is over (3.6 kept it, and the call-audio test then got
+ * ERROR_TOO_MANY_REQUESTS). The glasses' call audio and our own audio go to Google's network
+ * recognizer first; our own audio never to the on-phone one.
  *
  * 3.1 talking: one engine is started when the app starts ([warmUp]), the language is only set when
  * it changes, and answers can be spoken sentence by sentence while they're still arriving
@@ -61,6 +66,10 @@ class Speech(context: Context, private val prefs: Prefs) {
 
     private var recognizer: SpeechRecognizer? = null
     private var recognizerKey: String? = null
+    /** 3.7: the single-owner bookkeeping (at most one recognizer, a cooldown between them). */
+    private val gate = RecognizerGate(COOLDOWN_MS)
+    /** 3.7: this listen asked for Google's network recognizer first (the glasses' call audio). */
+    private var networkFirst = false
     /** 3.5: makes the app's own audio for one attempt (the glasses' data-link mic), or null for the recognizer's own mic. */
     private var audioFactory: (() -> AudioFeed?)? = null
     private var activeFeed: AudioFeed? = null
@@ -100,13 +109,13 @@ class Speech(context: Context, private val prefs: Prefs) {
      * A service that said "no match" while another understood goes last. [piped]: our own audio, so
      * services marked "no pipe" are left out.
      */
-    fun candidates(piped: Boolean = false): List<Service> {
+    fun candidates(piped: Boolean = false, networkFirst: Boolean = false): List<Service> {
         val found = services()
         val onDevice = onDeviceAvailable()
         val defaultOk = runCatching { SpeechRecognizer.isRecognitionAvailable(app) }.getOrDefault(false)
         val keys = VoiceChoice.recognizerOrder(
             found.map { VoiceChoice.Rec(it.second.flattenToString(), it.second.packageName) }, onDevice, defaultOk,
-            prefs.recognizerService, prefs.recognizerNoMatch, prefs.recognizerNoPipe, piped,
+            prefs.recognizerService, prefs.recognizerNoMatch, prefs.recognizerNoPipe, piped, networkFirst,
         )
         return keys.mapNotNull { k ->
             when (k) {
@@ -147,12 +156,17 @@ class Speech(context: Context, private val prefs: Prefs) {
         onResult: (String) -> Unit,
         onError: (String, Int) -> Unit,
         audio: (() -> AudioFeed?)? = null,
+        networkFirst: Boolean = false,
     ) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            main.post { listen(languageTag, onPartial, onResult, onError, audio) }
+            main.post { listen(languageTag, onPartial, onResult, onError, audio, networkFirst) }
             return
         }
+        // 3.7: never two listens at once: the one before ends here (its callbacks are dropped by the token).
+        attemptId++
         endFeed()
+        destroyRecognizer()
+        this.networkFirst = networkFirst
         val piped = audio != null && Build.VERSION.SDK_INT >= 33
         audioFactory = if (piped) audio else null
         lastFed = false
@@ -162,7 +176,7 @@ class Speech(context: Context, private val prefs: Prefs) {
         val token = ++listenToken
         lastAttempts = emptyList()
         lastErrorDetail = null
-        val chain = candidates(piped)
+        val chain = candidates(piped, networkFirst)
         if (piped && chain.isEmpty()) {
             lastPipeRejected = true
             note("no speech service takes the app's own audio")
@@ -204,22 +218,35 @@ class Speech(context: Context, private val prefs: Prefs) {
             return
         }
         val svc = chain[index]
-        val reuse = recognizer != null && recognizerKey == svc.key
-        val r = if (reuse) recognizer!! else {
-            destroyRecognizer()
-            try {
-                when {
-                    svc.onDevice && Build.VERSION.SDK_INT >= 31 -> SpeechRecognizer.createOnDeviceSpeechRecognizer(app)
-                    svc.component != null -> SpeechRecognizer.createSpeechRecognizer(app, svc.component)
-                    else -> SpeechRecognizer.createSpeechRecognizer(app)
-                }
-            } catch (e: Exception) {
-                note("${svc.label}: couldn't start (${e.javaClass.simpleName})")
-                attempt(chain, index + 1, tag, token, lastFailure, onPartial, onResult, onError)
-                return
-            }.also { recognizer = it; recognizerKey = svc.key }
+        // 3.7: one recognizer at a time, freshly made, 300 ms after the last one was destroyed.
+        destroyRecognizer()
+        val wait = gate.waitBeforeCreate(SystemClock.elapsedRealtime())
+        if (wait > 0) {
+            main.postDelayed({ attempt(chain, index, tag, token, lastFailure, onPartial, onResult, onError) }, wait)
+            return
+        }
+        val r = try {
+            when {
+                svc.onDevice && Build.VERSION.SDK_INT >= 31 -> SpeechRecognizer.createOnDeviceSpeechRecognizer(app)
+                svc.component != null -> SpeechRecognizer.createSpeechRecognizer(app, svc.component)
+                else -> SpeechRecognizer.createSpeechRecognizer(app)
+            }
+        } catch (e: Exception) {
+            note("${svc.label}: couldn't start (${e.javaClass.simpleName})")
+            gate.released(SystemClock.elapsedRealtime())
+            main.post { attempt(chain, index + 1, tag, token, lastFailure, onPartial, onResult, onError) }
+            return
+        }
+        gate.created(SystemClock.elapsedRealtime())
+        recognizer = r
+        recognizerKey = svc.key
+        val kind = when {
+            svc.onDevice -> "on-phone"
+            svc.component?.packageName == VoiceChoice.GOOGLE_APP -> "Google network"
+            else -> "service"
         }
         val myAttempt = ++attemptId
+        val feedWanted = audioFactory != null
         var ready = false
         var partials = false
         var finished = false
@@ -229,12 +256,6 @@ class Speech(context: Context, private val prefs: Prefs) {
             finished = true
             endFeed()
             destroyRecognizer()
-            if (reuse && !moveOn) {
-                // A kept recognizer can go stale: try the same service once more, freshly made.
-                note("${svc.label}: $why, trying it again fresh")
-                main.post { attempt(chain, index, tag, token, lastFailure, onPartial, onResult, onError) }
-                return
-            }
             note("${svc.label}: $why")
             // A service that only said "no match" stays remembered until another one understands.
             if (!moveOn && prefs.recognizerService == svc.key) prefs.recognizerService = null
@@ -273,15 +294,19 @@ class Speech(context: Context, private val prefs: Prefs) {
                 finished = true
                 val heard = feed?.heardSpeech
                 endFeed()
+                // 3.7: the listen is over: let this recognizer go (unless a new listen already replaced it).
+                gate.stoppedListening()
+                main.post { if (recognizer === r) destroyRecognizer() }
                 resultAt = SystemClock.elapsedRealtime()
                 works()
-                note("${svc.label}: OK" + if (feed != null) " (fed the app's own audio${if (heard == true) ", speech heard" else ""})" else "")
+                note("${svc.label} ($kind): OK, heard \"${text.take(60)}\"" + if (feed != null) " (fed the app's own audio${if (heard == true) ", speech heard" else ""})" else "")
                 onResult(text)
             }
 
             override fun onError(error: Int) {
                 if (token != listenToken || myAttempt != attemptId || finished) return
-                val detail = "${errorName(error)} ($error) from ${svc.label}" + if (feed != null) " fed the app's own audio" else ""
+                gate.stoppedListening()
+                val detail = "${errorName(error)} ($error) from ${svc.label} ($kind)" + if (feed != null) " fed the app's own audio" else ""
                 lastErrorDetail = detail
                 val micOk = app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
                 val vadHeard = feed?.heardSpeech == true
@@ -331,6 +356,8 @@ class Speech(context: Context, private val prefs: Prefs) {
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, svc.onDevice)
+            // 3.7: the glasses' call audio and our own audio: Google's network recognizer, not offline.
+            if (networkFirst || feedWanted) putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false)
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, app.packageName)
             // End the turn sooner after the person stops talking (engines that ignore these are fine).
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 700L)
@@ -346,6 +373,7 @@ class Speech(context: Context, private val prefs: Prefs) {
             if (f == null || !f.start()) {
                 f?.stop()
                 finished = true
+                destroyRecognizer()
                 lastPipeRejected = true
                 note("${svc.label}: the app's own audio didn't start")
                 onError("The glasses' mic stream stopped.", SpeechRecognizer.ERROR_AUDIO)
@@ -360,12 +388,24 @@ class Speech(context: Context, private val prefs: Prefs) {
             intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, MicCapture.RATE)
             note("${svc.label}: fed the app's own audio (16 kHz mono PCM16)")
         }
+        if (!gate.startListening()) {
+            next(SpeechRecognizer.ERROR_RECOGNIZER_BUSY, "already listening")
+            return
+        }
+        note("${svc.label} ($kind): listening" + when {
+            feed != null -> " to the app's own audio"
+            networkFirst -> " (it records the call-audio mic itself)"
+            else -> " (it records the mic itself)"
+        })
         try {
             r.startListening(intent)
         } catch (e: Exception) {
             next(SpeechRecognizer.ERROR_CLIENT, "couldn't start listening (${e.javaClass.simpleName})")
         }
     }
+
+    /** 3.7: words came from elsewhere (Gemini): the timing lines count from now. */
+    fun markResult() { resultAt = SystemClock.elapsedRealtime() }
 
     /** Stop listening and use what was heard so far. */
     fun finishListening() {
@@ -377,13 +417,15 @@ class Speech(context: Context, private val prefs: Prefs) {
         listenToken++
         attemptId++
         endFeed()
-        runCatching { recognizer?.cancel() }
+        // 3.7: cancel() and destroy(), so nothing is left alive for the next listen.
+        destroyRecognizer()
     }
 
     private fun destroyRecognizer() {
         recognizer?.let { r ->
             runCatching { r.cancel() }
             runCatching { r.destroy() }
+            gate.released(SystemClock.elapsedRealtime())
         }
         recognizer = null
         recognizerKey = null
@@ -608,6 +650,8 @@ class Speech(context: Context, private val prefs: Prefs) {
 
     companion object {
         const val ON_DEVICE = VoiceChoice.ON_DEVICE
+        /** 3.7: the wait between destroying one recognizer and making the next. */
+        const val COOLDOWN_MS = 300L
         const val DEFAULT = VoiceChoice.DEFAULT
 
         fun errorName(code: Int): String = when (code) {

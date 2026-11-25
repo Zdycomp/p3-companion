@@ -230,7 +230,8 @@ class AssistantScreen(private val a: MainActivity) : Screen {
             // 3.5: which mic the next question starts with (Test voice decides; others are tried if it fails).
             val next = asst.plannedMic()
             box.addView(ui.banner("$text\nMic for the next question: the ${next.label}" +
-                if (next == MicRoute.PHONE && a.prefs.useGlassesAudio && a.prefs.voiceTestSummary == null) " (run Test voice in Diagnostics to try the glasses' mic)" else "",
+                (if (next == MicRoute.PHONE && a.prefs.useGlassesAudio && a.prefs.voiceTestSummary == null) " (run Test voice in Diagnostics to try the glasses' mic)" else "") +
+                (asst.glassesMicNote()?.let { "\n$it" } ?: ""),
                 tone).apply { (layoutParams as LinearLayout.LayoutParams).bottomMargin = ui.dp(8) })
         }
         val box = liveBox ?: return

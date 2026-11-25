@@ -133,5 +133,12 @@
             android:name=".ConversationService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- 3.7: shares the voice clips from Test voice ("Play back what the glasses heard"), read-only -->
+        <provider
+            android:name=".ClipProvider"
+            android:authorities="${applicationId}.clips"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>

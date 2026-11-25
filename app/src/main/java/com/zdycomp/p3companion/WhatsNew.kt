@@ -2,36 +2,29 @@ package com.zdycomp.p3companion
 
 /** What's new in this version, shown once after an update and on the About screen. */
 object WhatsNew {
-    const val VERSION = "3.6.0"
+    const val VERSION = "3.7.0"
 
     val headlines = listOf(
-        "New: Conversation translate keeps listening, translates every phrase, shows it with the time and saves the log",
-        "Hear any phrase again, read a whole conversation aloud, share it as text, or delete it",
-        "Two-way mode, auto-detect, speak each translation through the glasses, and keep going in the background",
-        "Live view: the picture has its exact shape, fit or fill, rotate, pinch to zoom and full screen",
-        "Live view shows \"Live\" with the delay in milliseconds and drops late pictures instead of lagging",
-        "Snapshots are saved at the glasses' own size (or 2× and sharpened), recordings can have the phone's mic",
-        "Live view opens again by itself after Bluetooth drops, if you're still on the screen",
-        "\"Try higher quality\" tests whether the glasses send a bigger picture (only when you ask)",
+        "Glasses mic: the call-audio route no longer trips over a speech service left running (one at a time now)",
+        "Glasses mic over the data link: the sound is decoded properly and fed to the speech service in real time",
+        "If this phone's speech service won't take the glasses' sound, Gemini writes down what you said",
+        "Test voice: Play back what the glasses heard on the phone's speaker, and share it",
+        "Voice questions start with the glasses' mic whenever one of its routes works",
     )
 
     val details = listOf(
-        "Conversation translate" to listOf(
-            "Open it from the Assistant tab (Translate) or say \"translate conversation\" or \"start translating\". It uses the mic that works from 3.5.",
-            "Each phrase shows in grey while you speak, then the time, what was said, the translation and its language. Say \"stop\" or \"stop translating\" to end.",
-            "Two-way: English is translated into Spanish and Spanish into English, by the language the AI hears; after each phrase it listens for the other person. Auto-detect lets the AI work out the language.",
-            "Each translation can be spoken in its own language, through the glasses when they're connected; listening pauses while it speaks.",
-            "Every session is saved on the phone (never with an API key). Open one to read it, tap a phrase to hear it again, Read all, Share or Delete.",
-            "Without an AI key the words are still logged, and the screen shows how to add one.",
-            "Leaving the screen stops it, unless \"Keep translating in the background\" is on: a notification with Stop shows then.",
+        "Glasses mic" to listOf(
+            "Only one speech recognizer runs at a time. Each one is closed when its turn ends, and the next waits 300 ms. In 3.6 the old one was still alive, so the call-audio test got \"too many requests\".",
+            "Call audio tries Google's network speech recognition first, then the on-phone one. The recognizer records the glasses' mic itself.",
+            "Data link: each glasses frame is now split into its 40-byte Opus packets the right way (none lost at the start of a frame). The decoder gets the right setup, and 48 kHz is turned into 16 kHz with a real low-pass filter.",
+            "The sound goes to the speech service at real-time speed, without the short gaps 3.6 slipped in between the glasses' bursts.",
+            "Test voice checks whether this phone's speech service understands sound the app hands it. It records 3 s from the phone's mic and passes it on. If that fails while the phone's mic works on its own, the app stops handing sound over.",
+            "Then, with a Gemini key, the app records what you say into the glasses until you stop (0.8 s of quiet, at most 15 s) and Gemini writes it down. The Assistant screen says when this is used. A Claude key alone can't do this (Claude doesn't take audio), so questions use the phone's mic.",
         ),
-        "Live view" to listOf(
-            "The frame takes the video's exact shape. Fit or Fill, Rotate in quarter turns, pinch to zoom, drag to look around, double-tap to zoom or reset.",
-            "Full screen turns the phone sideways and hides everything but the picture; the controls come back with a tap and hide after 3 seconds.",
-            "Pictures are shown the moment they're decoded and a late one is skipped, so the picture doesn't fall behind. The stats show \"Live\" and the delay from the glasses to the screen.",
-            "Snapshots come from the decoded picture at the glasses' own size, turned like the screen, optionally 2× larger and sharpened. Recordings are at the native size and can include the phone's mic.",
-            "If Bluetooth drops while you watch, the screen says so and opens live view again when the glasses are back.",
-            "Try higher quality (Live view and Diagnostics) opens the live view with 5 other settings for 3 seconds each and closes it again after each. If one gives a bigger picture at 15 fps or more, you can pick it under Quality; otherwise it says the glasses send 320×240 only.",
+        "Test voice" to listOf(
+            "It tests the phone mic, then the glasses' call audio, then the data link (handing sound over first, then Gemini), with a short pause between them.",
+            "Play back what the glasses heard plays the last 8 s from each glasses route on the phone's own speaker, so you can hear if it was your voice or noise. Share sends the WAV files.",
+            "If one of the glasses' routes works, voice questions start with it (call audio first, it opens fastest). Otherwise they use the phone's mic.",
         ),
     )
 

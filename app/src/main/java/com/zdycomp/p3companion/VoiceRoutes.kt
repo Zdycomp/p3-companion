@@ -1,8 +1,12 @@
 package com.zdycomp.p3companion
 
 import android.speech.SpeechRecognizer
+import kotlin.math.PI
+import kotlin.math.ceil
+import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.log10
+import kotlin.math.sin
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
@@ -45,8 +49,8 @@ object VoiceChoice {
     fun scoreAfter(old: Int, worked: Boolean): Int = if (worked) 1 else max(SKIP_AT, min(old, 0) - 1)
 
     /**
-     * The mics to try for one voice question, best first. Glasses routes that worked come first (the
-     * data-link stream before call audio), then call audio when not known, then the phone's mic, which
+     * The mics to try for one voice question, best first. Glasses routes that worked come first (3.7:
+     * call audio before the data-link stream, which takes about 4 s to start), then call audio when not known, then the phone's mic, which
      * is always the last resort. The data-link stream is only tried once Test voice or a question
      * proved it works, because waiting for it costs about 3 s when it doesn't.
      */
@@ -55,8 +59,9 @@ object VoiceChoice {
         val spp = scores[MicRoute.GLASSES_SPP] ?: 0
         val sco = scores[MicRoute.GLASSES_SCO] ?: 0
         if (useGlasses) {
-            if (linked && spp > 0) out += MicRoute.GLASSES_SPP
+            // 3.7: proven call audio first (it opens in under a second; the data link takes about 4 s to start).
             if (headset && sco > 0) out += MicRoute.GLASSES_SCO
+            if (linked && spp > 0) out += MicRoute.GLASSES_SPP
             if (headset && sco in (SKIP_AT + 1)..0) out += MicRoute.GLASSES_SCO
         }
         out += MicRoute.PHONE
@@ -83,18 +88,23 @@ object VoiceChoice {
      */
     fun recognizerOrder(
         found: List<Rec>, onDevice: Boolean, defaultAvailable: Boolean, remembered: String?,
-        noMatch: Set<String>, noPipe: Set<String>, piped: Boolean,
+        noMatch: Set<String>, noPipe: Set<String>, piped: Boolean, networkFirst: Boolean = false,
     ): List<String> {
         val all = ArrayList<String>()
         fun add(k: String) { if (k !in all) all += k }
         val keys = found.map { it.key }.toSet()
+        // 3.7: the glasses' call audio and our own audio go to Google's network recognizer first.
+        if (networkFirst || piped) found.filter { it.pkg == GOOGLE_APP }.forEach { add(it.key) }
         if (remembered != null && (remembered in keys || (remembered == ON_DEVICE && onDevice))) add(remembered)
         PREFERRED.forEach { pkg -> found.filter { it.pkg == pkg }.forEach { add(it.key) } }
         if (onDevice) add(ON_DEVICE)
         found.forEach { add(it.key) }
         if (all.isEmpty() || defaultAvailable) add(DEFAULT)
-        val usable = if (piped) all.filter { it !in noPipe } else all
-        return usable.filter { it !in noMatch } + usable.filter { it in noMatch }
+        // 3.7: our own audio never goes to the on-phone recognizer (it answered "no match" for it twice).
+        val usable = if (piped) all.filter { it !in noPipe && it != ON_DEVICE } else all
+        val pinned = if (networkFirst || piped) usable.filter { k -> found.any { it.key == k && it.pkg == GOOGLE_APP } } else emptyList()
+        val rest = usable - pinned.toSet()
+        return pinned + rest.filter { it !in noMatch } + rest.filter { it in noMatch }
     }
 
     enum class OnError {
@@ -125,7 +135,9 @@ object VoiceChoice {
             noMatch && !ready -> OnError.NEXT_SERVICE
             noMatch && !partials && !piped && !triedAnother -> OnError.NEXT_SERVICE_ONCE
             noMatch -> OnError.GIVE_UP
-            code == SpeechRecognizer.ERROR_TOO_MANY_REQUESTS || code == SpeechRecognizer.ERROR_AUDIO -> OnError.GIVE_UP
+            // 3.7: "too many requests" is about that service's sessions: the next service (after the cooldown) may listen.
+            code == SpeechRecognizer.ERROR_TOO_MANY_REQUESTS -> OnError.NEXT_SERVICE
+            code == SpeechRecognizer.ERROR_AUDIO -> OnError.GIVE_UP
             partials -> OnError.GIVE_UP
             else -> OnError.NEXT_SERVICE
         }
@@ -135,6 +147,49 @@ object VoiceChoice {
     fun parseSet(s: String?): Set<String> = s?.split('|')?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet() ?: emptySet()
     fun formatSet(s: Set<String>): String = s.sorted().joinToString("|")
 
+    /**
+     * 3.7: the mic voice questions start with after Test voice: a glasses route if one worked (call audio
+     * first, it opens fastest), else the phone's mic, else null.
+     */
+    fun defaultRoute(results: Map<MicRoute, Pair<Boolean, String>>): MicRoute? =
+        listOf(MicRoute.GLASSES_SCO, MicRoute.GLASSES_SPP, MicRoute.PHONE).firstOrNull { results[it]?.first == true }
+
+    /** 3.7: whether piping our own audio into the recognizer works on this phone (the pipe self-test). */
+    enum class PipeState { UNKNOWN, OK, UNUSABLE }
+
+    /** 3.7: how the glasses' data-link audio becomes words. */
+    enum class SppMode {
+        /** Fed live to the speech service through a pipe (EXTRA_AUDIO_SOURCE). */
+        PIPE,
+        /** Recorded with our own end-of-speech detector and transcribed by Gemini. */
+        GEMINI,
+        /** Nothing can turn it into words here (no pipe, no Gemini key). */
+        NONE,
+    }
+
+    /**
+     * The pipe when it isn't known to be broken (Android 13+), else Gemini when there's a Gemini key.
+     * Claude doesn't take audio, so a Claude key alone gives [SppMode.NONE].
+     */
+    fun sppMode(pipe: PipeState, sdk: Int, geminiKey: Boolean): SppMode = when {
+        sdk >= 33 && pipe != PipeState.UNUSABLE -> SppMode.PIPE
+        geminiKey -> SppMode.GEMINI
+        else -> SppMode.NONE
+    }
+
+    /**
+     * The pipe self-test's verdict: our phone-mic recording piped into the recognizer gave [pipedWorked]
+     * words (or [pipedCode]), while the recognizer's own mic gave [ownMicWorked]. Only a "no match" (or a
+     * refusal) when the recognizer's own mic works proves the pipe unusable.
+     */
+    fun pipeVerdict(pipedWorked: Boolean, pipedCode: Int, ownMicWorked: Boolean, spoke: Boolean): PipeState = when {
+        pipedWorked -> PipeState.OK
+        !ownMicWorked || !spoke -> PipeState.UNKNOWN
+        pipedCode == SpeechRecognizer.ERROR_NO_MATCH || pipedCode == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
+            pipedCode == SpeechRecognizer.ERROR_CLIENT || pipedCode == SpeechRecognizer.ERROR_AUDIO -> PipeState.UNUSABLE
+        else -> PipeState.UNKNOWN
+    }
+
     /** One line for Test voice: what works and what doesn't. */
     fun summary(results: Map<MicRoute, Pair<Boolean, String>>): String {
         val ok = MicRoute.values().filter { results[it]?.first == true }
@@ -143,7 +198,7 @@ object VoiceChoice {
         if (ok.isNotEmpty()) parts += "Works: " + ok.joinToString(", ") { "${it.label} (${results[it]!!.second})" }
         if (bad.isNotEmpty()) parts += "Not working: " + bad.joinToString(", ") { "${it.label} (${results[it]!!.second})" }
         if (parts.isEmpty()) return "Nothing was tested."
-        val use = ok.firstOrNull()
+        val use = defaultRoute(results)
         return parts.joinToString(". ") + ". " + (use?.let { "Voice questions will use the ${it.label}." } ?: "No mic worked.")
     }
 }
@@ -193,7 +248,12 @@ class Vad(
     private var loudRun = 0.0
     private var quietRun = 0.0
 
-    private companion object { const val START_FLOOR_CAP_DB = -35.0 }
+    companion object {
+        private const val START_FLOOR_CAP_DB = -35.0
+
+        /** 3.7: for a clip we record ourselves (Gemini): ends 800 ms after the speech, at most 15 s. */
+        fun clip() = Vad(endSilenceMs = 800, noSpeechMs = 8_000, maxMs = 15_000)
+    }
 
     val ended: Boolean get() = state == State.ENDED_AFTER_SPEECH || state == State.ENDED_NO_SPEECH || state == State.ENDED_MAX
 
@@ -261,13 +321,91 @@ class OpusFramer(private val lengthByte: Int = 0x28) {
 
     private fun skip() { skipped++; run = 0; locked = false }
 
+    /**
+     * 3.7: one whole head-0x1F frame (`02` + `[len][packet]`…, [MicRecords]); nothing is carried over
+     * between frames. Two clean packets in one frame (or three in a row) lock it.
+     */
+    fun feedRecords(frame: ByteArray): List<ByteArray> {
+        val sp = MicRecords.split(frame)
+        skipped += sp.skipped
+        packets += sp.packets.size
+        if (sp.skipped > 0) run = 0
+        run += sp.packets.size
+        if ((sp.packets.size >= 2 && sp.skipped == 0) || run >= 3) locked = true
+        return sp.packets
+    }
+
     fun reset() { buf = ByteArray(0); run = 0; locked = false }
 }
 
-/** Codec setup for Android's Opus decoder (MediaCodec "audio/opus" wants all three). */
+/**
+ * 3.7: the head-0x1F mic frames (cmd 8002) as the E13C-5 sends them: one type byte `02`, then whole
+ * records `[len][len bytes]`, each one Opus packet. 3.6's log: a 411-byte frame is `02` + 10 × `[28][40 B]`
+ * (1 + 10·41) and an 83-byte one `02` + 2 × `[28][40 B]`. The packets are 20 ms SILK wideband (TOC 0x48,
+ * code 0, or 0x4B, code 3 with padding to make them all 40 bytes). 3.6 read the frames as one byte
+ * stream, so the `02` at each frame's start was "skipped" and the first frame's second packet lost.
+ */
+object MicRecords {
+    const val TYPE_OPUS = 0x02
+
+    class Split(val packets: List<ByteArray>, val skipped: Int)
+
+    /** True when [b] looks like such a frame: `02` then a record length with an Opus packet after it. */
+    fun looksLike(b: ByteArray): Boolean = b.size >= 3 && (b[0].toInt() and 0xFF) == TYPE_OPUS &&
+        lengthOk(b[1].toInt() and 0xFF) && 2 + (b[1].toInt() and 0xFF) <= b.size && tocOk(b, 2, b[1].toInt() and 0xFF)
+
+    private fun lengthOk(len: Int) = len in 3..0x7F && len != TYPE_OPUS
+
+    /** A plausible Opus packet at [off] of [len] bytes (RFC 6716 3.1/3.2: a code-3 packet has 1..48 frames). */
+    fun tocOk(b: ByteArray, off: Int, len: Int): Boolean {
+        if (len < 1 || off + len > b.size) return false
+        val code = b[off].toInt() and 0x03
+        if (code == 3) {
+            if (len < 2) return false
+            val m = b[off + 1].toInt() and 0x3F
+            return m in 1..48
+        }
+        return true
+    }
+
+    /**
+     * Splits one frame's payload. Also takes `02` before every record (`[02][28][40 B]`…), which is how
+     * the layout first looked in the log. Bytes that don't make a record are counted in [Split.skipped];
+     * the frame's own leading `02` isn't.
+     */
+    fun split(b: ByteArray): Split {
+        val out = ArrayList<ByteArray>()
+        var skipped = 0
+        var p = 0
+        while (p < b.size) {
+            var q = p
+            if ((b[q].toInt() and 0xFF) == TYPE_OPUS && q + 1 < b.size && lengthOk(b[q + 1].toInt() and 0xFF)) q++
+            val len = b[q].toInt() and 0xFF
+            if (lengthOk(len) && q + 1 + len <= b.size && tocOk(b, q + 1, len)) {
+                out += b.copyOfRange(q + 1, q + 1 + len)
+                p = q + 1 + len
+            } else {
+                skipped++
+                p++
+            }
+        }
+        return Split(out, skipped)
+    }
+}
+
+/**
+ * Codec setup for Android's Opus decoder (MediaCodec "audio/opus" wants all three: csd-0 the OpusHead,
+ * csd-1 the codec delay and csd-2 the seek pre-roll, both in nanoseconds). The glasses send 16 kHz
+ * SILK wideband mono; the decoder always works at 48 kHz, where the pre-skip is counted (RFC 7845 5.1):
+ * an encoder's usual 6.5 ms look-ahead is 312 samples at 48 kHz, and the codec delay is that same time.
+ */
 object OpusCsd {
+    /** 6.5 ms at 48 kHz, libopus' look-ahead for 16 kHz input too (RFC 7845 recommends at least this). */
+    const val PRE_SKIP = 312
+    const val DECODE_RATE = 48_000
+
     /** The 19-byte OpusHead: version 1, [channels], pre-skip, input rate, gain 0, mapping family 0. */
-    fun head(channels: Int = 1, inputRate: Int = 16_000, preSkip: Int = 0): ByteArray {
+    fun head(channels: Int = 1, inputRate: Int = 16_000, preSkip: Int = PRE_SKIP): ByteArray {
         val b = ByteArray(19)
         "OpusHead".forEachIndexed { i, c -> b[i] = c.code.toByte() }
         b[8] = 1
@@ -280,20 +418,31 @@ object OpusCsd {
     /** csd-1 (codec delay) and csd-2 (seek pre-roll): nanoseconds, 64-bit little-endian. */
     fun nanos(ns: Long): ByteArray = ByteArray(8) { i -> ((ns shr (8 * i)) and 0xFF).toByte() }
 
+    /** The pre-skip as time: 312 samples at 48 kHz = 6 500 000 ns. */
+    fun codecDelayNs(preSkip: Int = PRE_SKIP): Long = preSkip * 1_000_000_000L / DECODE_RATE
+
+    /** csd-0, csd-1, csd-2 for 16 kHz mono SILK decoded at 48 kHz. */
+    fun csd(channels: Int = 1, inputRate: Int = 16_000): List<ByteArray> =
+        listOf(head(channels, inputRate, PRE_SKIP), nanos(codecDelayNs(PRE_SKIP)), nanos(SEEK_PREROLL_NS))
+
     const val SEEK_PREROLL_NS = 80_000_000L
     /** 20 ms per packet. */
     const val PACKET_US = 20_000L
 }
 
 /**
- * Streams any PCM16 rate and channel count down to 16 kHz mono: channels are averaged, then each
- * output sample is the mean of the input samples it covers (a box filter, enough against aliasing
- * for speech recognition). State is kept between calls so a stream can be fed in pieces.
+ * Streams any PCM16 rate and channel count to 16 kHz mono. Channels are averaged; going down, a
+ * windowed-sinc low-pass (Blackman, cut-off at 85 % of the new Nyquist) runs before the rate change,
+ * so 48 kHz → 16 kHz is a real low-pass and decimation by 3 (3.6 averaged 3 samples, which let
+ * 8-16 kHz fold back into the speech band). A ratio that isn't whole interpolates between filtered
+ * samples. State is kept between calls so a stream can be fed in pieces; output lags by half the filter.
  */
 class Resampler(private val inRate: Int, private val channels: Int, private val outRate: Int = 16_000) {
-    private var buf = ShortArray(0)
+    private val step = inRate.toDouble() / outRate
+    private val taps: DoubleArray = if (inRate > outRate) lowPass(inRate, outRate) else doubleArrayOf(1.0)
+    private val half = taps.size / 2
+    private var hist = ShortArray(0)
     private var pos = 0.0
-    private val stepIn = inRate.toDouble() / outRate
 
     fun process(src: ShortArray, count: Int = src.size): ShortArray {
         val frames = count / channels
@@ -303,23 +452,182 @@ class Resampler(private val inRate: Int, private val channels: Int, private val 
             (s / channels).toShort()
         }
         if (inRate == outRate) return mono
-        val b = ShortArray(buf.size + mono.size)
-        System.arraycopy(buf, 0, b, 0, buf.size)
-        System.arraycopy(mono, 0, b, buf.size, mono.size)
-        val out = ArrayList<Short>((mono.size / stepIn).toInt() + 2)
-        val half = max(stepIn, 1.0) / 2
-        while (pos + half < b.size) {
-            val from = max(0, floor(pos - half + 0.5).toInt())
-            val to = min(b.size - 1, floor(pos + half - 0.5).toInt().coerceAtLeast(from))
-            var s = 0L
-            for (i in from..to) s += b[i]
-            out += (s / (to - from + 1)).toInt().toShort()
-            pos += stepIn
+        val b = ShortArray(hist.size + mono.size)
+        System.arraycopy(hist, 0, b, 0, hist.size)
+        System.arraycopy(mono, 0, b, hist.size, mono.size)
+        val out = ShortArray((mono.size / step).toInt() + 4)
+        var n = 0
+        while (true) {
+            val i0 = floor(pos).toInt()
+            val frac = pos - i0
+            val needs = if (frac > 1e-9) i0 + 1 + half else i0 + half
+            if (needs >= b.size) break
+            var y = fir(b, i0)
+            if (frac > 1e-9) y += frac * (fir(b, i0 + 1) - y)
+            if (n == out.size) break
+            out[n++] = y.coerceIn(-32768.0, 32767.0).let { Math.round(it).toInt() }.toShort()
+            pos += step
         }
-        val keepFrom = max(0, min(b.size, floor(pos - half).toInt()))
-        buf = b.copyOfRange(keepFrom, b.size)
+        val keepFrom = max(0, min(b.size, floor(pos).toInt() - half))
+        hist = b.copyOfRange(keepFrom, b.size)
         pos -= keepFrom
-        return out.toShortArray()
+        return out.copyOf(n)
+    }
+
+    private fun fir(b: ShortArray, center: Int): Double {
+        var acc = 0.0
+        val start = center - half
+        for (k in taps.indices) {
+            val i = start + k
+            if (i >= 0) acc += taps[k] * b[i]
+        }
+        return acc
+    }
+
+    companion object {
+        /** Low-pass taps at [inRate] for a new rate [outRate]: 32 taps per unit of the ratio, odd count. */
+        fun lowPass(inRate: Int, outRate: Int): DoubleArray {
+            val ratio = inRate.toDouble() / outRate
+            val n = (32 * ceil(ratio)).toInt() + 1
+            val fc = 0.85 * (outRate / 2.0) / inRate // cycles per input sample
+            val m = (n - 1) / 2.0
+            val h = DoubleArray(n) { i ->
+                val x = i - m
+                val sinc = if (x == 0.0) 2 * fc else sin(2 * PI * fc * x) / (PI * x)
+                val w = 0.42 - 0.5 * cos(2 * PI * i / (n - 1)) + 0.08 * cos(4 * PI * i / (n - 1))
+                sinc * w
+            }
+            val sum = h.sum()
+            for (i in h.indices) h[i] /= sum
+            return h
+        }
+    }
+}
+
+/** 3.7: 16-bit PCM WAV files (RIFF, little-endian), for "Play back what the glasses heard" and Gemini. */
+object Wav {
+    const val HEADER = 44
+
+    fun header(dataBytes: Int, rate: Int, channels: Int = 1): ByteArray {
+        val b = java.nio.ByteBuffer.allocate(HEADER).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        b.put("RIFF".toByteArray(Charsets.US_ASCII)); b.putInt(36 + dataBytes)
+        b.put("WAVE".toByteArray(Charsets.US_ASCII))
+        b.put("fmt ".toByteArray(Charsets.US_ASCII)); b.putInt(16)
+        b.putShort(1) // PCM
+        b.putShort(channels.toShort()); b.putInt(rate); b.putInt(rate * channels * 2)
+        b.putShort((channels * 2).toShort()); b.putShort(16)
+        b.put("data".toByteArray(Charsets.US_ASCII)); b.putInt(dataBytes)
+        return b.array()
+    }
+
+    fun pcm16(samples: ShortArray, rate: Int = 16_000, channels: Int = 1): ByteArray {
+        val out = ByteArray(HEADER + samples.size * 2)
+        System.arraycopy(header(samples.size * 2, rate, channels), 0, out, 0, HEADER)
+        for (i in samples.indices) {
+            val v = samples[i].toInt()
+            out[HEADER + 2 * i] = (v and 0xFF).toByte()
+            out[HEADER + 2 * i + 1] = ((v shr 8) and 0xFF).toByte()
+        }
+        return out
+    }
+}
+
+/** 3.7: keeps the last [max] samples of a stream (thread-safe), for playing back what a mic heard. */
+class ClipRing(private val max: Int) {
+    private val buf = ShortArray(max)
+    private var end = 0
+    private var size = 0
+
+    @Synchronized fun add(s: ShortArray, count: Int = s.size) {
+        for (i in 0 until count) {
+            buf[end] = s[i]
+            end = (end + 1) % max
+            if (size < max) size++
+        }
+    }
+
+    @Synchronized fun snapshot(): ShortArray {
+        val out = ShortArray(size)
+        val start = (end - size + max) % max
+        for (i in 0 until size) out[i] = buf[(start + i) % max]
+        return out
+    }
+
+    @Synchronized fun clear() { end = 0; size = 0 }
+
+    val samples: Int @Synchronized get() = size
+}
+
+/**
+ * 3.7: one SpeechRecognizer at a time, app-wide. 3.6's call-audio test got ERROR_TOO_MANY_REQUESTS
+ * because the phone-mic test's recognizer was kept and a new one made straight after another was
+ * dropped. A recognizer is made only when none exists and [cooldownMs] after the last one was
+ * released; it listens only once at a time. Pure bookkeeping; [Speech] does the Android side.
+ */
+class RecognizerGate(val cooldownMs: Long = 300) {
+    var exists = false; private set
+    var listening = false; private set
+    private var releasedAt = Long.MIN_VALUE / 4
+
+    /** How long to wait before a new recognizer may be made; -1 while one still exists (release it first). */
+    @Synchronized fun waitBeforeCreate(now: Long): Long = if (exists) -1 else max(0L, releasedAt + cooldownMs - now)
+
+    /** A recognizer was made. False (and nothing changes) when one already exists or the cooldown isn't over. */
+    @Synchronized fun created(now: Long): Boolean {
+        if (exists || now < releasedAt + cooldownMs) return false
+        exists = true
+        listening = false
+        return true
+    }
+
+    /** It may start listening: false when there is none or it already listens. */
+    @Synchronized fun startListening(): Boolean {
+        if (!exists || listening) return false
+        listening = true
+        return true
+    }
+
+    @Synchronized fun stoppedListening() { listening = false }
+
+    /** It was cancelled and destroyed. */
+    @Synchronized fun released(now: Long) {
+        if (!exists) return
+        exists = false
+        listening = false
+        releasedAt = now
+    }
+}
+
+/**
+ * 3.7: paces audio we write into the recognizer's pipe to real time. 3.6 wrote whatever had arrived at
+ * once (the glasses send 10 packets, 200 ms, in one burst) and slipped 20 ms of silence in after every
+ * 60 ms without data, so speech was chopped up and ran faster than real time. Now: nothing is written
+ * until [prebufferMs] has arrived (or the input ended); then at most real time plus [leadMs] ahead; and
+ * silence only when the input stalled for more than [stallMs] (or after it ended, until end of speech).
+ */
+class PipePacer(private val rate: Int = 16_000, private val prebufferMs: Int = 200, private val leadMs: Int = 100, private val stallMs: Int = 300) {
+    /** What to write now: [real] samples of audio, then [silence] samples of silence. */
+    data class Plan(val real: Int, val silence: Int)
+
+    var started = false; private set
+    private var startedAtMs = 0L
+
+    /**
+     * [nowMs] a monotonic clock, [written] samples written so far, [available] samples waiting,
+     * [inputEnded] no more audio is coming.
+     */
+    fun plan(nowMs: Long, written: Long, available: Int, inputEnded: Boolean): Plan {
+        if (!started) {
+            if (available < rate * prebufferMs / 1000 && !inputEnded) return Plan(0, 0)
+            started = true
+            startedAtMs = nowMs
+        }
+        val allowed = (nowMs - startedAtMs) * rate / 1000 + rate * leadMs / 1000
+        val room = (allowed - written).coerceAtLeast(0).toInt()
+        val real = min(room, available)
+        val behind = allowed - written - real - rate * leadMs / 1000
+        val silence = if (available - real <= 0 && (inputEnded || behind > rate.toLong() * stallMs / 1000)) (room - real).coerceAtLeast(0) else 0
+        return Plan(real, silence)
     }
 }
 

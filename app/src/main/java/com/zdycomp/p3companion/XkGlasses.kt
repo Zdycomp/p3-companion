@@ -2136,7 +2136,8 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         val chosen = micSource
         if (chosen != null && chosen != source) return
         val fr = micFramers.getOrPut(source) { OpusFramer() }
-        val packets = fr.feed(b)
+        // 3.7: a head-0x1F frame is `02` + whole `[28][40 B]` records (3.6 log), split frame by frame.
+        val packets = if (source == MIC_1F_SOURCE || (source.startsWith("head-") && MicRecords.looksLike(b))) fr.feedRecords(b) else fr.feed(b)
         if (packets.isEmpty()) return
         if (chosen == null) {
             if (!fr.locked) return
@@ -2191,7 +2192,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         log.forEach { appendLine(it) }
     }
 
-    /** "App 3.6.0 (versionCode 9)", the second line of every shared log. */
+    /** "App 3.7.0 (versionCode 10)", the second line of every shared log. */
     private fun appVersionLine(): String {
         val pi = runCatching { app.packageManager.getPackageInfo(app.packageName, 0) }.getOrNull()
         return "App ${pi?.versionName ?: "?"} (versionCode ${pi?.longVersionCode ?: "?"})"
@@ -2223,6 +2224,8 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         /** A timed-out request id only marks a reply as late for this long. */
         private const val STALE_MS = 15_000L
         /** State nodes the glasses push by themselves (also when one of them answers a request). */
+        /** 3.7: where the E13C-5 sends its mic (3.6 log). */
+        const val MIC_1F_SOURCE = "head-1F frames"
         private val PUSH_NODES = setOf("5710", "5711", "57A0", "5750", "5790")
         private const val PROBE_LISTEN_MS = 5_000L
         /** Listening time after the glasses pushed 5710 = 01 (preview on). */

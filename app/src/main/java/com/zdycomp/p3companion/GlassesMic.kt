@@ -27,49 +27,85 @@ interface AudioFeed {
 }
 
 /**
- * Feeds PCM to the recognizer through a pipe, continuously: a 20 ms piece of silence goes in whenever
- * nothing arrived for 60 ms, so the recognizer never waits on a stalled Bluetooth link. Our own
- * end-of-speech detector ([Vad]) closes the pipe 1 s after the speech ends (the recognizer then sees
- * the end of the sound) and calls [onEnd] on the main thread. [onStop] runs once when it's stopped.
+ * Feeds 16 kHz mono PCM16 (little-endian) to the recognizer through a pipe, in real time (3.7,
+ * [PipePacer]): nothing goes in until 200 ms have arrived, then at most real time plus 100 ms, every
+ * 20 ms, so the glasses' 200 ms bursts come out as a steady stream; silence only when the input stalled
+ * for over 300 ms, or after [endInput] until the end of speech. Our own end-of-speech detector ([Vad])
+ * closes the write end 1 s after the speech ends (the recognizer then sees the end of the sound) and
+ * calls [onEnd] on the main thread. The write end stays open until then. [onStop] runs once when stopped.
  */
 class PcmPipe(private val onEnd: (Vad.State) -> Unit, private val onStop: (PcmPipe) -> Unit = {}) : AudioFeed {
     private val main = Handler(Looper.getMainLooper())
     private val pipe: Array<ParcelFileDescriptor> = ParcelFileDescriptor.createPipe()
     override val readFd: ParcelFileDescriptor get() = pipe[0]
-    private val queue = LinkedBlockingQueue<ShortArray>(250)
+    private val lock = Object()
+    /** Waiting audio, at most [MAX_BUFFER] samples (20 s); a full buffer drops the oldest. */
+    private val buf = ShortArray(MAX_BUFFER)
+    private var head = 0
+    private var count = 0
+    @Volatile private var inputEnded = false
     private val vad = Vad(MicCapture.RATE)
+    private val pacer = PipePacer(MicCapture.RATE)
     @Volatile private var stopped = false
     @Volatile var samplesWritten = 0L; private set
-    @Volatile var silenceFills = 0L; private set
+    @Volatile var silenceWritten = 0L; private set
     @Volatile private var endedAs: Vad.State? = null
 
     override val heardSpeech: Boolean get() = vad.heardSpeech
 
-    /** PCM from the decoder (any thread): 16 kHz mono. A full queue (5 s) drops the oldest piece. */
+    /** PCM (any thread): 16 kHz mono. */
     fun offer(pcm: ShortArray) {
-        if (stopped || pcm.isEmpty()) return
-        if (!queue.offer(pcm)) { queue.poll(); queue.offer(pcm) }
+        if (stopped || inputEnded || pcm.isEmpty()) return
+        synchronized(lock) {
+            for (v in pcm) {
+                if (count == MAX_BUFFER) { head = (head + 1) % MAX_BUFFER; count-- }
+                buf[(head + count) % MAX_BUFFER] = v
+                count++
+            }
+        }
     }
+
+    /** No more audio is coming (a recorded clip): silence follows at real-time pace until the end of speech. */
+    fun endInput() { inputEnded = true }
 
     override fun start(): Boolean {
         Thread({ pump() }, "p3-pcm-pipe").apply { isDaemon = true; start() }
         return true
     }
 
+    private fun take(n: Int): ShortArray = synchronized(lock) {
+        val k = minOf(n, count)
+        ShortArray(k) { i -> buf[(head + i) % MAX_BUFFER] }.also { head = (head + k) % MAX_BUFFER; count -= k }
+    }
+
     private fun pump() {
         val out = FileOutputStream(pipe[1].fileDescriptor)
-        val silence = ShortArray(MicCapture.RATE / 50)
+        var afterEndMs = 0L
         try {
             while (!stopped) {
-                val chunk = queue.poll(60, TimeUnit.MILLISECONDS) ?: silence.also { silenceFills++ }
-                out.write(toBytes(chunk))
-                samplesWritten += chunk.size
-                val st = vad.feed(chunk)
+                val now = android.os.SystemClock.elapsedRealtime()
+                val avail = synchronized(lock) { count }
+                val plan = pacer.plan(now, samplesWritten, avail, inputEnded)
+                val chunk = take(plan.real)
+                if (chunk.isNotEmpty()) write(out, chunk)
+                if (plan.silence > 0) {
+                    write(out, ShortArray(plan.silence))
+                    silenceWritten += plan.silence
+                    if (inputEnded) afterEndMs += plan.silence * 1000L / MicCapture.RATE
+                }
                 if (vad.ended) {
-                    endedAs = st
+                    endedAs = vad.state
+                    val st = vad.state
                     main.post { onEnd(st) }
                     break
                 }
+                // A recorded clip with no clear end: stop 1.5 s after it, at real-time pace.
+                if (inputEnded && avail == 0 && afterEndMs >= 1_500) {
+                    endedAs = Vad.State.ENDED_AFTER_SPEECH
+                    main.post { onEnd(Vad.State.ENDED_AFTER_SPEECH) }
+                    break
+                }
+                Thread.sleep(20)
             }
         } catch (_: Exception) {
             // The recognizer closed its end: nothing more to write.
@@ -78,21 +114,28 @@ class PcmPipe(private val onEnd: (Vad.State) -> Unit, private val onStop: (PcmPi
         }
     }
 
+    private fun write(out: FileOutputStream, c: ShortArray) {
+        out.write(toBytes(c))
+        samplesWritten += c.size
+        var p = 0
+        while (p < c.size) { val n = minOf(320, c.size - p); vad.feed(c.copyOfRange(p, p + n)); p += n }
+    }
+
     override fun stop() {
         if (stopped) return
         stopped = true
         runCatching { pipe[0].close() }
-        queue.clear()
+        synchronized(lock) { count = 0 }
         onStop(this)
     }
 
     override fun report(): String {
         val secs = samplesWritten.toDouble() / MicCapture.RATE
-        val fill = silenceFills * 0.02
-        return "%.1f s written (%.1f s filled with silence), peak %.0f dBFS, %s%s".format(
+        val fill = silenceWritten.toDouble() / MicCapture.RATE
+        return "%.1f s written in real time (%.1f s of it silence), peak %.0f dBFS, %s%s".format(
             java.util.Locale.US, secs, fill, vad.peakDb, if (vad.heardSpeech) "speech heard" else "no speech heard",
             when (endedAs) {
-                Vad.State.ENDED_AFTER_SPEECH -> ", ended 1 s after the speech"
+                Vad.State.ENDED_AFTER_SPEECH -> ", ended after the speech"
                 Vad.State.ENDED_NO_SPEECH -> ", ended: no speech in 6 s"
                 Vad.State.ENDED_MAX -> ", ended at the 12 s limit"
                 else -> ""
@@ -104,6 +147,13 @@ class PcmPipe(private val onEnd: (Vad.State) -> Unit, private val onStop: (PcmPi
         val b = ByteArray(c.size * 2)
         for (i in c.indices) { b[2 * i] = (c[i].toInt() and 0xFF).toByte(); b[2 * i + 1] = ((c[i].toInt() shr 8) and 0xFF).toByte() }
         return b
+    }
+
+    companion object {
+        const val MAX_BUFFER = MicCapture.RATE * 20
+
+        /** A pipe that plays [clip] (16 kHz mono) into the recognizer in real time, for the pipe self-test and recorded clips. */
+        fun ofClip(clip: ShortArray, onEnd: (Vad.State) -> Unit): PcmPipe = PcmPipe(onEnd).also { it.offer(clip); it.endInput() }
     }
 }
 
@@ -127,9 +177,11 @@ class OpusPcm(private val onPcm: (ShortArray) -> Unit, private val log: (String)
     fun start(): Boolean = runCatching {
         val c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS)
         val f = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 48_000, 1).apply {
-            setByteBuffer("csd-0", ByteBuffer.wrap(OpusCsd.head(channels = 1, inputRate = MicCapture.RATE)))
-            setByteBuffer("csd-1", ByteBuffer.wrap(OpusCsd.nanos(0)))
-            setByteBuffer("csd-2", ByteBuffer.wrap(OpusCsd.nanos(OpusCsd.SEEK_PREROLL_NS)))
+            // 3.7: pre-skip 312 (6.5 ms at 48 kHz) and the same codec delay; 3.6 said 0 for both.
+            val (h, delay, preroll) = OpusCsd.csd(channels = 1, inputRate = MicCapture.RATE)
+            setByteBuffer("csd-0", ByteBuffer.wrap(h))
+            setByteBuffer("csd-1", ByteBuffer.wrap(delay))
+            setByteBuffer("csd-2", ByteBuffer.wrap(preroll))
         }
         c.configure(f, null, null, 0)
         c.start()
@@ -218,7 +270,41 @@ class GlassesMicStream(private val glasses: XkGlasses, private val firstAudioMs:
     private var reported = false
     private var startedAt = 0L
 
+    /** 3.7: the last 8 s the glasses' mic sent, for "Play back what the glasses heard". */
+    val ring = ClipRing(MicCapture.RATE * 8)
+
     fun addListener(l: (ShortArray) -> Unit) { listeners += l }
+
+    /**
+     * 3.7: records one utterance from the stream with our own end-of-speech detector ([Vad.clip]: 800 ms
+     * of quiet after speech, at most 15 s). [done] (main thread) gets the audio and how it ended; a
+     * stream that goes quiet altogether ends it after the limit too.
+     */
+    fun captureClip(vad: Vad = Vad.clip(), limitMs: Long = 16_000, done: (ShortArray, Vad.State) -> Unit): () -> Unit {
+        val got = ArrayList<ShortArray>()
+        var finished = false
+        lateinit var l: (ShortArray) -> Unit
+        fun end(st: Vad.State) {
+            synchronized(got) { if (finished) return; finished = true }
+            removeListener(l)
+            val all = synchronized(got) { got.toList() }
+            val flat = ShortArray(all.sumOf { it.size })
+            var at = 0
+            all.forEach { System.arraycopy(it, 0, flat, at, it.size); at += it.size }
+            main.post { done(flat, st) }
+        }
+        l = { pcm ->
+            val st = synchronized(got) {
+                if (finished) null else { got += pcm; vad.feed(pcm); vad.state }
+            }
+            if (st != null && (st == Vad.State.ENDED_AFTER_SPEECH || st == Vad.State.ENDED_NO_SPEECH || st == Vad.State.ENDED_MAX)) end(st)
+        }
+        addListener(l)
+        val stopNow = { end(if (vad.heardSpeech) Vad.State.ENDED_MAX else Vad.State.ENDED_NO_SPEECH) }
+        main.postDelayed(stopNow, limitMs)
+        // Ends it now (a tap): what was recorded so far is used.
+        return { main.post { end(if (vad.heardSpeech) Vad.State.ENDED_AFTER_SPEECH else Vad.State.ENDED_NO_SPEECH) } }
+    }
     fun removeListener(l: (ShortArray) -> Unit) { listeners -= l }
 
     /** A pipe for the recognizer fed from this stream, detached when it's stopped. */
@@ -253,6 +339,7 @@ class GlassesMicStream(private val glasses: XkGlasses, private val firstAudioMs:
     private fun onPcm(pcm: ShortArray) {
         if (stopped) return
         if (!gotAudio) { gotAudio = true; main.post { checkFirst?.invoke() } }
+        ring.add(pcm)
         listeners.forEach { runCatching { it(pcm) } }
     }
 

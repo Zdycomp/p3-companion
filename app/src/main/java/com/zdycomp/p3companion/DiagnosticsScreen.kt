@@ -99,6 +99,22 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
                 a.shareText("P3 Companion test log", redact(testLog ?: ""))
             })
         }
+        // 3.7: hear what the glasses' mic really sent (your voice, or noise?), on the phone's speaker.
+        val clips = VoiceClips.saved(a)
+        if (clips.isNotEmpty() && !running) {
+            tests.addView(ui.text("What the glasses heard: " + clips.joinToString(", ") { "%s, %.1f s".format(java.util.Locale.US, VoiceClips.label(it), VoiceClips.seconds(it)) },
+                Type.BODY_SMALL, ui.s.onSurfaceVariant).apply { setPadding(0, ui.dp(6), 0, 0) })
+            tests.addView(ui.buttonRow(
+                ui.button("Play back what the glasses heard", Btn.TONAL, R.drawable.ic_play, full = false) {
+                    VoiceClips.play(a, VoiceClips.saved(a), onEach = { f -> a.toast("Playing the ${VoiceClips.label(f)} on the phone's speaker") }) { err ->
+                        if (err != null) a.toast("Couldn't play it: $err")
+                    }
+                },
+                ui.button("Share", Btn.TEXT, R.drawable.ic_share, full = false) {
+                    if (!VoiceClips.share(a)) a.toast("Nothing recorded yet: run Test voice first.")
+                },
+            ).apply { setPadding(0, ui.dp(4), 0, 0) })
+        }
         col.addView(tests)
 
         val results = ui.card()

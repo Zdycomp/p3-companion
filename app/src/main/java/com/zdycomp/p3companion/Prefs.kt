@@ -226,6 +226,12 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
         get() = sp.getString("recognizer_sco_method", null)
         set(v) = sp.edit().putString("recognizer_sco_method", v).apply()
 
+    /** 3.7: the pipe self-test's verdict: may the app's own audio be piped into the speech service on this phone? */
+    var pipeState: VoiceChoice.PipeState
+        get() = runCatching { VoiceChoice.PipeState.valueOf(sp.getString("recognizer_pipe_state", null) ?: "UNKNOWN") }
+            .getOrDefault(VoiceChoice.PipeState.UNKNOWN)
+        set(v) = sp.edit().putString("recognizer_pipe_state", v.name).apply()
+
     /** 3.5: Test voice's one-line result. */
     var voiceTestSummary: String?
         get() = sp.getString("recognizer_test_summary", null)

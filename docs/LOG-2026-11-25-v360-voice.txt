@@ -1,0 +1,34 @@
+Owner's log from 3.6.0 (versionCode 9), Nov 25 2026, moto g 2025, E13C-5 fw 1.0.0. Verbatim excerpts.
+
+Live view: steady 29.7-30.2 fps, 340-440 kbps for 3+ minutes, 0 dropped.
+Quality probe: [01],[01 01],[01 02],[01 03] all 320x240 ~17 fps in 3 s; [02],[03] accepted but no video. Result: 320x240 only.
+
+VOICE TEST:
+13:56:38  Voice: SCO: audio mode set to in-communication
+13:56:38  Voice: SCO: asking for NovaSight P3_D6BE as the call device (setCommunicationDevice)
+13:56:39  Voice: SCO: SCO audio state DISCONNECTED (357 ms)
+13:56:39  Voice: SCO: SCO audio state CONNECTING (358 ms)
+13:56:39  Voice: SCO: headset audio connected (510 ms)
+13:56:39  Voice: SCO: glasses mic ready in 511 ms (headset audio connected, setCommunicationDevice)
+13:56:39  Voice: SCO: SCO audio state CONNECTED (732 ms)
+13:56:39  Voice: SCO: call device is now NovaSight P3_D6BE (type 7) (751 ms)
+13:56:48  → 5750 01
+13:56:48  ← 5750 00
+13:56:48  Glasses mic stream: 5750 accepted; looking for Opus packets
+13:56:51  ← 5760 01
+13:56:51  Glasses voice memo state 1
+13:56:51  Sniffer: frame with head 1F cmd 8002 divide 5300, 83 B: 02 28 4B 41 1E 0B E4 55 BF 14 98 7C 00 00 00 00 00 00 00 00 00 00 00 00
+13:56:51  Glasses mic stream: Opus packets found in head-1F frames
+13:56:51  Sniffer: frame with head 1F cmd 8002 divide 9B08, 411 B: 02 28 4B 01 07 DE 9A A2 D6 C5 85 A3 A0 1C 7B 07 97 35 E9 11 A4 25 AC D9
+13:56:51  Glasses mic stream: sound after 3873 ms (48000 Hz, 1 channel(s) decoded)
+13:56:51  Sniffer: frame with head 1F cmd 8002 divide 9B08, 411 B: 02 28 48 87 F7 DB A4 76 EF D3 BC C3 22 99 07 0F 05 1F 77 B4 AD C4 18 6B
+(about 5 frames of 411 B per second, every one starting 02 28 4B 41 / 02 28 4B 01 / 02 28 48 ..)
+13:57:05  → 5750 00
+13:57:05  Voice test: Works: phone mic (heard "this is the voice test", Speech Recognition and Synthesis). Not working: glasses mic (data link) (ERROR_NO_MATCH (7) from Speech Recognition and Synthesis fed the app's own audio), glasses mic (call audio) (ERROR_TOO_MANY_REQUESTS (10) from on-phone recognizer, setCommunicationDevice). Voice questions will use the phone mic.
+13:57:05  Glasses mic stream stopped. Opus packets: 700 from head-1F frames; looked in head-1F frames (701 packets, 112 B skipped)
+13:57:05  ← 5760 00
+
+Coordinator's notes (verify):
+- 0x48 / 0x4B look like Opus TOC bytes: config 9 = SILK wideband 20 ms; 0x48 = code 0 (one frame), 0x4B = code 3 (next byte = frame count byte, 0x41/0x01). "02 28" before them looks like [type 02][length 0x28 = 40]. 700 packets in ~14 s ~= 50/s = 20 ms each, which fits. Check how a 411 B frame splits into [02][len][packet] records and that no record boundary is misread (112 B skipped).
+- Phone mic works when the recognizer opens the mic itself. Our own audio piped in with EXTRA_AUDIO_SOURCE has now failed twice (3.4 phone mic, 3.6 glasses data link), so the pipe itself is suspect.
+- SCO connected fine; the recognizer refused with ERROR_TOO_MANY_REQUESTS, which usually means an earlier recognizer session was still alive (not cancelled/destroyed) or sessions were started back to back.

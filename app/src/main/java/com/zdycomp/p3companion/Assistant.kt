@@ -97,7 +97,7 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
 
     /** What a tap on the glasses or the big button does while a turn is running. */
     fun tapWhileBusy() {
-        if (phase == Phase.LISTENING) speech.finishListening() else stop()
+        if (phase == Phase.LISTENING) clipEnd?.invoke() ?: speech.finishListening() else stop()
     }
 
     private fun log(m: Mode) = when (m) {
@@ -164,8 +164,11 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
         // 3.5: the mic Test voice (or the last questions) found working first, then the others.
         routes = VoiceChoice.routeOrder(
             prefs.micRouteScores, route.headsetConnected(),
-            linked = glasses.state == XkGlasses.State.READY && MicCapture.supported(), useGlasses = prefs.useGlassesAudio,
+            linked = sppLinked(), useGlasses = prefs.useGlassesAudio,
         )
+        // 3.7: the data-link mic proven by Test voice but nothing here can turn its audio into words.
+        if (prefs.useGlassesAudio && glasses.state == XkGlasses.State.READY && (prefs.micRouteScores[MicRoute.GLASSES_SPP] ?: 0) > 0 &&
+            sppMode() == VoiceChoice.SppMode.NONE) glasses.addLog("Voice mic: ${SPP_NEEDS_GEMINI}; using another mic")
         // 3.6: a conversation keeps the mic that worked for its last phrase.
         if (m == Mode.CONVERSATION) convoMic?.takeIf { it in routes }?.let { w -> routes = listOf(w) + routes.filter { it != w } }
         if (routes.size > 1 && (m != Mode.CONVERSATION || convoMic == null)) glasses.addLog("Voice: mics to try: " + routes.joinToString(" → ") { it.label })
@@ -176,8 +179,24 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
     /** The mic the next question starts with. */
     fun plannedMic(): MicRoute = VoiceChoice.routeOrder(
         prefs.micRouteScores, route.headsetConnected(),
-        linked = glasses.state == XkGlasses.State.READY && MicCapture.supported(), useGlasses = prefs.useGlassesAudio,
+        linked = sppLinked(), useGlasses = prefs.useGlassesAudio,
     ).first()
+
+    /** 3.7: how the glasses' data-link audio becomes words here: the pipe, Gemini, or not at all. */
+    fun sppMode(): VoiceChoice.SppMode =
+        VoiceChoice.sppMode(prefs.pipeState, android.os.Build.VERSION.SDK_INT, prefs.aiKey(AiProvider.GEMINI) != null)
+
+    private fun sppLinked() = glasses.state == XkGlasses.State.READY && sppMode() != VoiceChoice.SppMode.NONE
+
+    /** 3.7: a line for the Assistant screen about the glasses' data-link mic, or null when there's nothing to say. */
+    fun glassesMicNote(): String? {
+        if (!prefs.useGlassesAudio || (prefs.micRouteScores[MicRoute.GLASSES_SPP] ?: 0) <= 0) return null
+        return when (sppMode()) {
+            VoiceChoice.SppMode.GEMINI -> "The glasses' data-link mic is transcribed by Gemini (this phone's speech service doesn't take piped audio)."
+            VoiceChoice.SppMode.NONE -> "${SPP_NEEDS_GEMINI.replaceFirstChar { it.uppercase() }}. Questions use the phone mic until a Gemini key is added in AI setup."
+            VoiceChoice.SppMode.PIPE -> null
+        }
+    }
 
     private fun scoreRoute(r: MicRoute, worked: Boolean) {
         val scores = prefs.micRouteScores.toMutableMap()
@@ -193,7 +212,11 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
         changed()
     }
 
+    /** 3.7: ends the Gemini route's recording now (a tap while listening). */
+    private var clipEnd: (() -> Unit)? = null
+
     private fun stopSpp() {
+        clipEnd = null
         spp?.stop()
         spp = null
     }
@@ -257,15 +280,74 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
             MicRoute.GLASSES_SPP -> {
                 releaseRouteNow()
                 stopSpp()
+                val mode = sppMode()
+                if (mode == VoiceChoice.SppMode.NONE) { routeFailed(my, m, i, r, SPP_NEEDS_GEMINI); return }
                 val s = GlassesMicStream(glasses)
                 spp = s
                 s.start { err ->
                     if (my != turn || spp !== s) { s.stop(); return@start }
                     if (err != null) { stopSpp(); routeFailed(my, m, i, r, err); return@start }
                     throughGlasses = true
-                    useMic(r, "glasses over the data link (Opus, decoded and fed to the speech service)")
-                    listenNow(my, m) { s.newPipe { speech.finishListening() } }
+                    if (mode == VoiceChoice.SppMode.GEMINI) {
+                        useMic(r, "glasses over the data link (Opus, decoded; Gemini transcribes it because the speech service doesn't take piped audio on this phone)")
+                        listenGemini(my, m, s)
+                    } else {
+                        useMic(r, "glasses over the data link (Opus, decoded and fed to the speech service in real time)")
+                        listenNow(my, m) { s.newPipe { speech.finishListening() } }
+                    }
                 }
+            }
+        }
+    }
+
+    /**
+     * 3.7: the glasses' data-link audio without the pipe: one utterance recorded with our own
+     * end-of-speech detector (800 ms of quiet, at most 15 s), sent to Gemini as a WAV, the words used
+     * like a recognizer's. Nothing heard: like "no match"; Gemini failing: the next mic.
+     */
+    private fun listenGemini(my: Int, m: Mode, s: GlassesMicStream) {
+        val key = prefs.aiKey(AiProvider.GEMINI) ?: run { stopSpp(); routeFailed(my, m, routeIndex, MicRoute.GLASSES_SPP, SPP_NEEDS_GEMINI); return }
+        val langName = when (m) {
+            Mode.CHAT -> prefs.replyLanguage
+            Mode.CONVERSATION -> convoListenIn
+            else -> prefs.translateFrom
+        }
+        partial = "(listening through the glasses; Gemini writes it down when you stop)"
+        changed()
+        clipEnd = s.captureClip { clip, how ->
+            clipEnd = null
+            if (my != turn || spp !== s) return@captureClip
+            VoiceClips.save(app, VoiceClips.SPP, s.ring.snapshot())
+            stopSpp()
+            if (how == Vad.State.ENDED_NO_SPEECH) { geminiHeard(my, m, null, null); return@captureClip }
+            partial = "(Gemini is writing down what you said…)"
+            changed()
+            io.execute {
+                val res = runCatching { AiClient.transcribe(key, Wav.pcm16(clip, MicCapture.RATE), Languages.byName(langName).name) }
+                main.post { geminiHeard(my, m, res.getOrNull(), res.exceptionOrNull()?.let { it.message ?: it.javaClass.simpleName }) }
+            }
+        }
+    }
+
+    private fun geminiHeard(my: Int, m: Mode, text: String?, error: String?) {
+        if (my != turn) return
+        partial = null
+        speech.markResult()
+        when {
+            text != null -> {
+                glasses.addLog("Voice: Gemini heard \"$text\" from the glasses' data-link mic")
+                scoreRoute(MicRoute.GLASSES_SPP, true)
+                if (m == Mode.CONVERSATION) convoMic = MicRoute.GLASSES_SPP
+                heard(my, m, text)
+            }
+            error != null -> { throughGlasses = false; routeFailed(my, m, routeIndex, MicRoute.GLASSES_SPP, "Gemini: $error") }
+            m == Mode.CONVERSATION -> {
+                convoListenIn = TwoWay.afterSilence(convoListenIn, prefs.translateFrom, prefs.translateTo, prefs.convoTwoWay)
+                endTurn()
+            }
+            else -> {
+                add(log(m), Who.ERROR, Speech.errorText(SpeechRecognizer.ERROR_NO_MATCH) + "\n[Gemini heard no speech from the glasses' data-link mic]")
+                endTurn()
             }
         }
     }
@@ -326,6 +408,8 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
                 endTurn()
             },
             audio = feed,
+            // 3.7: the glasses' call audio and piped audio: Google's network recognizer first.
+            networkFirst = routeNow == MicRoute.GLASSES_SCO,
         )
     }
 
@@ -1076,6 +1160,9 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
             !alreadyRetried && glassesOrFed && code in setOf(
                 SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT, SpeechRecognizer.ERROR_AUDIO,
             )
+
+        /** 3.7: why the glasses' data-link mic can't be used with only a Claude key. */
+        const val SPP_NEEDS_GEMINI = "the glasses' data-link mic needs a Gemini key (Claude doesn't take audio)"
 
         /** Call audio keeps the glasses' link this long after a turn, for the next question. */
         const val SESSION_LINGER_MS = 10_000L

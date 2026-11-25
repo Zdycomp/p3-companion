@@ -36,6 +36,17 @@ object AiClient {
     }
 
     /**
+     * 3.7: transcribes a WAV clip of the glasses' own mic with Gemini ([AiWire.TRANSCRIBE_MODEL]). Null
+     * when nothing was said. Blocking.
+     */
+    fun transcribe(apiKey: String, wav: ByteArray, languageName: String): String? {
+        val req = AiWire.geminiTranscribe(apiKey, wav, languageName)
+        val (code, body) = post(req, AiProvider.GEMINI, apiKey)
+        if (code !in 200..299) throw AiException(AiWire.errorMessage(AiProvider.GEMINI, code, body, apiKey))
+        return AiWire.parseTranscript(body)
+    }
+
+    /**
      * Asks with a streamed answer. [onText] gets each new piece of text on this (background) thread,
      * in order. Returns the whole answer. If the stream can't be used and nothing was received yet,
      * the question is asked again the plain way and [onText] gets the whole answer at once.
