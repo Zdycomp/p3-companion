@@ -215,7 +215,11 @@ class AssistantScreen(private val a: MainActivity) : Screen {
                 route.headsetConnected() -> "Talking through ${route.headsetName() ?: "the glasses"}" to Tone.GOOD
                 else -> "Phone mic and speaker. Connect the glasses as a Bluetooth headset to talk through them." to Tone.NEUTRAL
             }
-            box.addView(ui.banner(text, tone).apply { (layoutParams as LinearLayout.LayoutParams).bottomMargin = ui.dp(8) })
+            // 3.5: which mic the next question starts with (Test voice decides; others are tried if it fails).
+            val next = asst.plannedMic()
+            box.addView(ui.banner("$text\nMic for the next question: the ${next.label}" +
+                if (next == MicRoute.PHONE && a.prefs.useGlassesAudio && a.prefs.voiceTestSummary == null) " (run Test voice in Diagnostics to try the glasses' mic)" else "",
+                tone).apply { (layoutParams as LinearLayout.LayoutParams).bottomMargin = ui.dp(8) })
         }
         val box = liveBox ?: return
         box.removeAllViews()
@@ -269,8 +273,12 @@ class AssistantScreen(private val a: MainActivity) : Screen {
             gravity = Gravity.CENTER
             accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         })
-        if (mine && asst.phase != Assistant.Phase.IDLE && asst.throughGlasses) {
-            box.addView(ui.text("Through the glasses", Type.BODY_SMALL, s.onSurfaceVariant).apply { gravity = Gravity.CENTER })
+        if (mine && asst.phase != Assistant.Phase.IDLE) {
+            val micLine = asst.micInUse?.let { "Mic: the $it" } ?: if (asst.phase == Assistant.Phase.LISTENING) "Choosing the mic…" else null
+            val through = if (asst.throughGlasses) "Through the glasses" else null
+            listOfNotNull(micLine, through).takeIf { it.isNotEmpty() }?.let {
+                box.addView(ui.text(it.joinToString(" · "), Type.BODY_SMALL, s.onSurfaceVariant).apply { gravity = Gravity.CENTER })
+            }
         }
 
         if (listening) {
@@ -284,6 +292,7 @@ class AssistantScreen(private val a: MainActivity) : Screen {
         // Which speech service listened, the last listening problem in full, and how fast the last answer started.
         val sp = asst.speech
         val details = listOfNotNull(
+            asst.micInUse?.let { "Last mic: the $it" },
             sp.lastService?.let { "Speech service: $it" },
             asst.lastVoiceError?.let { "Last problem: $it" },
             asst.lastTiming?.let { "Last timing: $it" },

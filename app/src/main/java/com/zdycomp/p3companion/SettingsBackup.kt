@@ -45,7 +45,7 @@ object SettingsBackup {
     private val NEVER = listOf(
         "user_key", "ai_key_", "drive_uri", "drive_label", "ble_addr", "ble_name", "link_method",
         "user_stopped", "preview_action", "asked_", "last_import", "last_seen_version",
-        "live_path", "live_probe_", "recognizer_service", "sr_token", "sr_url", "sr_http_ok",
+        "live_path", "live_probe_", "recognizer_service", "recognizer_", "sr_token", "sr_url", "sr_http_ok",
     )
 
     fun isSecret(key: String): Boolean = NEVER.any { key == it || (it.endsWith("_") && key.startsWith(it)) }

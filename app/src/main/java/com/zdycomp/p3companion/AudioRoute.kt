@@ -1,5 +1,7 @@
 package com.zdycomp.p3companion
 
+import android.bluetooth.BluetoothHeadset
+import android.bluetooth.BluetoothProfile
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -15,6 +17,12 @@ import android.os.SystemClock
  * Routes the microphone and the assistant's voice through the glasses when they are connected as
  * the phone's Bluetooth headset (the hands-free "SCO" link). Shared by voice chat, translation and
  * the voice recorder, so it counts users and only lets the link go when the last one is done.
+ *
+ * 3.5: the link counts as up only on a real signal: the SCO audio state turning CONNECTED, the
+ * headset's audio connecting, or the phone's call device switching to the glasses. 3.4 also went on
+ * after 1.5 s with no signal at all, which recorded digital silence (-83 dBFS). Two ways are tried,
+ * each for up to 2 s: setCommunicationDevice (Android 12+), then the older startBluetoothSco. The one
+ * that works is remembered ([Prefs.scoMethod]); every state change goes to [log].
  *
  * Call everything on the main thread.
  */
@@ -32,15 +40,26 @@ class AudioRoute private constructor(context: Context, private val prefs: Prefs)
     private var generation = 0
     private val waiting = mutableListOf<(Boolean) -> Unit>()
     private var scoReceiver: BroadcastReceiver? = null
-    private var savedMode = AudioManager.MODE_NORMAL
     private var deviceListener: AudioManager.OnCommunicationDeviceChangedListener? = null
     private var acquireStartedAt = 0L
+    private var methodsLeft = ArrayList<String>()
+    private var method: String? = null
+    private var legacyStarted = false
+
+    /** Where the state changes go (the connection log). */
+    var log: ((String) -> Unit)? = null
 
     /** When the call link was last let go (elapsedRealtime), so speech can wait for the headset to switch. */
     var releasedAt = 0L
         private set
     /** How the last [acquire] went, in plain words with its time, for the screen and diagnostics. */
     var lastReport: String? = null
+        private set
+    /** True when the last link came up on an SCO or headset audio signal, not only a device switch. */
+    var lastConfirmed = false
+        private set
+    /** The way the last link was opened: [COMM] or [LEGACY]. */
+    var lastMethod: String? = null
         private set
 
     /** The glasses' hands-free output, if they're connected as a headset right now. */
@@ -64,11 +83,16 @@ class AudioRoute private constructor(context: Context, private val prefs: Prefs)
             ?: sco.firstOrNull()
     }
 
+    private fun say(line: String) { log?.invoke("SCO: $line") }
+
+    private fun elapsed() = SystemClock.elapsedRealtime() - acquireStartedAt
+
     /**
      * Asks for the glasses' audio. [onReady] gets true when sound now goes through the glasses,
      * false when the phone's own mic and speaker will be used. Always pair with [release].
+     * [onlyMethod] tries just that way ([COMM] or [LEGACY]), for Test voice.
      */
-    fun acquire(onReady: (Boolean) -> Unit) {
+    fun acquire(onReady: (Boolean) -> Unit, onlyMethod: String? = null) {
         users++
         if (users > 1 && !connecting) {
             val now = active
@@ -82,67 +106,80 @@ class AudioRoute private constructor(context: Context, private val prefs: Prefs)
         // 3.3: never during a connect, a photo transfer or the live view test, nor in the first 3 s of a link.
         glasses.audioBlocker()?.let { why ->
             lastReport = "glasses mic not used: $why; using the phone's mic"
-            glasses.addLog("Voice: $lastReport")
+            say(lastReport!!)
             finish(false)
             return
         }
         // The glasses can't stream live video while their mic link is up: close the live view first.
         glasses.micWillStart()
         connecting = true
-        savedMode = am.mode
+        lastConfirmed = false
+        acquireStartedAt = SystemClock.elapsedRealtime()
+        methodsLeft = ArrayList(methodOrder(onlyMethod, prefs.scoMethod, Build.VERSION.SDK_INT))
         val gen = ++generation
-        if (Build.VERSION.SDK_INT >= 31) {
-            val device = pick(am.availableCommunicationDevices)
-            if (device == null) { finish(false); return }
-            am.mode = AudioManager.MODE_IN_COMMUNICATION
-            acquireStartedAt = SystemClock.elapsedRealtime()
-            listenForSco(gen, device)
-            val ok = runCatching { am.setCommunicationDevice(device) }.getOrDefault(false)
-            if (!ok) {
-                tearDown()
-                am.mode = savedMode
-                lastReport = "the phone refused to switch the mic to the glasses; using the phone's mic"
-                finish(false)
-            } else {
-                if (am.communicationDevice?.id == device.id) deviceSetAt(gen)
-                // Never wait longer than 1.5 s: then the phone's own mic is used.
-                main.postDelayed({
-                    if (gen == generation && connecting) {
-                        if (am.communicationDevice?.id == device.id) {
-                            lastReport = "glasses mic assumed ready after 1500 ms (no link signal)"
-                            finish(true)
-                        } else {
-                            tearDown()
-                            lastReport = "the glasses' mic link didn't open within 1.5 s; using the phone's mic"
-                            finish(false)
-                        }
-                    }
-                }, SCO_WAIT_MS)
-            }
-        } else {
-            startScoLegacy(gen)
+        am.mode = AudioManager.MODE_IN_COMMUNICATION
+        say("audio mode set to in-communication")
+        listenForSco(gen)
+        nextMethod(gen)
+    }
+
+    private fun nextMethod(gen: Int) {
+        if (gen != generation || !connecting) return
+        val m = methodsLeft.removeFirstOrNull()
+        if (m == null) {
+            lastReport = "the glasses' call audio didn't open (no SCO signal in ${elapsed()} ms); using the phone's mic"
+            say(lastReport!!)
+            tearDown()
+            finish(false)
+            return
         }
+        method = m
+        if (m == COMM && Build.VERSION.SDK_INT >= 31) {
+            val device = pick(am.availableCommunicationDevices)
+            if (device == null) { say("the glasses aren't offered as a call device"); nextMethod(gen); return }
+            say("asking for ${device.productName} as the call device (setCommunicationDevice)")
+            val ok = runCatching { am.setCommunicationDevice(device) }.getOrDefault(false)
+            if (!ok) { say("the phone refused setCommunicationDevice"); nextMethod(gen); return }
+            if (am.communicationDevice?.id == device.id) deviceSwitched(gen, device.id)
+        } else {
+            @Suppress("DEPRECATION")
+            if (!am.isBluetoothScoAvailableOffCall) { say("SCO isn't available outside calls on this phone"); nextMethod(gen); return }
+            if (Build.VERSION.SDK_INT >= 31) runCatching { am.clearCommunicationDevice() }
+            say("starting SCO (startBluetoothSco)")
+            @Suppress("DEPRECATION")
+            runCatching { am.startBluetoothSco() }
+            legacyStarted = true
+        }
+        val forMethod = m
+        main.postDelayed({
+            if (gen == generation && connecting && method == forMethod) {
+                say("no link signal ${SCO_WAIT_MS} ms after ${if (forMethod == COMM) "setCommunicationDevice" else "startBluetoothSco"}")
+                nextMethod(gen)
+            }
+        }, SCO_WAIT_MS)
     }
 
     /**
-     * Ready signals for the hands-free link on Android 12+: the SCO audio state broadcast or the
-     * headset's audio-connected broadcast ends the wait at once; the communication device changing
-     * to the glasses ends it 700 ms later (the 3.0 delay) if no broadcast comes.
+     * Ready signals: the SCO audio state broadcast or the headset's audio-connected broadcast end the
+     * wait at once; the call device switching to the glasses ends it [DEVICE_GRACE_MS] later if no
+     * broadcast comes (the caller then checks the mic isn't silent). Kept registered while the link is
+     * up, so drops are logged too.
      */
-    private fun listenForSco(gen: Int, device: AudioDeviceInfo) {
+    private fun listenForSco(gen: Int) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(c: Context, intent: Intent) {
-                if (gen != generation || !connecting) return
-                val up = when (intent.action) {
-                    AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED ->
-                        intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, -1) == AudioManager.SCO_AUDIO_STATE_CONNECTED
-                    android.bluetooth.BluetoothHeadset.ACTION_AUDIO_STATE_CHANGED ->
-                        intent.getIntExtra(android.bluetooth.BluetoothProfile.EXTRA_STATE, -1) == android.bluetooth.BluetoothHeadset.STATE_AUDIO_CONNECTED
-                    else -> false
-                }
-                if (up) {
-                    lastReport = "glasses mic ready in ${SystemClock.elapsedRealtime() - acquireStartedAt} ms"
-                    finish(true)
+                if (gen != generation) return
+                when (intent.action) {
+                    AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED -> {
+                        val st = intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, -1)
+                        say("SCO audio state ${scoStateName(st)} (${elapsed()} ms)")
+                        if (st == AudioManager.SCO_AUDIO_STATE_CONNECTED && connecting) ready(gen, confirmed = true, why = "SCO audio connected")
+                    }
+                    BluetoothHeadset.ACTION_AUDIO_STATE_CHANGED -> {
+                        val st = intent.getIntExtra(BluetoothProfile.EXTRA_STATE, -1)
+                        say("headset audio ${headsetStateName(st)} (${elapsed()} ms)")
+                        if (st == BluetoothHeadset.STATE_AUDIO_CONNECTED && connecting) ready(gen, confirmed = true, why = "headset audio connected")
+                    }
                 }
             }
         }
@@ -150,12 +187,15 @@ class AudioRoute private constructor(context: Context, private val prefs: Prefs)
         runCatching {
             registerSystemReceiver(app, receiver, IntentFilter().apply {
                 addAction(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED)
-                addAction(android.bluetooth.BluetoothHeadset.ACTION_AUDIO_STATE_CHANGED)
+                addAction(BluetoothHeadset.ACTION_AUDIO_STATE_CHANGED)
             })
         }
         if (Build.VERSION.SDK_INT >= 31) {
             val l = AudioManager.OnCommunicationDeviceChangedListener { d ->
-                if (d?.id == device.id) deviceSetAt(gen)
+                if (gen != generation) return@OnCommunicationDeviceChangedListener
+                say("call device is now " + (d?.let { "${it.productName} (type ${it.type})" } ?: "none") + " (${elapsed()} ms)")
+                val glasses = pick(am.availableCommunicationDevices)
+                if (d != null && glasses != null && d.id == glasses.id) deviceSwitched(gen, d.id)
             }
             deviceListener = l
             runCatching { am.addOnCommunicationDeviceChangedListener({ main.post(it) }, l) }
@@ -164,40 +204,25 @@ class AudioRoute private constructor(context: Context, private val prefs: Prefs)
 
     private var deviceSetGen = -1
 
-    private fun deviceSetAt(gen: Int) {
+    private fun deviceSwitched(gen: Int, id: Int) {
         if (deviceSetGen == gen) return
         deviceSetGen = gen
         main.postDelayed({
-            if (gen == generation && connecting) {
-                lastReport = "glasses mic ready in ${SystemClock.elapsedRealtime() - acquireStartedAt} ms (device switched)"
-                finish(true)
-            }
-        }, 700)
+            if (gen == generation && connecting && am.communicationDevice?.id == id) ready(gen, confirmed = false, why = "call device switched")
+        }, DEVICE_GRACE_MS)
     }
 
-    @Suppress("DEPRECATION")
-    private fun startScoLegacy(gen: Int) {
-        if (!am.isBluetoothScoAvailableOffCall) { finish(false); return }
-        am.mode = AudioManager.MODE_IN_COMMUNICATION
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(c: Context, intent: Intent) {
-                val state = intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, AudioManager.SCO_AUDIO_STATE_ERROR)
-                if (state == AudioManager.SCO_AUDIO_STATE_CONNECTED && connecting && gen == generation) {
-                    am.isBluetoothScoOn = true
-                    finish(true)
-                }
-            }
-        }
-        scoReceiver = receiver
-        registerSystemReceiver(app, receiver, IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED))
-        runCatching { am.startBluetoothSco() }
-        main.postDelayed({
-            if (connecting && gen == generation) {
-                tearDown()
-                finish(false)
-            }
-        }, 4_000)
+    private fun ready(gen: Int, confirmed: Boolean, why: String) {
+        if (gen != generation || !connecting) return
+        lastConfirmed = confirmed
+        lastMethod = method
+        lastReport = "glasses mic ready in ${elapsed()} ms ($why, ${if (method == COMM) "setCommunicationDevice" else "startBluetoothSco"})"
+        say(lastReport!!)
+        finish(true)
     }
+
+    /** The way that gave a mic that isn't silent: tried first from now on. */
+    fun rememberWorking() { lastMethod?.let { prefs.scoMethod = it } }
 
     private fun finish(ok: Boolean) {
         connecting = false
@@ -220,24 +245,50 @@ class AudioRoute private constructor(context: Context, private val prefs: Prefs)
         if (wasActive) releasedAt = SystemClock.elapsedRealtime()
     }
 
-    @Suppress("DEPRECATION")
     private fun tearDown() {
         scoReceiver?.let { runCatching { app.unregisterReceiver(it) } }
         scoReceiver = null
         if (Build.VERSION.SDK_INT >= 31) deviceListener?.let { runCatching { am.removeOnCommunicationDeviceChangedListener(it) } }
         deviceListener = null
-        if (Build.VERSION.SDK_INT >= 31) {
-            runCatching { am.clearCommunicationDevice() }
-        } else {
+        if (Build.VERSION.SDK_INT >= 31) runCatching { am.clearCommunicationDevice() }
+        if (legacyStarted || Build.VERSION.SDK_INT < 31) {
+            @Suppress("DEPRECATION")
             runCatching { am.stopBluetoothSco() }
-            runCatching { am.isBluetoothScoOn = false }
+            legacyStarted = false
         }
+        method = null
         runCatching { if (am.mode == AudioManager.MODE_IN_COMMUNICATION) am.mode = AudioManager.MODE_NORMAL }
     }
 
     companion object {
-        /** Longest wait for the glasses' mic link before using the phone's mic. */
-        const val SCO_WAIT_MS = 1_500L
+        /** Longest wait for a link signal after each way of opening it. */
+        const val SCO_WAIT_MS = 2_000L
+        /** After the call device switched with no SCO broadcast, wait this long before recording. */
+        const val DEVICE_GRACE_MS = 300L
+        const val COMM = "comm"
+        const val LEGACY = "legacy"
+
+        /** The ways to try, in order: [only] alone; else the one that worked last, then the other (the old way alone before Android 12). */
+        fun methodOrder(only: String?, remembered: String?, sdk: Int): List<String> {
+            if (sdk < 31) return listOf(LEGACY)
+            if (only == COMM || only == LEGACY) return listOf(only)
+            return if (remembered == LEGACY) listOf(LEGACY, COMM) else listOf(COMM, LEGACY)
+        }
+
+        fun scoStateName(st: Int): String = when (st) {
+            AudioManager.SCO_AUDIO_STATE_CONNECTED -> "CONNECTED"
+            AudioManager.SCO_AUDIO_STATE_CONNECTING -> "CONNECTING"
+            AudioManager.SCO_AUDIO_STATE_DISCONNECTED -> "DISCONNECTED"
+            AudioManager.SCO_AUDIO_STATE_ERROR -> "ERROR"
+            else -> "$st"
+        }
+
+        fun headsetStateName(st: Int): String = when (st) {
+            BluetoothHeadset.STATE_AUDIO_CONNECTED -> "connected"
+            BluetoothHeadset.STATE_AUDIO_CONNECTING -> "connecting"
+            BluetoothHeadset.STATE_AUDIO_DISCONNECTED -> "disconnected"
+            else -> "$st"
+        }
 
         @Volatile private var instance: AudioRoute? = null
 

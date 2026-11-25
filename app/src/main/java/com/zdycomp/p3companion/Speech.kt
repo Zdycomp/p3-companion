@@ -28,6 +28,8 @@ import java.util.Locale
  * then Google's, the on-phone one, then any other such as Samsung's, then the default), so one
  * broken service no longer means "voice doesn't work". As a last resort the system speech dialog
  * is opened through [activityFallback]. The service used and every error are kept for diagnostics.
+ * 3.5: a service that listened and understood nothing hands over once to the next one (Google's
+ * network recognizer after the on-phone one), and only words make a service "the one that works".
  *
  * 3.1 talking: one engine is started when the app starts ([warmUp]), the language is only set when
  * it changes, and answers can be spoken sentence by sentence while they're still arriving
@@ -56,11 +58,16 @@ class Speech(context: Context, private val prefs: Prefs) {
 
     private var recognizer: SpeechRecognizer? = null
     private var recognizerKey: String? = null
-    /** 3.3: makes the app's own mic recording for one attempt (Android 13+), or null for the recognizer's own mic. */
-    private var audioFactory: (() -> MicCapture?)? = null
-    private var activeFeed: MicCapture? = null
-    /** True when the last listen was fed by the app's own recording. */
+    /** 3.5: makes the app's own audio for one attempt (the glasses' data-link mic), or null for the recognizer's own mic. */
+    private var audioFactory: (() -> AudioFeed?)? = null
+    private var activeFeed: AudioFeed? = null
+    /** True when the last listen was fed by the app's own audio. */
     var lastFed = false; private set
+    /** 3.5: the last listen ended because the service doesn't take the app's own audio (it was marked "no pipe"). */
+    var lastPipeRejected = false; private set
+    /** 3.5: a service that gave "no match" in this listen; it is tried last from now on if another one understands. */
+    private var suspectNoMatch: String? = null
+    private var triedAnother = false
 
     private fun endFeed() {
         activeFeed?.stop()
@@ -84,23 +91,27 @@ class Speech(context: Context, private val prefs: Prefs) {
         app.packageManager.queryIntentActivities(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH), 0).isNotEmpty()
     }.getOrDefault(false)
 
-    /** The order services are tried in. */
-    fun candidates(): List<Service> {
+    /**
+     * The order services are tried in (3.5, [VoiceChoice.recognizerOrder]): the one that last gave words,
+     * then Google's network recognizer, the other known ones, the on-phone one, the rest, the default.
+     * A service that said "no match" while another understood goes last. [piped]: our own audio, so
+     * services marked "no pipe" are left out.
+     */
+    fun candidates(piped: Boolean = false): List<Service> {
         val found = services()
-        val out = mutableListOf<Service>()
-        fun add(s: Service) { if (out.none { it.key == s.key }) out += s }
-        val remembered = prefs.recognizerService
-        if (remembered == ON_DEVICE && onDeviceAvailable()) add(Service(ON_DEVICE, "on-phone recognizer", null, onDevice = true))
-        found.firstOrNull { it.second.flattenToString() == remembered }?.let { add(Service(it.second.flattenToString(), it.first, it.second)) }
-        PREFERRED.forEach { pkg ->
-            found.filter { it.second.packageName == pkg }.forEach { add(Service(it.second.flattenToString(), it.first, it.second)) }
+        val onDevice = onDeviceAvailable()
+        val defaultOk = runCatching { SpeechRecognizer.isRecognitionAvailable(app) }.getOrDefault(false)
+        val keys = VoiceChoice.recognizerOrder(
+            found.map { VoiceChoice.Rec(it.second.flattenToString(), it.second.packageName) }, onDevice, defaultOk,
+            prefs.recognizerService, prefs.recognizerNoMatch, prefs.recognizerNoPipe, piped,
+        )
+        return keys.mapNotNull { k ->
+            when (k) {
+                ON_DEVICE -> Service(ON_DEVICE, "on-phone recognizer", null, onDevice = true)
+                DEFAULT -> Service(DEFAULT, "phone default", null)
+                else -> found.firstOrNull { it.second.flattenToString() == k }?.let { Service(k, it.first, it.second) }
+            }
         }
-        if (onDeviceAvailable()) add(Service(ON_DEVICE, "on-phone recognizer", null, onDevice = true))
-        found.forEach { add(Service(it.second.flattenToString(), it.first, it.second)) }
-        if (out.isEmpty() || runCatching { SpeechRecognizer.isRecognitionAvailable(app) }.getOrDefault(false)) {
-            add(Service(DEFAULT, "phone default", null))
-        }
-        return out
     }
 
     fun recognitionAvailable(): Boolean =
@@ -114,32 +125,48 @@ class Speech(context: Context, private val prefs: Prefs) {
         add("on-phone recognizer: " + if (onDeviceAvailable()) "available" else "not available")
         add("speech dialog fallback: " + if (dialogAvailable()) "available" else "not available")
         add("service that worked last: " + (prefs.recognizerService?.let { k -> if (k == ON_DEVICE) "on-phone recognizer" else k } ?: "none yet"))
+        prefs.recognizerNoMatch.takeIf { it.isNotEmpty() }?.let { add("tried last (said \"no match\" while another understood): ${it.joinToString(", ")}") }
+        prefs.recognizerNoPipe.takeIf { it.isNotEmpty() }?.let { add("don't take the app's own audio: ${it.joinToString(", ")}") }
         add("try order: " + candidates().joinToString(" → ") { it.label })
     }
 
     /**
      * Listens for one sentence in [languageTag]. Exactly one of [onResult] or [onError] is called,
      * unless [cancelListening] comes first. [onError] gets the message and the speech error code
-     * (or -1); [lastErrorDetail] says which service gave it.
+     * (or -1); [lastErrorDetail] says which service gave it. Without [audio] the recognizer opens the
+     * mic itself (3.5: the phone's mic, or the glasses' when their call audio is the call device);
+     * with it, each attempt is fed the app's own audio (Android 13+), and a service that can't take it
+     * ends the listen with [lastPipeRejected] set.
      */
     fun listen(
         languageTag: String,
         onPartial: (String) -> Unit,
         onResult: (String) -> Unit,
         onError: (String, Int) -> Unit,
-        audio: (() -> MicCapture?)? = null,
+        audio: (() -> AudioFeed?)? = null,
     ) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             main.post { listen(languageTag, onPartial, onResult, onError, audio) }
             return
         }
         endFeed()
-        audioFactory = audio
+        val piped = audio != null && Build.VERSION.SDK_INT >= 33
+        audioFactory = if (piped) audio else null
         lastFed = false
+        lastPipeRejected = false
+        suspectNoMatch = null
+        triedAnother = false
         val token = ++listenToken
         lastAttempts = emptyList()
         lastErrorDetail = null
-        attempt(candidates(), 0, languageTag, token, null, onPartial, onResult, onError)
+        val chain = candidates(piped)
+        if (piped && chain.isEmpty()) {
+            lastPipeRejected = true
+            note("no speech service takes the app's own audio")
+            main.post { if (token == listenToken) onError("No speech service on this phone takes the glasses' own audio.", SpeechRecognizer.ERROR_CLIENT) }
+            return
+        }
+        attempt(chain, 0, languageTag, token, null, onPartial, onResult, onError)
     }
 
     private fun note(line: String) { lastAttempts = (lastAttempts + line).takeLast(12) }
@@ -156,9 +183,9 @@ class Speech(context: Context, private val prefs: Prefs) {
     ) {
         if (token != listenToken) return
         if (index >= chain.size) {
-            // Every service failed: the system speech dialog, if there is one.
+            // Every service failed: the system speech dialog, if there is one (it records the phone's mic itself).
             val fb = activityFallback
-            if (fb != null && dialogAvailable()) {
+            if (fb != null && audioFactory == null && dialogAvailable()) {
                 note("speech dialog: opened")
                 lastService = "speech dialog"
                 val opened = fb(tag) { text, why ->
@@ -191,31 +218,40 @@ class Speech(context: Context, private val prefs: Prefs) {
         }
         val myAttempt = ++attemptId
         var ready = false
-        var heardAnything = false
+        var partials = false
         var finished = false
-        fun next(code: Int, why: String) {
+        var feed: AudioFeed? = null
+        fun next(code: Int, why: String, moveOn: Boolean = false) {
             if (finished) return
             finished = true
             endFeed()
             destroyRecognizer()
-            if (reuse) {
+            if (reuse && !moveOn) {
                 // A kept recognizer can go stale: try the same service once more, freshly made.
                 note("${svc.label}: $why, trying it again fresh")
                 main.post { attempt(chain, index, tag, token, lastFailure, onPartial, onResult, onError) }
                 return
             }
             note("${svc.label}: $why")
-            if (prefs.recognizerService == svc.key) prefs.recognizerService = null
+            // A service that only said "no match" stays remembered until another one understands.
+            if (!moveOn && prefs.recognizerService == svc.key) prefs.recognizerService = null
             val failure = errorText(code) to code
             main.post { attempt(chain, index + 1, tag, token, failure, onPartial, onResult, onError) }
         }
+        /** Words came back: this service is the one to try first, and a service that said "no match" before it goes last. */
         fun works() {
             lastService = svc.label
             if (prefs.recognizerService != svc.key) prefs.recognizerService = svc.key
+            if (svc.key in prefs.recognizerNoMatch) prefs.recognizerNoMatch = prefs.recognizerNoMatch - svc.key
+            suspectNoMatch?.takeIf { it != svc.key }?.let { bad ->
+                prefs.recognizerNoMatch = prefs.recognizerNoMatch + bad
+                note("${svc.label} understood after $bad said no match: $bad goes last from now on")
+                suspectNoMatch = null
+            }
         }
         r.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) { ready = true }
-            override fun onBeginningOfSpeech() { heardAnything = true; ready = true }
+            override fun onBeginningOfSpeech() { ready = true }
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onEndOfSpeech() {}
@@ -224,42 +260,61 @@ class Speech(context: Context, private val prefs: Prefs) {
             override fun onPartialResults(partialResults: Bundle?) {
                 if (token != listenToken || myAttempt != attemptId || finished) return
                 val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-                if (!text.isNullOrBlank()) { heardAnything = true; works(); onPartial(text) }
+                if (!text.isNullOrBlank()) { partials = true; onPartial(text) }
             }
 
             override fun onResults(results: Bundle?) {
                 if (token != listenToken || myAttempt != attemptId || finished) return
+                val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()
+                if (text.isNullOrEmpty()) { onError(SpeechRecognizer.ERROR_NO_MATCH); return }
                 finished = true
+                val heard = feed?.heardSpeech
                 endFeed()
                 resultAt = SystemClock.elapsedRealtime()
-                val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()
                 works()
-                note("${svc.label}: " + if (text.isNullOrEmpty()) "heard nothing" else "OK")
-                if (text.isNullOrEmpty()) onError(errorText(SpeechRecognizer.ERROR_NO_MATCH), SpeechRecognizer.ERROR_NO_MATCH)
-                else onResult(text)
+                note("${svc.label}: OK" + if (feed != null) " (fed the app's own audio${if (heard == true) ", speech heard" else ""})" else "")
+                onResult(text)
             }
 
             override fun onError(error: Int) {
                 if (token != listenToken || myAttempt != attemptId || finished) return
-                val detail = "${errorName(error)} ($error) from ${svc.label}"
+                val detail = "${errorName(error)} ($error) from ${svc.label}" + if (feed != null) " fed the app's own audio" else ""
                 lastErrorDetail = detail
                 val micOk = app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-                val serviceFault = when (error) {
-                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> micOk
-                    SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> !ready
-                    SpeechRecognizer.ERROR_TOO_MANY_REQUESTS, SpeechRecognizer.ERROR_AUDIO -> false
-                    else -> !heardAnything
+                val vadHeard = feed?.heardSpeech == true
+                when (VoiceChoice.onError(error, ready, partials, feed != null, vadHeard, triedAnother, micOk)) {
+                    VoiceChoice.OnError.NEXT_SERVICE -> next(error, "${errorName(error)} ($error)" + if (!ready) " before listening" else "")
+                    VoiceChoice.OnError.NEXT_SERVICE_ONCE -> {
+                        // 3.5: it listened and understood nothing: the next service listens once more (often
+                        // Google's network recognizer after the on-phone one). If that one understands, this one goes last.
+                        triedAnother = true
+                        if (suspectNoMatch == null) suspectNoMatch = svc.key
+                        if (index + 1 < chain.size) {
+                            next(error, "${errorName(error)} ($error), listening once more with ${chain[index + 1].label}", moveOn = true)
+                        } else giveUp(error)
+                    }
+                    VoiceChoice.OnError.NO_PIPE -> {
+                        finished = true
+                        val fed = feed?.report()
+                        endFeed()
+                        destroyRecognizer()
+                        prefs.recognizerNoPipe = prefs.recognizerNoPipe + svc.key
+                        lastPipeRejected = true
+                        note("${svc.label}: ${errorName(error)} ($error) with the app's own audio" + (fed?.let { " [$it]" } ?: "") +
+                            "; marked as not taking it")
+                        onError(errorText(error), error)
+                    }
+                    VoiceChoice.OnError.GIVE_UP -> giveUp(error)
                 }
-                if (serviceFault) {
-                    next(error, "${errorName(error)} ($error)" + if (!ready) " before listening" else "")
-                } else {
-                    finished = true
-                    endFeed()
-                    destroyRecognizer()
-                    note("${svc.label}: ${errorName(error)} ($error)")
-                    if (ready) works()
-                    onError(errorText(error), error)
-                }
+            }
+
+            private fun giveUp(error: Int) {
+                finished = true
+                val fed = feed?.report()
+                endFeed()
+                destroyRecognizer()
+                note("${svc.label}: ${errorName(error)} ($error)" + (fed?.let { " [$it]" } ?: ""))
+                onError(errorText(error), error)
             }
         })
         // A broken service may never answer at all: move on after 4 s without "ready".
@@ -277,20 +332,30 @@ class Speech(context: Context, private val prefs: Prefs) {
             // End the turn sooner after the person stops talking (engines that ignore these are fine).
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 700L)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 500L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 300L)
         }
-        // 3.3: the app's own recording (glasses' mic, or the phone's when the glasses are silent).
+        // 3.5: only the glasses' data-link mic is fed through a pipe; the phone's mic and the glasses'
+        // call audio are recorded by the recognizer itself (3.4's own phone recording heard nothing).
         endFeed()
-        if (Build.VERSION.SDK_INT >= 33) {
-            val feed = runCatching { audioFactory?.invoke() }.getOrNull()
-            if (feed != null && feed.start()) {
-                activeFeed = feed
-                lastFed = true
-                intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, feed.readFd)
-                intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
-                intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
-                intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, MicCapture.RATE)
-                note("${svc.label}: fed by the app's own recording")
+        val factory = audioFactory
+        if (factory != null && Build.VERSION.SDK_INT >= 33) {
+            val f = runCatching { factory() }.getOrNull()
+            if (f == null || !f.start()) {
+                f?.stop()
+                finished = true
+                lastPipeRejected = true
+                note("${svc.label}: the app's own audio didn't start")
+                onError("The glasses' mic stream stopped.", SpeechRecognizer.ERROR_AUDIO)
+                return
             }
+            feed = f
+            activeFeed = f
+            lastFed = true
+            intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, f.readFd)
+            intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
+            intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
+            intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, MicCapture.RATE)
+            note("${svc.label}: fed the app's own audio (16 kHz mono PCM16)")
         }
         try {
             r.startListening(intent)
@@ -539,11 +604,8 @@ class Speech(context: Context, private val prefs: Prefs) {
     }
 
     companion object {
-        const val ON_DEVICE = "on-device"
-        const val DEFAULT = "default"
-
-        /** Recognition services known to work well, tried before any other. */
-        val PREFERRED = listOf("com.google.android.googlequicksearchbox", "com.google.android.tts", "com.google.android.as")
+        const val ON_DEVICE = VoiceChoice.ON_DEVICE
+        const val DEFAULT = VoiceChoice.DEFAULT
 
         fun errorName(code: Int): String = when (code) {
             SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "ERROR_NETWORK_TIMEOUT"

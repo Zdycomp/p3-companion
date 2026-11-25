@@ -47,6 +47,8 @@ class VideoPipeline(private val ctx: Context, private val album: String) {
     private val queued = AtomicInteger()
     private val muxQueued = AtomicInteger()
     @Volatile private var needKey = true
+    /** 3.5: when a broken picture was dropped (elapsedRealtime), 0 for none; the decoder waits for a key picture then. */
+    @Volatile private var gapAt = 0L
     @Volatile var lastAuAt = 0L; private set
     @Volatile var received = 0L; private set
     /** 3.4: Annex-B bytes received, for the kbps on screen. */
@@ -90,6 +92,15 @@ class VideoPipeline(private val ctx: Context, private val album: String) {
         }
     }
 
+    /**
+     * 3.5: a picture was dropped before it was whole. No command is known that asks the glasses for a
+     * key picture, so the decoder waits for the next one, at most [LiveResync.MAX_WAIT_MS].
+     */
+    fun resync() {
+        gapAt = SystemClock.elapsedRealtime()
+        needKey = true
+    }
+
     /** One producer per Surface: the old decoder is released first. */
     fun setSurface(s: Surface?) = dec.post { releaseCodec(); surface = s; needKey = true }
 
@@ -106,7 +117,10 @@ class VideoPipeline(private val ctx: Context, private val album: String) {
         val sp = sps ?: return
         val pp = pps ?: return
         // The decoder starts on an IDR, or on an intra picture carrying its own SPS and PPS (3.4).
-        if (needKey && !au.entry) { waitingForKey++; return }
+        // Only a key picture starts the decoder; after a dropped picture (3.5) the running decoder waits for one, at most 2 s.
+        val gap = gapAt.takeIf { it != 0L }?.let { SystemClock.elapsedRealtime() - it }
+        val mayGo = if (codec == null) !needKey || au.entry else LiveResync.mayDecode(needKey, au.entry, gap)
+        if (!mayGo) { waitingForKey++; return }
         try {
             val c = codec ?: MediaCodec.createDecoderByType("video/avc").also { c ->
                 val f = MediaFormat.createVideoFormat("video/avc", size.first, size.second).apply {
@@ -126,6 +140,7 @@ class VideoPipeline(private val ctx: Context, private val album: String) {
                 codec = c
             }
             needKey = false
+            gapAt = 0L
             drain(c)
             val i = c.dequeueInputBuffer(5_000)
             if (i < 0) { dropped++; needKey = true; return }
@@ -503,6 +518,7 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
             override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
         }
         g.videoSink = { p.offer(it) }
+        g.liveGapSink = { p.resync() }
         jpegShown = 0
         g.jpegSink = { bytes -> showJpegFrame(bytes) }
         g.previewStateSink = { open ->
@@ -665,9 +681,16 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
             spinning = true,
         )
         a.withNearbyWifi { wifi ->
-            g.runLiveProbe(onLine = { line -> if (active && mode == Mode.TESTING) probeLine?.text = line }, wifi = wifi) { res ->
-                if (!active) return@runLiveProbe
+            // 3.5: the test runs inside this screen's session: video that works stays open, no close and reopen.
+            g.runLiveProbe(onLine = { line -> if (active && mode == Mode.TESTING) probeLine?.text = line }, wifi = wifi, keepOpen = true) { res ->
+                if (!active) { if (res.keptOpen) g.closePreview(); return@runLiveProbe }
                 when {
+                    res.path != null && res.keptOpen -> {
+                        a.toast("Live video works with command ${res.path}.")
+                        mode = Mode.VIDEO
+                        openedAt = SystemClock.elapsedRealtime()
+                        renderMode()
+                    }
                     res.path != null -> { a.toast("Live video works with command ${res.path}."); open() }
                     res.complete -> startSnapshots()
                     else -> {
@@ -686,7 +709,7 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         val g = a.glasses
         if (mode == Mode.VIDEO) {
             pipeline?.stopRecording(null)
-            g.closePreview()
+            g.closePreview(immediate = true)
         }
         mode = Mode.SNAPSHOT
         snapRunning = true
@@ -746,7 +769,7 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
             showSnapshot(uri)
             // 3.3: replies no longer time out, so the next picture can be asked for at once.
             main.post { nextSnap(token) }
-        }, announce = false)
+        }, announce = false, auto = true)
     }
 
     private fun showSnapshot(uri: Uri) {
@@ -929,6 +952,7 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         snapLastAt = 0L
         val g = a.glasses
         g.videoSink = null
+        g.liveGapSink = null
         g.jpegSink = null
         g.previewStateSink = null
         pipeline?.close()

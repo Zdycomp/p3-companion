@@ -1,0 +1,27 @@
+Owner's log from 3.4.0 (versionCode 7), Nov 25 2026, moto g 2025, E13C-5 fw 1.0.0. Verbatim excerpts.
+
+LIVE VIEW WORKS:
+00:40:30  Live view: using media ack per fragment for live video from now on (media ack per fragment 30.1 fps)
+00:40:33  Live view: 29.9 fps, 350 kbps, 0 dropped so far ... (steady 29.8-30.1 fps, 340-400 kbps until 00:41:13)
+00:43:38  Live view: dropped an unfinished picture (fragment 2, wanted 1)
+
+FIRST OPEN HIT "BUSY" AND A PHOTO FIRED:
+00:40:02  → 5720 01
+00:40:02  ← 5720 00
+00:40:02  ← 5710 02
+00:40:02  → 5711 00
+00:40:02  ← 5711 00
+00:40:02  Live view state 00
+00:40:02  Live view: the glasses are busy (5710 = 02); waiting for them
+00:40:04  ← 57B1 01          (shutter fired ~2 s after the open; then a full photo transfer 7320 06 / 7300 x6 / 7500)
+00:40:08  Saved photo, 71 KB
+00:40:09  → 5720 00  ← 5720 00  ← 5710 02
+00:40:09  → 5720 00  ← 5720 00  ← 5710 02
+CHURN: the screen opened and closed preview within a second at 00:40:15 (→5720 01 … →5720 00 ← 5710 00), then reopened at 00:40:23.
+
+VOICE STILL FAILS:
+00:41:28  Voice mic: phone, the glasses' mic was silent (RMS -83 dBFS)
+00:41:42  Voice: ERROR_NO_MATCH (7) with the phone, the glasses' mic was silent (RMS -83 dBFS) mic, listening again with the phone's mic
+00:41:45  Voice: that try used the phone mic
+00:41:45  Voice: ERROR_NO_MATCH (7) from Speech Recognition and Synthesis
+00:41:50  Voice mic: phone, the glasses' mic was silent (RMS -83 dBFS)

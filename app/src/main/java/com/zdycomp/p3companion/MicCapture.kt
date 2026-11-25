@@ -10,175 +10,82 @@ import android.media.MediaRecorder
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.os.ParcelFileDescriptor
-import java.io.FileOutputStream
-import java.util.concurrent.LinkedBlockingQueue
-import kotlin.math.log10
-import kotlin.math.sqrt
 
 /**
- * 3.3: the app records the microphone itself and hands the sound to the speech recognizer through a
- * pipe (RecognizerIntent.EXTRA_AUDIO_SOURCE, Android 13+). The glasses' mic (the Bluetooth SCO input)
- * is tried first; its first 400 ms are measured, and if it's silent the phone's mic takes over in the
- * same stream, so the recognizer never waits on a dead headset mic. 16 kHz, mono, 16-bit PCM.
+ * Short mic recordings to measure a mic's level: the glasses' call-audio check before a voice
+ * question, and Test voice's 3-second recordings. 16 kHz, mono, 16-bit PCM.
  *
- * [onChoice] runs on the main thread once the mic is chosen, with the level of the glasses' mic in
- * dBFS when it was measured.
+ * 3.5: the app no longer records the phone's or the glasses' call-audio mic for the recognizer: 3.4
+ * piped that recording in (EXTRA_AUDIO_SOURCE) and Google's on-phone recognizer answered "no match"
+ * even for the phone's mic. The recognizer now opens the mic itself; only the glasses' data-link
+ * stream ([GlassesMicStream]) is piped.
  */
-class MicCapture(
-    context: Context,
-    private val glassesInput: AudioDeviceInfo?,
-    private val onChoice: (Mic, Double?) -> Unit,
-) {
+object MicCapture {
     enum class Mic { GLASSES, PHONE }
 
-    private val app = context.applicationContext
-    private val main = Handler(Looper.getMainLooper())
-    private val pipe: Array<ParcelFileDescriptor> = ParcelFileDescriptor.createPipe()
-    /** Goes into the recognizer intent. */
-    val readFd: ParcelFileDescriptor get() = pipe[0]
-    @Volatile private var stopped = false
-    private var thread: Thread? = null
+    const val RATE = 16_000
+    /** How long the glasses' call-audio mic is measured before a question is asked through it. */
+    const val PROBE_MS = 400
+    /** Below this a mic counts as silent (a dead SCO input reads as digital zero or hiss). */
+    const val SILENCE_DB = Level.SILENT_DB
+
+    /** Which mic to use: the glasses' only when their call audio is up and they aren't silent. */
+    fun decide(scoUp: Boolean, glassesRmsDb: Double?): Mic = when {
+        !scoUp -> Mic.PHONE
+        glassesRmsDb == null -> Mic.PHONE
+        glassesRmsDb < SILENCE_DB -> Mic.PHONE
+        else -> Mic.GLASSES
+    }
+
+    /** RMS level in dBFS from a sum of squared 16-bit samples; -120 for nothing. */
+    fun dbfs(sumSquares: Double, count: Int): Double = Level.dbfs(sumSquares, count)
+
+    fun rmsDb(samples: ShortArray, count: Int = samples.size): Double = Level.of(samples, count)
+
+    /** What a recording got: the samples, their level, and the input Android really used. */
+    class Take(val samples: ShortArray, val db: Double, val routedTo: String?, val error: String? = null)
+
     /**
-     * Sound on its way to the recognizer. The mic thread never writes to the pipe itself, so a
-     * recognizer that stops reading can't keep the mic open; a full queue (2 s) drops sound instead.
+     * Records [ms] from [device] (null: the phone's built-in mic) on a background thread; [done] runs on
+     * the main thread. [callAudio] uses the voice-call source, which is what reaches a Bluetooth headset mic.
      */
-    private val queue = LinkedBlockingQueue<ByteArray>(100)
-    private val endMark = ByteArray(0)
-
-    /** Starts recording; false when no recorder could be opened (the recognizer's own mic is used then). */
-    fun start(): Boolean {
-        val first = open(glassesInput ?: phoneMic()) ?: open(null) ?: run { closeAll(); return false }
-        thread = Thread({ run(first) }, "p3-mic").apply { isDaemon = true; start() }
-        Thread({ pump() }, "p3-mic-pipe").apply { isDaemon = true; start() }
-        return true
-    }
-
-    /** Ends the stream (the recognizer sees the end of the sound) and frees the mic. Safe to call twice. */
-    fun stop() {
-        stopped = true
-        // Our copy of the read end goes now, so a recognizer that already let go can't leave the pipe thread waiting.
-        runCatching { pipe[0].close() }
-        if (thread == null) closeAll()
-    }
-
-    /** Copies queued sound into the pipe until the end mark or the recognizer closes its side. */
-    private fun pump() {
-        val out = FileOutputStream(pipe[1].fileDescriptor)
-        try {
-            while (true) {
-                val b = queue.take()
-                if (b === endMark) break
-                out.write(b)
-            }
-        } catch (_: Exception) {
-        } finally {
-            closeAll()
-        }
-    }
-
-    private fun send(b: ByteArray) { if (!queue.offer(b)) { queue.poll(); queue.offer(b) } }
-
-    private fun run(firstRec: AudioRecord) {
-        var rec = firstRec
-        val chunk = ShortArray(RATE / 50) // 20 ms
-        try {
-            rec.startRecording()
-            if (glassesInput != null && rec.preferredDevice?.id == glassesInput.id) {
-                // Measure the glasses' mic for 400 ms; keep what it heard unless it's silent.
-                val held = ArrayList<ByteArray>()
-                var sum = 0.0
-                var n = 0
-                while (!stopped && n < RATE * PROBE_MS / 1000) {
-                    val got = rec.read(chunk, 0, chunk.size)
-                    if (got <= 0) break
-                    for (i in 0 until got) sum += chunk[i].toDouble() * chunk[i]
-                    n += got
-                    held += toBytes(chunk, got)
-                }
-                val db = dbfs(sum, n)
-                val mic = decide(scoUp = true, glassesRmsDb = db)
-                main.post { onChoice(mic, db) }
-                if (mic == Mic.GLASSES) {
-                    held.forEach { send(it) }
-                } else {
-                    runCatching { rec.stop() }; rec.release()
-                    rec = open(phoneMic()) ?: open(null) ?: return
-                    rec.startRecording()
-                }
-            } else {
-                main.post { onChoice(Mic.PHONE, null) }
-            }
-            while (!stopped) {
-                val got = rec.read(chunk, 0, chunk.size)
-                if (got < 0) break
-                if (got == 0) continue
-                send(toBytes(chunk, got))
-            }
-        } catch (_: Exception) {
-        } finally {
-            runCatching { rec.stop() }
-            runCatching { rec.release() }
-            queue.clear()
-            queue.offer(endMark)
-        }
-    }
-
     @SuppressLint("MissingPermission")
-    private fun open(device: AudioDeviceInfo?): AudioRecord? = runCatching {
-        val min = AudioRecord.getMinBufferSize(RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        val source = if (device?.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) MediaRecorder.AudioSource.VOICE_COMMUNICATION
-        else MediaRecorder.AudioSource.VOICE_RECOGNITION
-        val r = AudioRecord(source, RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(min, RATE / 5 * 2))
-        if (r.state != AudioRecord.STATE_INITIALIZED) { r.release(); return@runCatching null }
-        if (device != null) r.setPreferredDevice(device)
-        r
-    }.getOrNull()
+    fun record(context: Context, device: AudioDeviceInfo?, ms: Int, callAudio: Boolean, done: (Take) -> Unit) {
+        val app = context.applicationContext
+        val main = Handler(Looper.getMainLooper())
+        Thread({
+            val take = runCatching {
+                val min = AudioRecord.getMinBufferSize(RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+                val source = if (callAudio) MediaRecorder.AudioSource.VOICE_COMMUNICATION else MediaRecorder.AudioSource.VOICE_RECOGNITION
+                val r = AudioRecord(source, RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(min, RATE / 5 * 2))
+                if (r.state != AudioRecord.STATE_INITIALIZED) { r.release(); return@runCatching Take(ShortArray(0), -120.0, null, "the mic couldn't be opened") }
+                val target = device ?: if (!callAudio) builtInMic(app) else null
+                if (target != null) r.setPreferredDevice(target)
+                val out = ShortArray(RATE * ms / 1000)
+                var n = 0
+                var routed: String? = null
+                try {
+                    r.startRecording()
+                    while (n < out.size) {
+                        val got = r.read(out, n, minOf(RATE / 50, out.size - n))
+                        if (got < 0) break
+                        n += got
+                        if (routed == null) routed = r.routedDevice?.let { "${it.productName} (type ${it.type})" }
+                    }
+                } finally {
+                    runCatching { r.stop() }
+                    r.release()
+                }
+                Take(out.copyOf(n), Level.of(out, n), routed)
+            }.getOrElse { Take(ShortArray(0), -120.0, null, it.message ?: it.javaClass.simpleName) }
+            main.post { done(take) }
+        }, "p3-mic-level").apply { isDaemon = true; start() }
+    }
 
-    private fun phoneMic(): AudioDeviceInfo? =
+    private fun builtInMic(app: Context): AudioDeviceInfo? =
         app.getSystemService(AudioManager::class.java)?.getDevices(AudioManager.GET_DEVICES_INPUTS)
             ?.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
 
-    private fun closeAll() {
-        runCatching { pipe[1].close() }
-        runCatching { pipe[0].close() }
-    }
-
-    companion object {
-        const val RATE = 16_000
-        /** How long the glasses' mic is measured before it's trusted. */
-        const val PROBE_MS = 400
-        /** Below this the glasses' mic counts as silent (a dead SCO input reads as digital zero or hiss). */
-        const val SILENCE_DB = -60.0
-
-        /** Our own capture needs the recognizer's audio-source extra (Android 13+). */
-        fun supported(): Boolean = Build.VERSION.SDK_INT >= 33
-
-        /** Which mic to use: the glasses' only when their call audio is up and they aren't silent. */
-        fun decide(scoUp: Boolean, glassesRmsDb: Double?): Mic = when {
-            !scoUp -> Mic.PHONE
-            glassesRmsDb == null -> Mic.PHONE
-            glassesRmsDb < SILENCE_DB -> Mic.PHONE
-            else -> Mic.GLASSES
-        }
-
-        /** RMS level in dBFS from a sum of squared 16-bit samples; -120 for nothing. */
-        fun dbfs(sumSquares: Double, count: Int): Double {
-            if (count <= 0) return -120.0
-            val rms = sqrt(sumSquares / count)
-            return if (rms <= 0.0) -120.0 else maxOf(-120.0, 20 * log10(rms / 32768.0))
-        }
-
-        fun rmsDb(samples: ShortArray, count: Int = samples.size): Double {
-            var s = 0.0
-            for (i in 0 until count) s += samples[i].toDouble() * samples[i]
-            return dbfs(s, count)
-        }
-
-        private fun toBytes(c: ShortArray, n: Int): ByteArray {
-            val b = ByteArray(n * 2)
-            for (i in 0 until n) { b[2 * i] = (c[i].toInt() and 0xFF).toByte(); b[2 * i + 1] = ((c[i].toInt() shr 8) and 0xFF).toByte() }
-            return b
-        }
-    }
+    /** The app's own audio for the recognizer needs its audio-source extra (Android 13+). */
+    fun supported(): Boolean = Build.VERSION.SDK_INT >= 33
 }

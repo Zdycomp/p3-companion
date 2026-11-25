@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.speech.SpeechRecognizer
+import java.util.Locale
 import java.util.concurrent.Executors
 
 /**
@@ -51,7 +52,6 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
     private val history = mutableListOf<AiTurn>()
     private var turn = 0
     private var holdingRoute = false
-    private var retriedPhoneMic = false
 
     /** The last listening problem in full (service and error code), for the screen. */
     var lastVoiceError: String? = null; private set
@@ -73,6 +73,8 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
     private val lingerRelease = Runnable { if (phase == Phase.IDLE) releaseRouteNow() }
 
     init {
+        // 3.5: every change of the glasses' call audio goes to the connection log.
+        route.log = { glasses.addLog("Voice: $it") }
         // The speech engine and the command patterns are ready before the first question.
         speech.warmUp()
         io.execute { runCatching { VoiceCommands.match("warm up") } }
@@ -128,6 +130,13 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
 
     private fun replyTag() = Languages.byName(prefs.replyLanguage).tag
 
+    /** 3.5: the mic the current (or last) question used, in plain words for the Assistant screen. */
+    var micInUse: String? = null; private set
+    private var routes: List<MicRoute> = emptyList()
+    private var routeNow: MicRoute? = null
+    private var routeIndex = 0
+    private var spp: GlassesMicStream? = null
+
     private fun startTurn(m: Mode) {
         if (phase != Phase.IDLE) { tapWhileBusy(); return }
         val lines = log(m)
@@ -144,49 +153,110 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
         phase = Phase.LISTENING
         partial = null
         lastVoiceError = null
-        retriedPhoneMic = false
         micNote = null
+        throughGlasses = false
+        // 3.5: the mic Test voice (or the last questions) found working first, then the others.
+        routes = VoiceChoice.routeOrder(
+            prefs.micRouteScores, route.headsetConnected(),
+            linked = glasses.state == XkGlasses.State.READY && MicCapture.supported(), useGlasses = prefs.useGlassesAudio,
+        )
+        if (routes.size > 1) glasses.addLog("Voice: mics to try: " + routes.joinToString(" → ") { it.label })
         changed()
-        holdRoute { via ->
-            if (my != turn) return@holdRoute
-            throughGlasses = via
-            if (!via && route.willUseGlasses() && route.lastReport != null) glasses.addLog("Voice: ${route.lastReport}")
-            changed()
-            listenNow(my, m)
-        }
+        tryRoute(my, m, 0, null)
     }
 
-    /**
-     * 3.3 on Android 13+: the app records the mic itself (the glasses' SCO input when it's up and not
-     * silent, else the phone's) and feeds the recognizer; [phoneOnly] is the retry with the phone's mic
-     * and the recognizer's own recording.
-     */
-    private fun micFeed(my: Int, phoneOnly: Boolean): (() -> MicCapture?)? {
-        if (phoneOnly || !MicCapture.supported()) {
-            micNote = if (throughGlasses) "glasses (recognizer's own recording)" else "phone"
-            return null
+    /** The mic the next question starts with. */
+    fun plannedMic(): MicRoute = VoiceChoice.routeOrder(
+        prefs.micRouteScores, route.headsetConnected(),
+        linked = glasses.state == XkGlasses.State.READY && MicCapture.supported(), useGlasses = prefs.useGlassesAudio,
+    ).first()
+
+    private fun scoreRoute(r: MicRoute, worked: Boolean) {
+        val scores = prefs.micRouteScores.toMutableMap()
+        val old = scores[r] ?: 0
+        val now = VoiceChoice.scoreAfter(old, worked)
+        if (now != old || r !in scores) { scores[r] = now; prefs.micRouteScores = scores }
+    }
+
+    private fun useMic(r: MicRoute, note: String) {
+        micNote = note
+        micInUse = r.label
+        glasses.addLog("Voice mic: $note")
+        changed()
+    }
+
+    private fun stopSpp() {
+        spp?.stop()
+        spp = null
+    }
+
+    /** The mic [routes] index [i] didn't work: note it, count it against that mic, and try the next one. */
+    private fun routeFailed(my: Int, m: Mode, i: Int, r: MicRoute, why: String) {
+        scoreRoute(r, false)
+        val next = routes.getOrNull(i + 1)
+        glasses.addLog("Voice mic: the ${r.label} didn't work ($why)" + (next?.let { "; trying the ${it.label}" } ?: ""))
+        tryRoute(my, m, i + 1, why)
+    }
+
+    private fun tryRoute(my: Int, m: Mode, i: Int, lastWhy: String?) {
+        if (my != turn) return
+        val r = routes.getOrNull(i)
+        if (r == null) {
+            stopSpp()
+            releaseRouteNow()
+            add(log(m), Who.ERROR, "No mic worked" + (lastWhy?.let { ": $it" } ?: ".") + " Run Test voice in Diagnostics to see which one does.")
+            endTurn()
+            return
         }
-        return {
-            val input = if (throughGlasses && route.active) route.glassesInput() else null
-            MicCapture(app, input) { mic, db ->
-                if (my != turn) return@MicCapture
-                val level = db?.let { " (RMS %.0f dBFS)".format(it) } ?: ""
-                micNote = if (mic == MicCapture.Mic.GLASSES) "glasses$level" else if (input != null) "phone, the glasses' mic was silent$level" else "phone"
-                glasses.addLog("Voice mic: $micNote")
-                if (mic == MicCapture.Mic.PHONE && throughGlasses) {
-                    // The glasses' mic gave nothing: let their call link go, so the answer plays on media audio.
-                    throughGlasses = false
-                    releaseRouteNow()
-                    changed()
+        routeNow = r
+        routeIndex = i
+        when (r) {
+            MicRoute.PHONE -> {
+                stopSpp()
+                releaseRouteNow()
+                throughGlasses = false
+                useMic(r, "phone (the speech service records it)")
+                listenNow(my, m, null)
+            }
+            MicRoute.GLASSES_SCO -> {
+                stopSpp()
+                holdRoute { up ->
+                    if (my != turn) return@holdRoute
+                    if (!up) { releaseRouteNow(); routeFailed(my, m, i, r, route.lastReport ?: "the call audio didn't open"); return@holdRoute }
+                    // 3.5: a link that came up must also carry sound (3.4 recorded -83 dBFS digital silence).
+                    MicCapture.record(app, route.glassesInput(), MicCapture.PROBE_MS, callAudio = true) { take ->
+                        if (my != turn) return@record
+                        if (take.db < Level.SILENT_DB) {
+                            releaseRouteNow()
+                            routeFailed(my, m, i, r, "silent, RMS %.0f dBFS".format(Locale.US, take.db))
+                            return@record
+                        }
+                        route.rememberWorking()
+                        throughGlasses = true
+                        useMic(r, "glasses through call audio, RMS %.0f dBFS (the speech service records it)".format(Locale.US, take.db))
+                        listenNow(my, m, null)
+                    }
+                }
+            }
+            MicRoute.GLASSES_SPP -> {
+                releaseRouteNow()
+                stopSpp()
+                val s = GlassesMicStream(glasses)
+                spp = s
+                s.start { err ->
+                    if (my != turn || spp !== s) { s.stop(); return@start }
+                    if (err != null) { stopSpp(); routeFailed(my, m, i, r, err); return@start }
+                    throughGlasses = true
+                    useMic(r, "glasses over the data link (Opus, decoded and fed to the speech service)")
+                    listenNow(my, m) { s.newPipe { speech.finishListening() } }
                 }
             }
         }
     }
 
-    private fun listenNow(my: Int, m: Mode, phoneOnly: Boolean = false) {
+    private fun listenNow(my: Int, m: Mode, feed: (() -> AudioFeed?)?) {
         val lines = log(m)
         val tag = Languages.byName(if (m == Mode.CHAT) prefs.replyLanguage else prefs.translateFrom).tag
-        val feed = micFeed(my, phoneOnly)
         speech.listen(
             tag,
             onPartial = { text ->
@@ -194,19 +264,26 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
                 if (prefs.voiceCommands && VoiceCommands.isEarlyStop(text)) { stop(); return@listen }
                 partial = text; changed()
             },
-            onResult = { text -> if (my == turn) heard(my, m, text) },
+            onResult = { text ->
+                if (my != turn) return@listen
+                stopSpp()
+                routeNow?.let { scoreRoute(it, true) }
+                heard(my, m, text)
+            },
             onError = { msg, code ->
                 if (my != turn) return@listen
-                // The glasses' mic may not be ready or may be silent: try once more with the phone's mic.
-                if (shouldRetryWithPhone(code, throughGlasses || speech.lastFed, retriedPhoneMic)) {
-                    retriedPhoneMic = true
-                    releaseRouteNow()
+                val r = routeNow
+                // A glasses mic that gave nothing, or a speech service that won't take its audio: the next mic.
+                if (r != null && r != MicRoute.PHONE && (speech.lastPipeRejected || shouldRetryWithPhone(code, glassesOrFed = true, alreadyRetried = false))) {
+                    stopSpp()
+                    if (r == MicRoute.GLASSES_SCO) releaseRouteNow()
                     throughGlasses = false
-                    glasses.addLog("Voice: ${Speech.errorName(code)} ($code) with the ${micNote ?: "glasses"} mic, listening again with the phone's mic")
-                    changed()
-                    listenNow(my, m, phoneOnly = true)
+                    val why = if (speech.lastPipeRejected) "the speech service doesn't take the glasses' own audio"
+                    else "${Speech.errorName(code)} ($code)" + (speech.lastErrorDetail?.let { ", $it" } ?: "")
+                    routeFailed(my, m, routeIndex, r, why)
                     return@listen
                 }
+                stopSpp()
                 lastVoiceError = speech.lastErrorDetail?.let { "$msg ($it)" } ?: msg
                 micNote?.let { glasses.addLog("Voice: that try used the $it mic") }
                 speech.lastErrorDetail?.let { glasses.addLog("Voice: $it") }
@@ -491,6 +568,7 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
     /** Stops listening, thinking or talking right away. */
     fun stop() {
         turn++
+        stopSpp()
         pendingConfirm = null
         commands?.cancelPending()
         speech.cancelListening()
@@ -502,6 +580,7 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
     }
 
     private fun endTurn() {
+        stopSpp()
         phase = Phase.IDLE
         partial = null
         // Call audio: keep the link up a little, so the next question in this session needn't wait for it.

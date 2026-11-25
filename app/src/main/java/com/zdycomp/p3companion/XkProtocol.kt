@@ -318,6 +318,8 @@ object Xk {
          * its first 64 bytes and its full length. Runs on the reader thread inside [feed]; keep it cheap.
          */
         @Volatile var onSkip: ((first: ByteArray, length: Int) -> Unit)? = null
+        /** 3.5: while the glasses' mic stream is looked for, every skipped run in full (raw audio may arrive unframed). */
+        @Volatile var onSkipRun: ((run: ByteArray) -> Unit)? = null
         /**
          * While live view is open or tested (3.3): also accept a frame with an unknown head byte or an
          * unknown small cmd, as long as the offset is zero, the length is under 16 KB and the CRC matches.
@@ -401,6 +403,7 @@ object Xk {
             skipFrom = -1
             if (from < 0 || end <= from) return
             onSkip?.invoke(buf.copyOfRange(from, minOf(end, from + 64)), end - from)
+            onSkipRun?.invoke(buf.copyOfRange(from, end))
         }
 
         /** Payload length if a real frame could start at [p], else -1. */

@@ -2,61 +2,40 @@ package com.zdycomp.p3companion
 
 /** What's new in this version, shown once after an update and on the About screen. */
 object WhatsNew {
-    const val VERSION = "3.4.0"
+    const val VERSION = "3.5.0"
 
     val headlines = listOf(
-        "Live view shows real video from the glasses over Bluetooth",
-        "Record that video to your phone, with the picture size, frame rate and data rate on screen",
-        "If the glasses close the live view by themselves, the app opens it again",
-        "Commands no longer wait for an answer that already came: photos, snapshots and sign-in are quicker",
-        "Live view listens longer, logs everything the glasses send, and also looks for the glasses on Wi-Fi",
-        "Voice questions: the app records the mic itself and switches to the phone's mic if the glasses' mic is silent",
-        "Answers to voice questions start speaking right away on the glasses",
-        "Tapping the glasses no longer upsets the Bluetooth link",
-        "SupRevolt: scan a glasses photo, a document or text on your own server, with a verdict you can trust",
-        "Every scan shows its confidence out of 256, and says \"unknown\" instead of guessing",
-        "Say \"scan this\": the glasses take a photo and the verdict is read back to you",
-        "Send to SupRevolt from the Gallery; open it from Settings, Glasses or the Assistant",
+        "Voice questions: the speech service now records the mic itself, so the phone's mic is heard again",
+        "If one speech service hears nothing, Google's network recognizer listens once more, and the one that works is remembered",
+        "The glasses' mic through call audio is only used when the link really opens and isn't silent",
+        "New: the glasses' own mic over the data link, decoded on the phone, no call audio needed",
+        "Test voice tries every mic, says \"hello glasses\" with each, and voice questions use the one that works",
+        "The Assistant screen shows which mic is in use",
+        "Live view no longer closes and reopens when the screen refreshes or the live view test finds video",
+        "No automatic photos while live view is opening or on",
+        "Broken live pictures are logged less often and the picture waits for the next key frame",
     )
 
     val details = listOf(
-        "Live video" to listOf(
-            "Your glasses send live video on a channel the app now understands: each picture comes in a few pieces, and the app puts them back together and plays them.",
-            "The screen shows the picture size, frames a second and kilobits a second, averaged over 5 seconds.",
-            "The app tries a few ways of answering the glasses' video pieces and keeps the one that gives the smoothest video. It remembers it for next time.",
-            "If the glasses close the live view while you're watching, it opens again by itself.",
-            "Recording to the phone and taking a photo during live view work as before.",
-            "Shared logs now say which app version made them.",
+        "Voice" to listOf(
+            "In 3.4 the app recorded the mic itself and handed the sound to the speech service. Google's on-phone recognizer heard nothing in it, even from the phone's mic. Now the speech service opens the mic itself.",
+            "If a speech service listens but understands nothing, the next one (usually Google's network recognizer) listens once more. A service only counts as working when it gives words; one that said \"no match\" while another understood is tried last from then on.",
+            "The glasses' call audio counts as ready only when the phone says the link is up (3.4 also went on after 1.5 seconds with no signal, which recorded silence). Two ways of opening it are tried, 2 seconds each, and every step is in the connection log.",
+            "Before a question goes through the glasses' call audio, 0.4 seconds are measured; a silent mic is skipped and the next mic is used.",
+            "The glasses can also send their mic over the data link (5750, Opus). The app turns it on, decodes it, and feeds the speech service 16 kHz sound, ending 1 second after you stop talking. A speech service that won't take it is remembered and another mic is used.",
+            "The order is: the mic Test voice found working, then the others, and the phone's mic last.",
         ),
-        "Glasses link" to listOf(
-            "The glasses answer most commands in a form the app didn't recognise, so it waited 2 to 4 seconds for nothing each time. Every answer is now recognised at once.",
-            "Taking a photo, saving it and Snapshot view no longer pause between steps.",
+        "Test voice" to listOf(
+            "Diagnostics › Test voice records 3 seconds from the phone's mic, the glasses' call audio and the glasses' data-link mic, and shows each level in dBFS.",
+            "With each mic it asks you to say \"hello glasses\" and shows what was heard, or the error, and which speech service listened.",
+            "It ends with one line saying what works, and voice questions start with that mic from then on.",
         ),
         "Live view" to listOf(
-            "The live view test runs again on glasses that said \"no video\" before, now that the glasses' answers are understood.",
-            "It waits for the glasses to say the preview is on, listens 10 seconds, asks for frames in several ways, and logs every byte the glasses send.",
-            "Small pictures sent as the preview are shown too, not only video.",
-            "With your OK (Nearby devices), it looks for the glasses on Wi-Fi and tells you if they show up there.",
-            "Taps on the glasses are ignored while the test runs, so the mic can't close the live view.",
-        ),
-        "Listening" to listOf(
-            "On Android 13 and later the app records the mic itself: the glasses' mic first, and the phone's mic at once if the glasses' mic is silent.",
-            "If the speech service didn't catch anything, it listens once more with the phone's mic by itself.",
-            "The glasses' call audio never starts while they connect, during a photo transfer or the live view test, or in the first 3 seconds of a new link.",
-        ),
-        "Speaking" to listOf(
-            "When the glasses' call audio is already up after a question, the answer plays on it straight away instead of switching to media audio first, then the call audio is let go.",
-            "The connection log shows which mic was used and how long the answer took to start.",
-        ),
-        "SupRevolt" to listOf(
-            "Settings › SupRevolt: your server's https:// address and the access token it printed once. The token stays in the app's private storage, is shown masked and is never written to a settings file.",
-            "Scan a new or the last glasses photo, any document you pick, or text you type. Pick which scans to run, or All.",
-            "Results show the verdict (Clear, Caution, Danger, or Unknown with the reason), and one row per scan with a 0 to 256 confidence bar. Tap a row for details. Skipped scans are behind Show skipped.",
-            "Share report makes a plain summary without the server address or token.",
-            "Plain http:// is only allowed for this phone or your home network, after a warning.",
-        ),
-        "Voice" to listOf(
-            "\"Scan this\", \"run a scan\" or \"SupRevolt scan\" takes a photo with the glasses, scans it and says the verdict.",
+            "A close waits 1.5 seconds: if the screen opens again in that time (a refresh, coming back to the app), the video simply keeps running.",
+            "When the live view test finds video on the Live view screen, it stays open instead of closing and opening again.",
+            "While live view is opening or on, the app only takes a photo you asked for. When the glasses' own button takes one, the log says so, the photo is saved, and live view opens again.",
+            "A broken picture is still skipped; the log notes it three times, then once every 10 seconds with a count, and the picture waits for the next key frame (at most 2 seconds).",
+            "When the mic starts, the live view on the glasses is now really closed.",
         ),
     )
 

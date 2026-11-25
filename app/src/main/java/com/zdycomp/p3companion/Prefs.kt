@@ -155,6 +155,31 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
         get() = sp.getString("recognizer_service", null)
         set(v) = sp.edit().putString("recognizer_service", v).apply()
 
+    /** 3.5: services that gave "no match" while another one understood (tried last), joined with "|". */
+    var recognizerNoMatch: Set<String>
+        get() = VoiceChoice.parseSet(sp.getString("recognizer_no_match", null))
+        set(v) = sp.edit().putString("recognizer_no_match", VoiceChoice.formatSet(v)).apply()
+
+    /** 3.5: services that don't take the app's own audio (EXTRA_AUDIO_SOURCE), joined with "|". */
+    var recognizerNoPipe: Set<String>
+        get() = VoiceChoice.parseSet(sp.getString("recognizer_no_pipe", null))
+        set(v) = sp.edit().putString("recognizer_no_pipe", VoiceChoice.formatSet(v)).apply()
+
+    /** 3.5: how each mic route did ("GLASSES_SPP:1,GLASSES_SCO:-2,PHONE:1"), from Test voice and real questions. */
+    var micRouteScores: Map<MicRoute, Int>
+        get() = VoiceChoice.parseScores(sp.getString("recognizer_routes", null))
+        set(v) = sp.edit().putString("recognizer_routes", VoiceChoice.formatScores(v)).apply()
+
+    /** 3.5: the way of opening the glasses' call audio that gave a live mic ([AudioRoute.COMM] or [AudioRoute.LEGACY]). */
+    var scoMethod: String?
+        get() = sp.getString("recognizer_sco_method", null)
+        set(v) = sp.edit().putString("recognizer_sco_method", v).apply()
+
+    /** 3.5: Test voice's one-line result. */
+    var voiceTestSummary: String?
+        get() = sp.getString("recognizer_test_summary", null)
+        set(v) = sp.edit().putString("recognizer_test_summary", v).apply()
+
     enum class SpeakThrough { FAST, CALL }
 
     /**
@@ -468,7 +493,7 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
         val keep = sp.all.filterKeys { k ->
             k == "user_key" || k.startsWith("ai_key_") || k == "sr_token" || k == "sr_url" || k == "sr_http_ok" || k == "drive_uri" || k == "drive_label" ||
                 k == "ble_addr" || k == "ble_name" || k == "link_method" || k == "preview_action" ||
-                k == "live_path" || k.startsWith("live_probe_") || k.startsWith("live_ack") || k == "recognizer_service" ||
+                k == "live_path" || k.startsWith("live_probe_") || k.startsWith("live_ack") || k.startsWith("recognizer_") ||
                 k.startsWith("asked_") || k == "last_import" || k == "last_seen_version" || k == "user_stopped"
         }
         val e = sp.edit().clear()

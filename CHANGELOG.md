@@ -1,5 +1,63 @@
 # Changelog
 
+## 3.5.0 (versionCode 8)
+
+From the owner's 3.4.0 log (`docs/LOG-2026-11-25-v340.txt`, moto g 2025, Android 15, E13C-5 fw 1.0.0).
+Live video at 30 fps is kept as it was (5720 action 3, 0x1E reassembly, media ack per fragment). Connect, bind,
+reply matching, photos, SupRevolt and the 48 voice commands' matching are unchanged.
+
+**Voice: why it never worked on the moto g (best reading of the log)**
+- Glasses mic at -83 dBFS: digital silence, so the SCO link never carried audio. `AudioRoute` in 3.4 declared the
+  link ready after 1.5 s with no SCO or headset signal at all ("assumed ready … no link signal") and then recorded.
+- Phone mic: `ERROR_NO_MATCH` twice from "Speech Recognition and Synthesis" (Google's on-phone recognizer). The phone
+  mic was the app's own `AudioRecord` piped in through `EXTRA_AUDIO_SOURCE`, started while the phone was still in
+  `MODE_IN_COMMUNICATION` with the glasses as the call device. Either that recording was also routed to the dead SCO
+  input, or this recognizer doesn't accept the pipe; either way it heard nothing. And because the error came after
+  "ready", that service was saved as "the one that works" and tried first again.
+
+**Voice: what 3.5 does**
+- `VoiceRoutes.kt` (pure, tested): `MicRoute` (glasses data link, glasses call audio, phone), `VoiceChoice` (route
+  order and scores, speech service order, what to do on each recognizer error), `Vad`, `OpusFramer`, `OpusCsd`,
+  `Resampler`, `RateLimit`, `LiveDebounce`, `LiveResync`.
+- Phone mic: no pipe. The recognizer opens the mic itself. Service order: the one that last gave words, Google's
+  network recognizer (`com.google.android.googlequicksearchbox`), the other Google ones, the on-phone one, the rest,
+  the default. A `NO_MATCH` with no partial words hands over once to the next service; if that one understands, the
+  first goes on `recognizer_no_match` (tried last). Only words make a service the remembered one.
+- Glasses call audio (SCO): ready only on `ACTION_SCO_AUDIO_STATE_UPDATED = CONNECTED`, the headset's
+  `STATE_AUDIO_CONNECTED`, or the communication device switching to the glasses (+300 ms). `setCommunicationDevice`
+  first, then `startBluetoothSco`, 2 s each; the one that gives a live mic is saved (`recognizer_sco_method`). Every
+  state change is logged ("Voice: SCO: …"). Before a question, 0.4 s are measured on the glasses' input; below
+  -60 dBFS the next mic is used. The recognizer then records the mic itself (routed to the call device).
+- Glasses data-link mic (new): `5750` action 3 `[01]`/`[00]`. Where the Opus bytes travel is still unknown
+  (PROTOCOL-NOTES 4.1), so while the stream is on every non-photo, non-video carrier (0x4A frames and elements of
+  other types, 0x1E non-video elements, 0x2B, unknown heads, long 0x30 pushes, unframed bytes) is searched for
+  `[28][40 bytes]` packets; the first that lines up three in a row is used and logged ("Opus packets found in …").
+  Decoded with MediaCodec `audio/opus` (OpusHead, codec delay, 80 ms pre-roll), resampled to 16 kHz mono and fed to
+  the recognizer through a pipe (`EXTRA_AUDIO_SOURCE` + encoding PCM16, 1 channel, 16000 Hz). The pipe is written
+  continuously (20 ms of silence after 60 ms without sound) and closed by our `Vad` 1 s after speech ends (also after
+  6 s without speech, or 12 s). `ERROR_CLIENT`, `ERROR_AUDIO`, or `NO_MATCH` while our VAD heard speech marks that
+  service `recognizer_no_pipe` and the next mic is used.
+- Route order (`recognizer_routes`): routes that worked first (data link, then call audio), call audio when not known,
+  the phone's mic always last. A failure counts -1; two in a row skip the route until it works again or Test voice.
+  The Assistant screen says which mic the next question uses and which one is listening.
+- Diagnostics › Test voice: per route, 3 s recording with RMS dBFS (and the input Android used), then "Say: hello
+  glasses" with the text heard or the error and the speech service. One summary line, saved and used as the default.
+
+**Live view**
+- The photo at 00:40:02-08 was not sent by the app: every request is logged as `→ node` and there is no `→ 57B0`, and
+  the link thread was inside the open's busy wait (5710 = 02) when 57B1 came. Busy at open plus a shutter 2 s later is
+  the glasses' own button (57B1 follows a trigger by about 2.6 s); the app downloaded it as a button photo, as it
+  must (7320 needs 7300/7500). Now: such a 57B1 is logged as the glasses' own shutter, the photo is saved, and live
+  view opens again afterwards. While live view is opening, on, or about to close, the snapshot view's automatic
+  photos are refused (`XkGlasses.autoPhotoAllowed`); only a photo the person asked for is taken.
+- Open/close churn: `closePreview()` waits 1.5 s; an `openPreview()` meanwhile keeps the stream running, sends
+  nothing, and replays the last SPS and key picture to the new screen. An open within 1.5 s of a real close waits
+  until 1.5 s after it. From the Live view screen the live view test runs with `keepOpen`: video it finds stays open.
+  The mic and the snapshot view close at once (`immediate`); `micWillStart` now really sends the close (3.4 marked
+  the preview off first, so the close was skipped).
+- "Dropped an unfinished picture": logged 3 times per open, then once per 10 s with a count. No command is known to
+  ask the glasses for a key frame, so the decoder waits for the next IDR, at most 2 s (`VideoPipeline.resync`).
+
 ## 3.4.0 (versionCode 7)
 
 From the owner's first live video over Bluetooth (3.3.0, `docs/LOG-2026-11-25-liveview.txt`, E13C-5 fw 1.0.0).
