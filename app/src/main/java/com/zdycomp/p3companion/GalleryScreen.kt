@@ -208,6 +208,7 @@ class GalleryScreen(private val a: MainActivity) : Screen {
         val one = list.singleOrNull()
         val items = buildList {
             if (one != null) add(SheetItem("Open", R.drawable.ic_open_in_new) { open(one) })
+            if (one != null) add(SheetItem("Details", R.drawable.ic_info, "Pixel size and file size") { details(one) })
             if (one != null && one.kind == MediaKind.PHOTO) {
                 add(SheetItem("Ask the Assistant about it", R.drawable.ic_auto_awesome) { selecting = false; selected.clear(); a.askAboutPhoto(one.uri) })
                 add(SheetItem("Send to SupRevolt", R.drawable.ic_shield_scan, "Scan it on your own server") {
@@ -299,6 +300,57 @@ class GalleryScreen(private val a: MainActivity) : Screen {
     }
 
     private fun open(item: Item) = a.openMedia(item.uri, item.mime.ifBlank { "*/*" })
+
+    /**
+     * 3.8: the item's real pixel size (read from the photo's own frame header, not from a thumbnail),
+     * its file size and date, so a Bluetooth photo and a cable photo can be told apart.
+     */
+    private fun details(item: Item) {
+        loader.execute {
+            var info: JpegInfo.Info? = null
+            var pictures: Int? = null
+            var w = 0
+            var h = 0
+            if (item.kind == MediaKind.PHOTO) {
+                runCatching {
+                    a.contentResolver.openInputStream(item.uri)?.use { input ->
+                        val head = ByteArray(HEAD_BYTES)
+                        var len = 0
+                        while (len < head.size) { val n = input.read(head, len, head.size - len); if (n < 0) break; len += n }
+                        info = JpegInfo.parse(head, len)
+                        if (info != null && item.size in 1..len.toLong()) pictures = JpegInfo.soiCount(head, len)
+                        if (info == null) {
+                            val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                            android.graphics.BitmapFactory.decodeByteArray(head, 0, len, o)
+                            w = maxOf(o.outWidth, 0); h = maxOf(o.outHeight, 0)
+                        }
+                    }
+                }
+            } else if (item.kind == MediaKind.VIDEO) {
+                runCatching {
+                    a.contentResolver.query(item.uri, arrayOf(MediaStore.MediaColumns.WIDTH, MediaStore.MediaColumns.HEIGHT), null, null, null)?.use { c ->
+                        if (c.moveToFirst()) { w = c.getInt(0); h = c.getInt(1) }
+                    }
+                }
+            }
+            val i = info
+            val lines = buildList {
+                when {
+                    i != null -> {
+                        add("Pixel size: ${i.size} (" + String.format(java.util.Locale.US, "%.2f MP", i.megapixels) + ")")
+                        add("Picture: " + JpegInfo.details(i, pictures).substringAfter(", "))
+                    }
+                    w > 0 && h > 0 -> add("Pixel size: ${w}x$h")
+                    item.kind != MediaKind.AUDIO -> add("Pixel size: unknown")
+                }
+                add("File size: " + JpegInfo.kb(item.size) + if (item.size >= 1_048_576) String.format(java.util.Locale.US, " (%.1f MB)", item.size / 1_048_576.0) else "")
+                if (item.durationMs > 0) add("Length: " + duration(item.durationMs))
+                add("Date: " + java.text.DateFormat.getDateTimeInstance().format(java.util.Date(item.date)))
+                if (item.name.startsWith("P3_probe")) add("Saved by Find full-size photos (Diagnostics)")
+            }
+            main.post { a.ui.dialog(item.name, lines.joinToString("\n"), R.drawable.ic_info) }
+        }
+    }
 
     private fun share(item: Item) {
         val send = Intent(Intent.ACTION_SEND).apply {
@@ -421,6 +473,11 @@ class GalleryScreen(private val a: MainActivity) : Screen {
         grid = null
         titleView = null
         adapter = null
+    }
+
+    private companion object {
+        /** Enough of a photo's start to reach its frame header past a large EXIF block. */
+        const val HEAD_BYTES = 512 * 1024
     }
 
     private fun duration(ms: Long): String {

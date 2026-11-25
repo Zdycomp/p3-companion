@@ -556,6 +556,11 @@ object Xk {
             return Result.FAILED
         }
 
+        /** 3.8: each part's type byte and whole size as it arrived ("1: 00/12,345 B"), for the full-size probe. */
+        fun partSummary(): String = (1..count).joinToString(", ") { i ->
+            elements[i]?.let { "$i: %02X/%d B".format(MEDIA_PHOTO, it.size + 5) } ?: "$i: missing"
+        }
+
         fun jpeg(): ByteArray {
             val out = ByteArrayOutputStream()
             for (i in 1..count) out.write(elements[i] ?: error("missing part $i of $count"))

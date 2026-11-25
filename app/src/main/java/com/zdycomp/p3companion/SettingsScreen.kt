@@ -202,6 +202,8 @@ class SettingsScreen(private val a: MainActivity) : Screen {
         g.addView(ui.switchRow("Show connection log", "On the Glasses tab, for troubleshooting", p.showLog, R.drawable.ic_history) { p.showLog = it })
         g.addView(ui.listRow("Run diagnostics", "Checks every step and makes a report", R.drawable.ic_build,
             ui.icon(R.drawable.ic_chevron_right, ui.s.onSurfaceVariant)) { a.showDiagnostics() })
+        g.addView(ui.listRow("Wi-Fi", "The phone's Wi-Fi, and finding the glasses on it", R.drawable.ic_wifi,
+            ui.icon(R.drawable.ic_chevron_right, ui.s.onSurfaceVariant)) { a.showWifi() })
         if (p.glassesAddress != null) {
             g.addView(ui.listRow("Forget these glasses", p.glassesName, R.drawable.ic_delete, danger = true) {
                 a.confirm("Forget glasses?", "You'll pick them again from your paired devices.", "Forget") {

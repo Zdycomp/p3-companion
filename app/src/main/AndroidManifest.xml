@@ -9,11 +9,17 @@
     <uses-permission
         android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+    <!-- 3.8: also the Wi-Fi screen, because Android shows Wi-Fi names and the network list only to apps with
+         location. Asked only when that screen opens; the app never reads the location. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-    <!-- Live view test (3.3): looks for the glasses on Wi-Fi (names only, never your location); asked only when the test runs -->
+    <!-- Live view test (3.3) and the Wi-Fi screen (3.8): look for the glasses on Wi-Fi; asked only when used -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- 3.8 Wi-Fi screen: join the glasses' network for this app only (Android confirms), read the phone's network state -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission
         android:name="android.permission.NEARBY_WIFI_DEVICES"
         android:usesPermissionFlags="neverForLocation" />

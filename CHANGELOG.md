@@ -1,5 +1,72 @@
 # Changelog
 
+## 3.8.0 (versionCode 11)
+
+Goal: answer "where are my 20 MP photos?" with measurements, and a Wi-Fi controller. The owner's Bluetooth photos
+are 54-75 KB (the SDK says 640x480); the glasses show up as a drive in the Import tab over the charging cable.
+Plan and safety rules: docs/FULL-RES-PLAN.md (Theoretical Physicist). Live view (30 fps), photos, the voice
+routes, translation, SupRevolt and connect are unchanged.
+
+**Photo size everywhere**
+- `JpegInfo`: pure-Kotlin JPEG frame-header reader. From FFD8 it walks the `FF xx [len BE2]` segments and stops at
+  SOS; SOF0-SOF15 except C4/C8/CC give width, height, components and sampling (4:2:0, 4:2:2, 4:4:4, grey). It
+  counts SOFs, notes EXIF (APP1) and an EXIF thumbnail, counts SOIs in the file, and gives null (size unknown,
+  never blocks saving) for anything unreadable.
+- Every Bluetooth photo logs `Photo WxH, N KB (0.31 MP, 4:2:0, baseline, 1 SOF, no EXIF, 1 picture) in 6 parts,
+  … ms, … KB/s, … retries`; the last 30 sizes are kept (`Prefs.bluetoothPhotoSizes`).
+- Import: each photo's first 512 KB is kept during the plain stream copy (no decode, no recompression, EXIF kept)
+  to read its pixel size (JPEG header, else Android's header-only decode for PNG/WebP), and the gallery copy is
+  read back and compared by CRC-32 ("byte-for-byte copy"; a mismatch is reported, not failed, since Android may
+  hide location data from apps). The result lists every file (`ImportedFile.line()`: name, WxH, KB) and one line
+  `Cable photos: 1280x960 avg 400 KB; Bluetooth photos: 640x480 avg 70 KB` (`PhotoStats`), plus the pixel ratio
+  when both sides have a clear size. The last 30 cable sizes are kept (`Prefs.cablePhotoSizes`).
+- Gallery: press and hold › More › Details shows the real pixel size (from the photo's own header), MP,
+  sampling, EXIF, file size and date (video: MediaStore width and height).
+
+**Find full-size photos** (Diagnostics, opt-in, about 90 s; `XkGlasses.runFullResProbe`, `FullRes`)
+- Exactly the plan's probe list: 5713/5712 before and after one normal 57B0 photo (raw 7320 bytes, each part's
+  type and size, SOF size logged); one 7300 action 2 `[N+1]` during that transfer, before its 7500; action-1
+  reads of 7200, 7310, 7600 with no data and with `[00]`; action-2 index tries only for 7200/7310 (`[00]`,
+  `[01]`, `[00 01]`, `[photo_num]`) when no read said INVALID_URN, and `[00]` for 7600 only when it answered
+  with something else; the Wi-Fi look (`WifiFinder`) during steps 4-5; a final 7500 and 5713.
+- Hard allow-list in code (`FullRes.allowed`), checked before every probe request: never 7400, 102A, 102C, 5610,
+  5620, 9000, 9001, 1017, 102E; reads only on the plan's nodes; action 3 only 57B0 and 7500.
+- Per request: 3 s for the reply, 3 s more listening; logs type (binary/JSON/no data/status), status name,
+  bytes, the first 64 bytes or the JSON, unsolicited pushes, and the 0x4A frames (count, bytes, largest). A 7320
+  is downloaded into `P3_probe-<node>_…jpg`; stray 0x4A is collected (20 s / 2 MB at most) and any JPEG in it
+  saved and measured; 7500 always follows media; then 1.5 s of quiet. Each request is persisted before it is
+  sent; one that dropped the link is skipped in later runs.
+- Ends with one line, e.g. "Bluetooth photos are 640x480; no larger copy found. The photo count didn't rise: the
+  glasses keep no photos." Live view reopens afterwards if a screen wanted it.
+
+**Wi-Fi screen** (Glasses tab and Settings; `WifiScreen`, `WifiControl`, `WifiMath`)
+- The phone's Wi-Fi: on/off, network name, signal (dBm and words), link speed, frequency with band and channel,
+  address, gateway, internet. Refreshes every 3 s. Wi-Fi panel shortcut (`Settings.Panel.ACTION_WIFI`). The app
+  never turns Wi-Fi on or off or changes saved networks.
+- Permissions asked only when the screen opens, none required: Nearby Wi-Fi devices (13+, never for location)
+  and location (Android shows Wi-Fi names and scan results only to apps with it). The manifest drops the
+  `maxSdkVersion=30` on ACCESS_FINE_LOCATION and adds ACCESS_COARSE_LOCATION, ACCESS_NETWORK_STATE and
+  CHANGE_NETWORK_STATE.
+- Find the glasses on Wi-Fi: a scan plus `WifiP2pManager.discoverPeers`, about 8 s; networks and Wi-Fi Direct
+  devices listed with matches first and highlighted (`WifiMatch`: the glasses' name, model, last 4 address
+  digits, P3, E13C, D6BE, XK, Shenju, NovaSight; words of 3 letters or fewer must stand as words, so "AP3000"
+  and "XKCD" don't match).
+- Connect: an access point through `WifiNetworkSpecifier` (`requestNetwork`, local-only, no internet asked;
+  Android confirms), with a password the person types in the app's field for WPA2/WPA3 (used once, never saved
+  or logged; the Wi-Fi panel is offered instead, and is the only way for WEP/enterprise); a Wi-Fi Direct peer
+  through `WifiP2pManager.connect` (PBC). Disconnect releases the request or removes the group; leaving the
+  screen disconnects too.
+- Look for services: the glasses' side (gateway, else DHCP server, else .1), TCP ports 80, 8080, 554, 8554, 7070,
+  5000 with 1 s timeouts; `GET /` on web ports and `OPTIONS` on RTSP ports, the first 200 characters logged. The
+  app's process is bound to that network only while this runs. No credentials are ever sent.
+
+**Tests**: 37 new JVM tests (276 in all): `JpegInfoTest` (real JDK-encoded baseline 16x8, progressive 640x480,
+grey, EXIF with a thumbnail and APP2/APP13/COM before the frame header, fill bytes, hand-built SOFs and sampling,
+cut-off and non-JPEG input), `PhotoStatsTest` (the summary line and its rounding, mixed sizes, settings round
+trip, import file lines), `FullResTest` (the deny/allow list, the plan's index tries, reply and summary text,
+JSON counts, dropped-request bookkeeping), `WifiMathTest` (glasses-name matching, signal/band/channel/security,
+password length, gateway choice, port-probe requests, lines and summaries).
+
 ## 3.7.0 (versionCode 10)
 
 Goal: the glasses' own mic as a usable voice input. Owner's 3.6.0 log (moto g 2025, E13C-5): the phone mic worked;

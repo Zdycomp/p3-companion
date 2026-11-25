@@ -81,6 +81,7 @@ class MainActivity : Activity() {
         screens = listOf(
             ImportScreen(this), GalleryScreen(this), GlassesScreen(this), AssistantScreen(this), SettingsScreen(this),
             DiagnosticsScreen(this), LiveViewScreen(this), AboutScreen(this), SupRevoltScreen(this), ConversationScreen(this),
+            WifiScreen(this),
         )
 
         overlay = FrameLayout(this).apply { setBackgroundColor(ui.s.surface) }
@@ -439,6 +440,9 @@ class MainActivity : Activity() {
     fun showAbout() = show(SCREEN_ABOUT)
     fun showSupRevolt() = show(SCREEN_SUPREVOLT)
     fun showConversation() = show(SCREEN_CONVERSATION)
+
+    /** 3.8: the Wi-Fi screen. Its permissions are asked here, when the person opens it, and none is required. */
+    fun showWifi() = withWifi { show(SCREEN_WIFI) }
 
     /** 3.6: Live view's full screen: no status, navigation or app bars, landscape. */
     var liveFullscreen = false
@@ -998,6 +1002,39 @@ class MainActivity : Activity() {
             denied = "",
         ) { action(Build.VERSION.SDK_INT >= 33 && granted(Manifest.permission.NEARBY_WIFI_DEVICES)) }
 
+    /**
+     * 3.8 Wi-Fi screen: Nearby Wi-Fi devices (Android 13+, never for location) for Wi-Fi Direct, and
+     * location, which Android requires to show network names and the scan list on every version (the
+     * app never reads the location). Asked when the screen opens; none is required.
+     */
+    fun withWifi(action: () -> Unit) =
+        withPermissions(
+            emptyList(),
+            optional = buildList {
+                if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.NEARBY_WIFI_DEVICES)
+                add(Manifest.permission.ACCESS_FINE_LOCATION)
+                add(Manifest.permission.ACCESS_COARSE_LOCATION)
+            },
+            denied = "",
+            action = action,
+        )
+
+    /** Asks again for the Wi-Fi screen's permissions (its Allow button), then runs [action]. */
+    fun askWifiAgain(action: () -> Unit) {
+        askedOptional.removeAll(listOf(Manifest.permission.NEARBY_WIFI_DEVICES, Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION).toSet())
+        val need = listOf(Manifest.permission.ACCESS_FINE_LOCATION) + if (Build.VERSION.SDK_INT >= 33) listOf(Manifest.permission.NEARBY_WIFI_DEVICES) else emptyList()
+        if (need.any { prefs.wasAsked(it) && !granted(it) && !shouldShowRequestPermissionRationale(it) }) {
+            confirm("Permission needed", "Android won't ask again, so open the app's settings › Permissions and allow Location " +
+                "(and Nearby devices). The app uses it only to read Wi-Fi names.", "Open settings") {
+                runCatching { startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))) }
+            }
+            return
+        }
+        need.forEach { prefs.markAsked(it) }
+        withWifi(action)
+    }
+
     /** Notifications for photo and battery alerts (Android 13+); asked once, never required. */
     fun withNotifications(action: () -> Unit) =
         withPermissions(
@@ -1116,6 +1153,7 @@ class MainActivity : Activity() {
         const val SCREEN_ABOUT = 7
         const val SCREEN_SUPREVOLT = 8
         const val SCREEN_CONVERSATION = 9
+        const val SCREEN_WIFI = 10
 
         const val ACTION_PHOTO = "com.zdycomp.p3companion.action.PHOTO"
         const val ACTION_LIVE = "com.zdycomp.p3companion.action.LIVE"

@@ -3,6 +3,7 @@ package com.zdycomp.p3companion
 import android.content.ContentResolver
 import android.content.ContentValues
 import android.content.Context
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Environment
 import android.os.Handler
@@ -15,6 +16,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.zip.CRC32
 
 enum class MediaKind { PHOTO, VIDEO, AUDIO }
 
@@ -45,6 +47,35 @@ data class ImportProgress(
         get() = if (bytesTotal <= 0) 0 else ((bytesDone * 100) / bytesTotal).toInt().coerceIn(0, 100)
 }
 
+/**
+ * 3.8: one file copied over the cable: its pixel size from the frame header (0 x 0 when unknown or not a
+ * photo), its bytes, and whether reading the gallery copy back gave the very same bytes.
+ */
+data class ImportedFile(
+    val name: String,
+    val kind: MediaKind,
+    val bytes: Long,
+    val width: Int = 0,
+    val height: Int = 0,
+    /** true: same bytes read back; false: they differ; null: not checked (videos and recordings). */
+    val sameBytes: Boolean? = null,
+) {
+    /** "IMG_0001.JPG: 1280x960, 400 KB, byte-for-byte copy". */
+    fun line(): String {
+        val parts = mutableListOf<String>()
+        if (kind == MediaKind.PHOTO) parts += if (width > 0 && height > 0) "${width}x$height" else "size unknown"
+        parts += if (bytes >= 10L * 1024 * 1024) String.format(Locale.US, "%.1f MB", bytes / 1_048_576.0) else JpegInfo.kb(bytes)
+        when (sameBytes) {
+            true -> parts += "byte-for-byte copy"
+            false -> parts += "the gallery copy reads back different (the phone may hide location data from apps)"
+            null -> {}
+        }
+        return "$name: " + parts.joinToString(", ")
+    }
+
+    val size: PhotoStats.Size get() = PhotoStats.Size(width, height, bytes)
+}
+
 data class ImportResult(
     val photos: Int,
     val videos: Int,
@@ -53,8 +84,13 @@ data class ImportResult(
     val failed: List<String>,
     val deleted: Int,
     val cancelled: Boolean,
+    /** 3.8: every file copied, in order, with its sizes. */
+    val files: List<ImportedFile> = emptyList(),
 ) {
     val imported: Int get() = photos + videos + audio
+
+    /** 3.8: the photos of this import, for the cable side of the size comparison. */
+    fun photoSizes(): List<PhotoStats.Size> = files.filter { it.kind == MediaKind.PHOTO }.map { it.size }
 
     fun summary(): String {
         if (cancelled && imported == 0) return "Import stopped before anything was copied."
@@ -138,6 +174,8 @@ class MediaImporter(context: Context, private val prefs: Prefs) {
             try {
                 val result = runImport(tree, report)
                 prefs.lastImportSummary = stamp() + " · " + result.summary()
+                val sizes = result.photoSizes()
+                if (sizes.isNotEmpty()) prefs.cablePhotoSizes = PhotoStats.append(prefs.cablePhotoSizes, sizes)
                 main.post { lastResult = result; progress = null; running = false; onFinished() }
             } catch (e: SecurityException) {
                 main.post {
@@ -176,18 +214,19 @@ class MediaImporter(context: Context, private val prefs: Prefs) {
         var audio = 0
         var deleted = 0
         val failed = mutableListOf<String>()
+        val files = mutableListOf<ImportedFile>()
         var bytesDone = 0L
         var lastPost = 0L
 
         fresh.forEachIndexed { index, file ->
             if (cancelFlag.get()) {
-                return ImportResult(photos, videos, audio, skipped, failed, deleted, cancelled = true)
+                return ImportResult(photos, videos, audio, skipped, failed, deleted, cancelled = true, files = files.toList())
             }
             main.post {
                 onProgress(ImportProgress(ImportProgress.Stage.COPYING, index, fresh.size, file.name, bytesDone, bytesTotal))
             }
             val base = bytesDone
-            val ok = copyToGallery(file) { copied ->
+            val copied = copyToGallery(file) { copied ->
                 val now = System.currentTimeMillis()
                 if (now - lastPost > 150) {
                     lastPost = now
@@ -198,7 +237,8 @@ class MediaImporter(context: Context, private val prefs: Prefs) {
                 }
             }
             bytesDone = base + maxOf(file.size, 0L)
-            if (ok) {
+            if (copied != null) {
+                files += copied
                 appendLedger(file.key)
                 when (file.kind) {
                     MediaKind.PHOTO -> photos++
@@ -217,7 +257,7 @@ class MediaImporter(context: Context, private val prefs: Prefs) {
                 failed += file.name
             }
         }
-        return ImportResult(photos, videos, audio, skipped, failed, deleted, cancelled = false)
+        return ImportResult(photos, videos, audio, skipped, failed, deleted, cancelled = false, files = files.toList())
     }
 
     private fun walk(tree: Uri, parentId: String, out: MutableList<DriveFile>, depth: Int) {
@@ -255,7 +295,13 @@ class MediaImporter(context: Context, private val prefs: Prefs) {
         folders.forEach { walk(tree, it, out, depth + 1) }
     }
 
-    private fun copyToGallery(file: DriveFile, onBytes: (Long) -> Unit): Boolean {
+    /**
+     * Copies the file's bytes unchanged into the gallery (a plain stream copy: no decoding, no
+     * recompression, EXIF kept). 3.8: for photos the first [HEAD_BYTES] are kept to read the pixel
+     * size, and the gallery copy is read back and compared (CRC-32) with what came off the drive.
+     * Returns the copied file, or null when it failed.
+     */
+    private fun copyToGallery(file: DriveFile, onBytes: (Long) -> Unit): ImportedFile? {
         val album = prefs.albumName
         val (collection, dir) = when (file.kind) {
             MediaKind.PHOTO -> MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) to Environment.DIRECTORY_PICTURES
@@ -276,10 +322,14 @@ class MediaImporter(context: Context, private val prefs: Prefs) {
             resolver.insert(collection, values)
         } catch (e: Exception) {
             null
-        } ?: return false
+        } ?: return null
 
+        val photo = file.kind == MediaKind.PHOTO
         return try {
             var copied = 0L
+            val head = if (photo) ByteArray(HEAD_BYTES) else null
+            var headLen = 0
+            val crc = CRC32()
             resolver.openInputStream(file.docUri).use { input ->
                 resolver.openOutputStream(target, "w").use { output ->
                     if (input == null || output == null) error("stream unavailable")
@@ -289,6 +339,14 @@ class MediaImporter(context: Context, private val prefs: Prefs) {
                         val n = input.read(buf)
                         if (n < 0) break
                         output.write(buf, 0, n)
+                        if (head != null) {
+                            crc.update(buf, 0, n)
+                            if (headLen < head.size) {
+                                val k = minOf(n, head.size - headLen)
+                                System.arraycopy(buf, 0, head, headLen, k)
+                                headLen += k
+                            }
+                        }
                         copied += n
                         onBytes(copied)
                     }
@@ -297,11 +355,38 @@ class MediaImporter(context: Context, private val prefs: Prefs) {
             }
             if (file.size > 0 && copied != file.size) error("short copy")
             resolver.update(target, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
-            true
+            if (head == null) return ImportedFile(file.name, file.kind, copied)
+            val (w, h) = pixelSize(head, headLen)
+            val same = runCatching { readBackCrc(target) == crc.value }.getOrNull()
+            ImportedFile(file.name, file.kind, copied, w, h, same)
         } catch (e: Exception) {
             runCatching { resolver.delete(target, null, null) }
-            false
+            null
         }
+    }
+
+    /** Width and height from the JPEG frame header, or Android's header reader for PNG/WebP/HEIC; 0 x 0 when unknown. */
+    private fun pixelSize(head: ByteArray, len: Int): Pair<Int, Int> {
+        JpegInfo.parse(head, len)?.let { return it.width to it.height }
+        return runCatching {
+            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(head, 0, len, o)
+            if (o.outWidth > 0 && o.outHeight > 0) o.outWidth to o.outHeight else 0 to 0
+        }.getOrDefault(0 to 0)
+    }
+
+    private fun readBackCrc(uri: Uri): Long {
+        val crc = CRC32()
+        resolver.openInputStream(uri).use { input ->
+            if (input == null) error("can't read back")
+            val buf = ByteArray(256 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                crc.update(buf, 0, n)
+            }
+        }
+        return crc.value
     }
 
     private fun targetName(file: DriveFile): String {
@@ -343,6 +428,8 @@ class MediaImporter(context: Context, private val prefs: Prefs) {
     private fun stamp(): String = SimpleDateFormat("MMM d, h:mm a", Locale.getDefault()).format(Date())
 
     companion object {
+        /** Enough of a photo's start to reach its frame header past a large EXIF block. */
+        private const val HEAD_BYTES = 512 * 1024
         private val PHOTO_EXT = setOf("jpg", "jpeg", "png", "heic", "heif", "webp", "dng")
         private val VIDEO_EXT = setOf("mp4", "mov", "m4v", "3gp", "avi", "mkv", "ts")
         private val AUDIO_EXT = setOf("mp3", "m4a", "aac", "wav", "amr", "opus", "ogg", "flac")

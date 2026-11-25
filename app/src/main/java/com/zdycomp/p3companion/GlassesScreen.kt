@@ -125,6 +125,7 @@ class GlassesScreen(private val a: MainActivity) : Screen {
         col.addView(tipsCard())
         if (a.prefs.showLog) col.addView(logCard())
         col.addView(ui.button("Scan with SupRevolt", Btn.TONAL, R.drawable.ic_shield_scan) { a.showSupRevolt() })
+        col.addView(ui.button("Wi-Fi", Btn.TONAL, R.drawable.ic_wifi) { a.showWifi() })
         col.addView(ui.button("Diagnostics and connection log", Btn.TONAL, R.drawable.ic_build) { a.showDiagnostics() })
 
         val actions = buildList {

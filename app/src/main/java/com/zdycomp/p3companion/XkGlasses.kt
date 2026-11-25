@@ -93,6 +93,8 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     // Live view probe (3.1): what the glasses said about preview, and every media frame seen.
     /** The preview_* fields of the 1001 device info, as the glasses sent them. */
     @Volatile var previewInfo: Map<String, String> = emptyMap(); private set
+    /** 3.8: the 7110 reply's first 16 bytes from sign-in (it only answers there), for the full-size probe. */
+    @Volatile var flags7110: String? = null; private set
     /** Last video-preview state the glasses reported on node 57A0 (0 off, 1 on), if any. */
     @Volatile var previewState57A0: Int? = null; private set
     @Volatile var mediaFramesSeen = 0L; private set
@@ -665,7 +667,10 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         }
 
         // The vendor's setup order; 7110 only answers here. Its bytes are logged for the record.
-        request("7110", Xk.ACTION_READ, ByteArray(0), 1_200)?.let { addLog("7110 flags: ${hex(it.data.take(16).toByteArray())}") }
+        request("7110", Xk.ACTION_READ, ByteArray(0), 1_200)?.let {
+            flags7110 = hex(it.data.take(16).toByteArray())
+            addLog("7110 flags: $flags7110")
+        }
         val info = request("1001", Xk.ACTION_READ, ByteArray(0), 2_000)
         info?.let { applyInfo(it) }
         val batt = request("1003", Xk.ACTION_READ, ByteArray(0), 2_500)
@@ -932,6 +937,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                 Xk.HEAD_MEDIA -> {
                     if (f.isAck) return
                     mediaFramesSeen++
+                    fullResMeter?.frame(f.payload.size)
                     if (f.fragment == 5) mediaFrag5++
                     lastMediaAt = SystemClock.elapsedRealtime()
                     burstOpen = f.fragment == 1 || f.fragment == 2
@@ -1004,7 +1010,10 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                 if (!alsoPush(f, node)) return
             }
             Xk.ReplyMatch.LATE -> { addLog("Ignored a late $node reply"); return }
-            Xk.ReplyMatch.NONE -> afterReply(f, node)
+            Xk.ReplyMatch.NONE -> {
+                afterReply(f, node)
+                if (fullResProbing) fullResUnsolicited += "unsolicited ← $node: " + FullRes.replyText(f.replyType, f.errCode, f.data, f.json())
+            }
         }
         when (node) {
             "7320" -> {
@@ -1074,6 +1083,8 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     private val previewWanted get() = preview != Preview.OFF || probing
 
     private fun onMediaElement(type: Int, e: ByteArray) {
+        // 3.8: during "Find full-size photos", anything that isn't the photo being downloaded is counted and kept.
+        if (assembler == null) fullResMeter?.let { it.element(type, e); return }
         when (type) {
             Xk.MEDIA_PHOTO -> {
                 val asm = assembler
@@ -1374,7 +1385,17 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         runCatching { request("7500", Xk.ACTION_EXECUTE, ByteArray(0), 2_000) }
     }
 
-    private fun download(count: Int): Uri {
+    /** 3.8: the last photo that came over Bluetooth: its frame header (null when unreadable), bytes and parts. */
+    data class BtPhoto(val info: JpegInfo.Info?, val bytes: Int, val pictures: Int, val parts: String, val uri: Uri)
+    @Volatile var lastBtPhoto: BtPhoto? = null
+        private set
+
+    /**
+     * Fetches the [count] parts with 7300 and saves the JPEG unchanged. 3.8: the pixel size is read from
+     * its frame header and logged with every photo ("Photo 640x480, 71 KB …"), and kept for the Import
+     * tab's comparison. [beforeRelease] (the full-size probe only) runs after the last part, before 7500.
+     */
+    private fun download(count: Int, namePrefix: String = "P3_IMG_", record: Boolean = true, beforeRelease: (() -> Unit)? = null): Uri {
         val asm = Xk.PhotoAssembler(count)
         assembler = asm
         runCatching { xferLock?.acquire(120_000) }
@@ -1424,10 +1445,20 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
             val img = asm.jpeg()
             ok = true
             val ms = SystemClock.elapsedRealtime() - t0
-            addLog("Photo ${img.size / 1024} KB in $count parts, $ms ms, ${if (ms > 0) img.size / ms else 0} KB/s, $retries retries")
-            return saveJpeg(img)
+            val info = runCatching { JpegInfo.parse(img) }.getOrNull()
+            val pictures = JpegInfo.soiCount(img)
+            addLog(JpegInfo.headline(info, img.size.toLong()) + " (" + JpegInfo.details(info, pictures) + ") in $count parts, $ms ms, " +
+                "${if (ms > 0) img.size / ms else 0} KB/s, $retries retries")
+            val uri = saveJpeg(img, namePrefix)
+            lastBtPhoto = BtPhoto(info, img.size, pictures, asm.partSummary(), uri)
+            if (record) runCatching {
+                prefs.bluetoothPhotoSizes = PhotoStats.append(prefs.bluetoothPhotoSizes,
+                    listOf(PhotoStats.Size(info?.width ?: 0, info?.height ?: 0, img.size.toLong())))
+            }
+            return uri
         } finally {
             assembler = null
+            if (ok && beforeRelease != null && link != null) runCatching { beforeRelease() }
             if (link != null) runCatching { request("7500", Xk.ACTION_EXECUTE, ByteArray(0), 2_000) }
             if (!ok) addLog("Transfer ended early (sent 7500)")
             runCatching { xferLock?.release() }
@@ -1441,8 +1472,8 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         burstOpen = false
     }
 
-    private fun saveJpeg(bytes: ByteArray): Uri {
-        val name = "P3_IMG_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".jpg"
+    private fun saveJpeg(bytes: ByteArray, prefix: String = "P3_IMG_"): Uri {
+        val name = prefix + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".jpg"
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
@@ -1801,6 +1832,275 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                 prefs.liveQualityAt = System.currentTimeMillis()
             }
             val out = QualityProbe(standard, results.toList(), best, summary, complete)
+            main.post { done(out) }
+        }
+    }
+
+    // ---------------- 3.8 "Find full-size photos" ----------------
+
+    /** Media that arrived while one probe request was open: frames, bytes, elements, and any photo slices. */
+    private class ProbeMeter {
+        var frames = 0; private set
+        var bytes = 0L; private set
+        var largest = 0; private set
+        var elements = 0; private set
+        private val jpeg = java.io.ByteArrayOutputStream()
+
+        @Synchronized fun frame(n: Int) { frames++; bytes += n; if (n > largest) largest = n }
+
+        /** A whole element: a photo-type one is `[00][length LE4][JPEG slice]`; its slice is kept (at most 2 MB). */
+        @Synchronized fun element(type: Int, e: ByteArray) {
+            elements++
+            if (type == Xk.MEDIA_PHOTO && e.size > 5 && jpeg.size() < PROBE_MAX_BYTES) jpeg.write(e, 5, e.size - 5)
+        }
+
+        @Synchronized fun jpegBytes(): ByteArray = jpeg.toByteArray()
+
+        @Synchronized fun total(): Long = bytes
+    }
+
+    @Volatile private var fullResMeter: ProbeMeter? = null
+    @Volatile private var fullResProbing = false
+    private val fullResUnsolicited = java.util.concurrent.ConcurrentLinkedQueue<String>()
+
+    /** What [runFullResProbe] found: the summary line, every line it logged, and whether it ran to the end. */
+    data class FullResProbe(val summary: String, val log: List<String>, val complete: Boolean)
+
+    /** One probe request's outcome. [photo]/[photoBytes] describe a JPEG it brought, if any. */
+    private class ProbeReply(val key: String, val sent: Boolean, val reply: Xk.Frame?, val media: FullRes.Media,
+                             val photo: JpegInfo.Info?, val photoBytes: Long) {
+        val answered get() = reply != null
+        val errCode get() = reply?.errCode
+        fun line() = FullRes.nodeLine(key, reply?.replyType, reply?.errCode, reply?.json(), reply?.data?.size ?: 0, photo, photoBytes)
+    }
+
+    /**
+     * 3.8 "Find full-size photos" (docs/FULL-RES-PLAN.md section 2), only when the person taps it in
+     * Diagnostics. Takes one photo the normal way, asks once for a part past its last one (7300 action 2
+     * [N+1]) before its 7500, reads 5713/5712 before and after, reads 7200/7310/7600 with no data and
+     * with [00], then tries the indexes the plan allows, while looking for the glasses on Wi-Fi. Every
+     * request passes [FullRes.allowed] first: 7400 (delete), the OTA nodes and 9000/9001 are never sent.
+     * After any media burst 7500 goes out. [onLine] and [done] run on the main thread.
+     */
+    fun runFullResProbe(onLine: ((String) -> Unit)?, wifi: Boolean, done: (FullResProbe) -> Unit) {
+        if (state != State.READY || recording || capturing || micStreaming || assembler != null || pendingAnnounce != null ||
+            probing || !busyFlag.compareAndSet(false, true)) {
+            val why = when {
+                state == State.IDLE || state == State.CONNECTING -> "Connect the glasses first."
+                recording -> "The glasses are recording video. Stop that first."
+                micStreaming -> "The glasses' mic is in use. Stop the voice question first."
+                else -> "The glasses are busy (a photo is still coming). Try again in a moment."
+            }
+            main.post { done(FullResProbe(why, emptyList(), complete = false)) }
+            return
+        }
+        probing = true
+        fullResProbing = true
+        val wantLive = keepPreview
+        setBusy("Looking for full-size photos…")
+        io.execute {
+            val lines = mutableListOf<String>()
+            fun say(s: String) {
+                synchronized(lines) { lines += s }
+                addLog("Full size: $s")
+                onLine?.let { cb -> main.post { cb(s) } }
+            }
+            var complete = false
+            var baseline: BtPhoto? = null
+            val found = mutableListOf<FullRes.Found>()
+            val nodeLines = mutableListOf<String>()
+            var rose: Boolean? = null
+            var q7320: LinkedBlockingQueue<Xk.Frame>? = null
+
+            // A request that was in flight when the link dropped last time is skipped from now on.
+            val before = prefs.fullResDropped
+            val dropped = FullRes.droppedAfterStart(before, prefs.fullResCurrent)
+            if (dropped != before) { prefs.fullResDropped = dropped; prefs.fullResCurrent = null }
+
+            fun drainUnsolicited() { while (true) { val u = fullResUnsolicited.poll() ?: break; say("  $u") } }
+
+            /** Sends one request under the plan's rules: 3 s for the answer, 3 s more listening, then restore. */
+            fun ask(node: String, action: Int, data: ByteArray = ByteArray(0), restore: Boolean = true): ProbeReply {
+                val key = FullRes.key(node, action, data)
+                val none = FullRes.Media(0, 0, 0, 0, null, 0)
+                if (!FullRes.allowed(node, action, data)) {
+                    say("$key: not sent (outside the probe's safety list)")
+                    return ProbeReply(key, false, null, none, null, 0)
+                }
+                if (key in dropped) {
+                    say("$key: skipped (it dropped the link in an earlier run)")
+                    return ProbeReply(key, false, null, none, null, 0)
+                }
+                if (link == null) throw LinkException("Lost the connection to the glasses.")
+                val meter = ProbeMeter()
+                prefs.fullResCurrent = key
+                fullResMeter = meter
+                var photo: JpegInfo.Info? = null
+                var photoBytes = 0L
+                val r: Xk.Frame?
+                var announce: Xk.Frame? = null
+                try {
+                    r = request(node, action, data, PROBE_REPLY_MS)
+                    val listenEnd = SystemClock.elapsedRealtime() + PROBE_LISTEN_MORE_MS
+                    while (SystemClock.elapsedRealtime() < listenEnd && link != null) {
+                        q7320?.poll()?.let { if (it !== linkDown) announce = it }
+                        Thread.sleep(50)
+                    }
+                    // Stray media with no 7320: collect for at most 20 s or 2 MB while it keeps coming.
+                    if (announce == null && meter.frames > 0) {
+                        val cap = SystemClock.elapsedRealtime() + PROBE_STRAY_MS
+                        while (link != null && SystemClock.elapsedRealtime() < cap && meter.total() < PROBE_MAX_BYTES &&
+                            SystemClock.elapsedRealtime() - lastMediaAt < 1_500) {
+                            q7320?.poll()?.let { if (it !== linkDown) announce = it }
+                            Thread.sleep(50)
+                        }
+                    }
+                } finally {
+                    fullResMeter = null
+                    prefs.fullResCurrent = null
+                }
+                val stray = meter.jpegBytes()
+                val strayInfo = if (stray.size > 4) JpegInfo.parse(stray) else null
+                val media = FullRes.Media(meter.frames, meter.bytes, meter.largest, meter.elements, strayInfo, stray.size)
+                say("$key → " + FullRes.replyText(r?.replyType, r?.errCode, r?.data ?: ByteArray(0), r?.json()) + "; " + media.text())
+                drainUnsolicited()
+                if (restore) {
+                    val a = announce
+                    if (a != null) {
+                        say("  7320 after $key: " + hex(a.data.take(16).toByteArray()))
+                        val count = Xk.elementCount(a)
+                        if (count == null) release("unreadable 7320 during the full-size probe")
+                        else runCatching { download(count, "P3_probe-${node}_", record = false) }
+                            .onSuccess {
+                                lastBtPhoto?.let { p ->
+                                    photo = p.info; photoBytes = p.bytes.toLong()
+                                    say("  saved it: " + JpegInfo.headline(p.info, photoBytes) + " (" + JpegInfo.details(p.info, p.pictures) + ")")
+                                }
+                            }
+                            .onFailure { say("  couldn't fetch it: ${it.message}") }
+                    } else if (meter.frames > 0) {
+                        release("media arrived during the full-size probe")
+                        if (stray.size > 4 && stray[0] == 0xFF.toByte() && stray[1] == 0xD8.toByte()) {
+                            photo = strayInfo; photoBytes = stray.size.toLong()
+                            runCatching { saveJpeg(stray, "P3_probe-${node}_") }
+                            say("  a JPEG came with it: " + JpegInfo.headline(strayInfo, photoBytes) + " (saved as P3_probe-$node)")
+                        }
+                    }
+                    // 1.5 s of quiet before the next request.
+                    val quietCap = SystemClock.elapsedRealtime() + 6_000
+                    while (link != null && SystemClock.elapsedRealtime() - lastMediaAt < 1_500 && SystemClock.elapsedRealtime() < quietCap) Thread.sleep(50)
+                }
+                if (photoBytes > 0) found += FullRes.Found(key, photo, photoBytes)
+                return ProbeReply(key, true, r, media, photo, photoBytes)
+            }
+
+            var finder: WifiFinder? = null
+            try {
+                say("Takes one photo and asks the glasses about stored photos. Deletes nothing.")
+                if (dropped.isNotEmpty()) say("Skipped because they dropped the link before: ${dropped.joinToString(", ")}")
+                if (preview != Preview.OFF) {
+                    closePreviewNow()
+                    Thread.sleep(LIVE_DEBOUNCE_MS)
+                }
+                // 1. Baseline
+                say("1. Baseline. Glasses ${model ?: "?"}, firmware ${firmware ?: "?"}")
+                say("7110 flags (at sign-in): ${flags7110 ?: "not answered"}")
+                say("1001 preview fields: " + (previewInfo.takeIf { it.isNotEmpty() }?.entries?.joinToString(", ") { "${it.key}=${it.value}" } ?: "none"))
+                val count1 = ask("5713", Xk.ACTION_READ)
+                val mem1 = ask("5712", Xk.ACTION_READ)
+                val photos1 = FullRes.jsonNumber(count1.reply?.json(), "photo_num")
+                val remain1 = FullRes.jsonNumber(mem1.reply?.json(), "remain_memory")
+
+                // 2. Baseline photo, the normal way, with one 7300 [N+1] before its 7500.
+                say("2. Baseline photo (57B0)")
+                if (!FullRes.allowed("57B0", Xk.ACTION_EXECUTE)) throw IllegalStateException("57B0 refused by the safety list")
+                capturing = true
+                quietCapture = true
+                val q = expectPush("7320")
+                q7320 = q
+                val r = request("57B0", Xk.ACTION_EXECUTE, ByteArray(0), 4_000)
+                r?.errCode?.takeIf { it != 0 }?.let { throw LinkException("the camera said ${Xk.errorText(it)}") }
+                val ann = awaitPush("7320", q, 12_000) ?: throw LinkException("the glasses didn't report a new photo.")
+                say("7320 raw: " + hex(ann.payload.take(32).toByteArray()) + " (data " + hex(ann.data) + ")")
+                val count = Xk.elementCount(ann) ?: run { release("bad part count"); throw LinkException("unreadable 7320") }
+                download(count, beforeRelease = {
+                    val extra = FullRes.extraPartIndex(count)
+                    if (extra != null) {
+                        val x = ask("7300", Xk.ACTION_WRITE, extra, restore = false)
+                        nodeLines += x.line() + if (x.media.any) " (" + x.media.text() + ")" else ""
+                    }
+                })
+                baseline = lastBtPhoto
+                capturing = false
+                baseline?.let { b ->
+                    say("Baseline: " + JpegInfo.headline(b.info, b.bytes.toLong()) + " (" + JpegInfo.details(b.info, b.pictures) + ")")
+                    say("Parts (type/size): ${b.parts}")
+                }
+
+                // 3. Did the glasses keep it?
+                say("3. Counts after the photo")
+                val count2 = ask("5713", Xk.ACTION_READ)
+                val mem2 = ask("5712", Xk.ACTION_READ)
+                val photos2 = FullRes.jsonNumber(count2.reply?.json(), "photo_num")
+                val remain2 = FullRes.jsonNumber(mem2.reply?.json(), "remain_memory")
+                rose = FullRes.rose(photos1, photos2)
+                say("photo_num ${photos1 ?: "?"} → ${photos2 ?: "?"}; remain_memory ${remain1 ?: "?"} → ${remain2 ?: "?"}")
+
+                // 4. Read pass (and the Wi-Fi look while 4 and 5 run)
+                if (wifi) finder = WifiFinder(app).also { it.start(wifiTokens()) }
+                say("4. Read pass (action 1)" + if (wifi) "; looking for the glasses on Wi-Fi meanwhile" else "")
+                val reads = mutableMapOf<String, MutableList<FullRes.ReadOutcome>>()
+                for (node in FullRes.READ_PASS) {
+                    for (d in listOf(ByteArray(0), byteArrayOf(0))) {
+                        val x = ask(node, Xk.ACTION_READ, d)
+                        if (x.sent) reads.getOrPut(node) { mutableListOf() } += FullRes.ReadOutcome(x.answered, x.errCode)
+                        nodeLines += x.line()
+                    }
+                }
+
+                // 5. Index pass, only where the plan allows it
+                say("5. Index pass (action 2)")
+                for (node in FullRes.READ_PASS) {
+                    val tries = FullRes.indexTries(node, reads[node].orEmpty(), photos2?.toInt())
+                    if (tries.isEmpty()) { say("$node: no index tries (" + (if (reads[node].orEmpty().any { it.errCode == FullRes.ERR_INVALID_URN }) "INVALID_URN" else "not answered") + ")"); continue }
+                    for (d in tries) nodeLines += ask(node, Xk.ACTION_WRITE, d).line()
+                }
+
+                // 6. Wi-Fi
+                finder?.let { f ->
+                    val res = f.finish(3_000)
+                    finder = null
+                    res.lines.forEach { say("Wi-Fi: $it") }
+                }
+
+                // 7. Final
+                say("7. Final")
+                ask("7500", Xk.ACTION_EXECUTE)
+                ask("5713", Xk.ACTION_READ)
+                complete = true
+            } catch (e: Exception) {
+                say("Stopped early: ${e.message}")
+            } finally {
+                finder?.let { f -> runCatching { f.finish(1_000) } }
+                q7320?.let { pushWaiters.remove("7320", it) }
+                fullResMeter = null
+                capturing = false
+                quietCapture = false
+                fullResProbing = false
+                fullResUnsolicited.clear()
+                probing = false
+                busyFlag.set(false)
+                setReady()
+                fetchPendingAnnounce()
+                if (wantLive && link != null) runCatching { keepPreview = true; openPreviewNow() }
+            }
+            say("Per request:")
+            nodeLines.forEach { say("  $it") }
+            val b = baseline
+            val summary = FullRes.summary(b?.info, b?.bytes?.toLong() ?: 0L, found.toList(), rose, complete)
+            say(summary)
+            prefs.fullResReport = summary
+            val out = FullResProbe(summary, synchronized(lines) { lines.toList() }, complete)
             main.post { done(out) }
         }
     }
@@ -2228,6 +2528,11 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         const val MIC_1F_SOURCE = "head-1F frames"
         private val PUSH_NODES = setOf("5710", "5711", "57A0", "5750", "5790")
         private const val PROBE_LISTEN_MS = 5_000L
+        /** 3.8 full-size probe: reply timeout, extra listening, stray-media cap (time and bytes). */
+        private const val PROBE_REPLY_MS = 3_000L
+        private const val PROBE_LISTEN_MORE_MS = 3_000L
+        private const val PROBE_STRAY_MS = 20_000L
+        private const val PROBE_MAX_BYTES = 2 * 1024 * 1024
         /** Listening time after the glasses pushed 5710 = 01 (preview on). */
         private const val PROBE_LISTEN_ON_MS = 10_000L
         /** Requests that might pull preview frames, tried after an accepted open: node, action, data. */
@@ -2275,6 +2580,9 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         fun probeAction(path: String) = path.substringAfter('/').toIntOrNull() ?: Xk.ACTION_EXECUTE
 
         @Volatile private var instance: XkGlasses? = null
+
+        /** The instance if one exists, without making one (for logging from elsewhere). */
+        fun peek(): XkGlasses? = instance
 
         fun get(context: Context, prefs: Prefs): XkGlasses =
             instance ?: synchronized(this) { instance ?: XkGlasses(context, prefs).also { instance = it } }

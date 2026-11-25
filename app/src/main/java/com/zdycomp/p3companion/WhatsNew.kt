@@ -2,29 +2,34 @@ package com.zdycomp.p3companion
 
 /** What's new in this version, shown once after an update and on the About screen. */
 object WhatsNew {
-    const val VERSION = "3.7.0"
+    const val VERSION = "3.8.0"
 
     val headlines = listOf(
-        "Glasses mic: the call-audio route no longer trips over a speech service left running (one at a time now)",
-        "Glasses mic over the data link: the sound is decoded properly and fed to the speech service in real time",
-        "If this phone's speech service won't take the glasses' sound, Gemini writes down what you said",
-        "Test voice: Play back what the glasses heard on the phone's speaker, and share it",
-        "Voice questions start with the glasses' mic whenever one of its routes works",
+        "Every Bluetooth photo now logs its real pixel size and file size (for example \"Photo 640x480, 71 KB\")",
+        "Import shows each file's pixel size and file size, and one line comparing cable photos with Bluetooth photos",
+        "Gallery › Details shows a photo's real pixel size",
+        "Diagnostics › Find full-size photos asks the glasses, safely, whether they keep a larger copy",
+        "New Wi-Fi screen: the phone's Wi-Fi, finding the glasses on Wi-Fi, Connect and Disconnect",
     )
 
     val details = listOf(
-        "Glasses mic" to listOf(
-            "Only one speech recognizer runs at a time. Each one is closed when its turn ends, and the next waits 300 ms. In 3.6 the old one was still alive, so the call-audio test got \"too many requests\".",
-            "Call audio tries Google's network speech recognition first, then the on-phone one. The recognizer records the glasses' mic itself.",
-            "Data link: each glasses frame is now split into its 40-byte Opus packets the right way (none lost at the start of a frame). The decoder gets the right setup, and 48 kHz is turned into 16 kHz with a real low-pass filter.",
-            "The sound goes to the speech service at real-time speed, without the short gaps 3.6 slipped in between the glasses' bursts.",
-            "Test voice checks whether this phone's speech service understands sound the app hands it. It records 3 s from the phone's mic and passes it on. If that fails while the phone's mic works on its own, the app stops handing sound over.",
-            "Then, with a Gemini key, the app records what you say into the glasses until you stop (0.8 s of quiet, at most 15 s) and Gemini writes it down. The Assistant screen says when this is used. A Claude key alone can't do this (Claude doesn't take audio), so questions use the phone's mic.",
+        "Photo size" to listOf(
+            "The app now reads each photo's real size from the picture itself. The connection log says \"Photo 640x480, 71 KB\" for every Bluetooth photo, with its parts and speed.",
+            "Import lists every copied file with its pixel size and file size, and checks each photo reads back byte for byte (no recompression; EXIF and everything else kept).",
+            "Under the result, one line compares the two: \"Cable photos: 1280x960 avg 400 KB; Bluetooth photos: 640x480 avg 70 KB\".",
+            "In the Gallery, press and hold a photo, then More (⋮) › Details for its pixel size, file size and date.",
+            "A 20 MP picture would be about 3 to 8 MB. Bluetooth photos of 54 to 75 KB are most likely 640x480. A bigger number in another app usually means the app enlarged the picture, which adds no real detail.",
         ),
-        "Test voice" to listOf(
-            "It tests the phone mic, then the glasses' call audio, then the data link (handing sound over first, then Gemini), with a short pause between them.",
-            "Play back what the glasses heard plays the last 8 s from each glasses route on the phone's own speaker, so you can hear if it was your voice or noise. Share sends the WAV files.",
-            "If one of the glasses' routes works, voice questions start with it (call audio first, it opens fastest). Otherwise they use the phone's mic.",
+        "Find full-size photos" to listOf(
+            "In Diagnostics. Takes one photo, measures it, then asks the glasses (about 90 s) whether they keep photos: the photo counts before and after, their album and transfer commands, one part past the last, and Wi-Fi.",
+            "It never deletes and never sends the update or delete commands. It ends with one plain line, like \"Bluetooth photos are 640x480; no larger copy found\", and a log you can share.",
+        ),
+        "Wi-Fi" to listOf(
+            "Open it from the Glasses tab or Settings. It shows the phone's Wi-Fi: on or off, the network, signal, link speed and frequency.",
+            "Find the glasses on Wi-Fi lists the networks and Wi-Fi Direct devices nearby, with ones that look like your glasses first.",
+            "Connect joins a glasses network for this app only (Android asks you first), or a Wi-Fi Direct device. A password is typed by you, used once and never saved. Disconnect, or leaving the screen, ends it.",
+            "Once joined, Look for services checks the glasses' web and video ports and shows what answers.",
+            "Android shows Wi-Fi names only to apps with the Location permission; it's asked when you open the screen, and the app never uses your location. The app never turns Wi-Fi on or off: the Wi-Fi panel button opens Android's own.",
         ),
     )
 

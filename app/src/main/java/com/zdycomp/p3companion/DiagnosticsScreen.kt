@@ -117,6 +117,30 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
         }
         col.addView(tests)
 
+        // 3.8: what size the Bluetooth photos really are, and whether the glasses hold a bigger copy.
+        val full = ui.card()
+        full.addView(ui.heading("Full-size photos", R.drawable.ic_photo))
+        full.addView(ui.body(
+            "Find full-size photos takes one photo, measures it, and asks the glasses (about 90 s) whether they keep a larger " +
+                "copy anywhere: their photo album commands, a part past the last one, and Wi-Fi. It never deletes anything " +
+                "and never sends the glasses' update or delete commands.",
+            muted = true, sizeSp = 13f,
+        ))
+        PhotoStats.describe(a.prefs.bluetoothPhotoSizes)?.let { d ->
+            full.addView(ui.text("Bluetooth photos so far: $d", Type.BODY_SMALL, ui.s.onSurfaceVariant).apply { setPadding(0, ui.dp(6), 0, 0) })
+        }
+        a.prefs.fullResReport?.let { sum ->
+            full.addView(ui.text("Last search: $sum", Type.BODY_SMALL, ui.s.onSurfaceVariant).apply { setPadding(0, ui.dp(6), 0, 0) })
+        }
+        full.addView(ui.button("Find full-size photos", Btn.TONAL, R.drawable.ic_photo_camera, full = false) {
+            a.confirm("Find full-size photos?", "Takes one photo and asks the glasses about stored photos. Deletes nothing.", "Start") {
+                // The Wi-Fi look runs either way; without the permission it notes what it couldn't see.
+                a.withNearbyWifi { _ -> fullResTest(wifi = true) }
+            }
+        }.apply { isEnabled = !running },
+            LinearLayout.LayoutParams(Ui.WRAP, Ui.WRAP).apply { topMargin = ui.dp(8) })
+        col.addView(full)
+
         val results = ui.card()
         results.addView(ui.heading("Results", R.drawable.ic_check_circle))
         val box = ui.column()
@@ -317,6 +341,39 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
                 appendLine("Glasses: ${g.model ?: "?"}, firmware ${g.firmware ?: "?"}")
                 (listOfNotNull(res.standard) + res.results).forEach { appendLine(VideoQuality.line(it, "5720", a.prefs.previewAction)) }
                 appendLine(res.summary)
+            }
+            report = redact(sb.toString())
+            running = false
+            if (visible) a.refresh()
+        }
+    }
+
+    /** 3.8 "Find full-size photos" (docs/FULL-RES-PLAN.md): one photo, the album and transfer reads, Wi-Fi; a shareable log. */
+    private fun fullResTest(wifi: Boolean) {
+        if (running) return
+        val g = a.glasses
+        if (g.state != XkGlasses.State.READY) { a.toast("Connect the glasses first (they must not be busy)."); return }
+        running = true
+        liveReport = null
+        testLog = null
+        val sb = StringBuilder()
+        fun line(s: String) {
+            sb.appendLine(s)
+            val text = sb.toString()
+            liveReport = text
+            if (visible) renderResults(text)
+        }
+        a.refresh()
+        line("Find full-size photos")
+        line("INFO  about 90 seconds; keep the glasses on and connected")
+        g.runFullResProbe(onLine = { l -> line("INFO  $l") }, wifi = wifi) { res ->
+            line(if (res.complete) "PASS  ${res.summary}" else "FAIL  ${res.summary}")
+            line("Done.")
+            testLog = buildString {
+                appendLine("P3 Companion full-size photo search")
+                appendLine("Phone: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE}, app ${a.appVersion()}")
+                appendLine("Glasses: ${g.model ?: "?"}, firmware ${g.firmware ?: "?"}")
+                res.log.forEach { appendLine(it) }
             }
             report = redact(sb.toString())
             running = false

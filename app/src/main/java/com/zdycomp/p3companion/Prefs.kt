@@ -261,6 +261,31 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
         get() = sp.getString("last_import", null)
         set(v) = sp.edit().putString("last_import", v).apply()
 
+    /** 3.8: pixel and file size of the last [PhotoStats.KEEP] photos that came over Bluetooth. */
+    var bluetoothPhotoSizes: List<PhotoStats.Size>
+        get() = PhotoStats.decode(sp.getString("photo_size_bt", null))
+        set(v) = sp.edit().putString("photo_size_bt", PhotoStats.encode(v)).apply()
+
+    /** 3.8: the same for photos copied over the cable (Import tab). */
+    var cablePhotoSizes: List<PhotoStats.Size>
+        get() = PhotoStats.decode(sp.getString("photo_size_cable", null))
+        set(v) = sp.edit().putString("photo_size_cable", PhotoStats.encode(v)).apply()
+
+    /** 3.8 "Find full-size photos": the request being sent right now ("7310/2 01"), cleared after its answer. */
+    var fullResCurrent: String?
+        get() = sp.getString("fullres_current", null)
+        set(v) { sp.edit().putString("fullres_current", v).commit() }
+
+    /** Requests that were in flight when the link dropped in an earlier run, skipped from then on ("|"-joined). */
+    var fullResDropped: Set<String>
+        get() = sp.getString("fullres_dropped", null)?.split('|')?.filter { it.isNotBlank() }?.toSet() ?: emptySet()
+        set(v) = sp.edit().putString("fullres_dropped", v.joinToString("|")).apply()
+
+    /** The last "Find full-size photos" summary line. */
+    var fullResReport: String?
+        get() = sp.getString("fullres_report", null)
+        set(v) = sp.edit().putString("fullres_report", v).apply()
+
     // ---------- Assistant ----------
 
     var aiProvider: AiProvider
@@ -578,7 +603,7 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
             k == "user_key" || k.startsWith("ai_key_") || k == "sr_token" || k == "sr_url" || k == "sr_http_ok" || k == "drive_uri" || k == "drive_label" ||
                 k == "ble_addr" || k == "ble_name" || k == "link_method" || k == "preview_action" ||
                 k == "live_path" || k.startsWith("live_probe_") || k.startsWith("live_quality_") || k.startsWith("live_ack") || k.startsWith("recognizer_") ||
-                k.startsWith("asked_") || k == "last_import" || k == "last_seen_version" || k == "user_stopped"
+                k.startsWith("asked_") || k == "last_import" || k.startsWith("photo_size_") || k.startsWith("fullres_") || k == "last_seen_version" || k == "user_stopped"
         }
         val e = sp.edit().clear()
         for ((k, v) in keep) when (v) {

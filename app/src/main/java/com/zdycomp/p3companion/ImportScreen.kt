@@ -220,11 +220,43 @@ class ImportScreen(private val a: MainActivity) : Screen {
             res != null -> {
                 val text = res.summary() + if (res.failed.isNotEmpty()) "\nFailed: " + res.failed.take(5).joinToString(", ") else ""
                 box.addView(ui.banner(text, if (res.failed.isEmpty()) Tone.GOOD else Tone.WARN))
+                // 3.8: every file's pixel size and file size, so the cable can be compared with Bluetooth.
+                if (res.files.isNotEmpty()) {
+                    val shown = res.files.take(MAX_FILE_LINES)
+                    val more = res.files.size - shown.size
+                    box.addView(ui.text(shown.joinToString("\n") { it.line() } + if (more > 0) "\n…and $more more" else "",
+                        Type.BODY_SMALL, ui.s.onSurfaceVariant).apply {
+                        fontFeatureSettings = "tnum"
+                        setPadding(0, ui.dp(8), 0, 0)
+                        setTextIsSelectable(true)
+                    })
+                }
+                compareLine(box, PhotoStats.summary(res.photoSizes(), a.prefs.bluetoothPhotoSizes))
                 if (res.imported > 0) box.addView(ui.button("Open gallery", Btn.FILLED, R.drawable.ic_photo_library) { a.show(MainActivity.TAB_GALLERY) })
             }
-            a.prefs.lastImportSummary != null -> box.addView(ui.text("Last import: " + a.prefs.lastImportSummary, Type.BODY_SMALL, ui.s.onSurfaceVariant))
+            a.prefs.lastImportSummary != null -> {
+                box.addView(ui.text("Last import: " + a.prefs.lastImportSummary, Type.BODY_SMALL, ui.s.onSurfaceVariant))
+                compareLine(box, PhotoStats.summary(a.prefs.cablePhotoSizes, a.prefs.bluetoothPhotoSizes))
+            }
+            else -> compareLine(box, PhotoStats.summary(a.prefs.cablePhotoSizes, a.prefs.bluetoothPhotoSizes))
         }
     }
 
+    /** 3.8: "Cable photos: 1280x960 avg 400 KB; Bluetooth photos: 640x480 avg 70 KB", and the pixel ratio when both are known. */
+    private fun compareLine(box: LinearLayout, line: String?) {
+        if (line == null) return
+        val ui = a.ui
+        val ratio = PhotoStats.ratio(a.prefs.cablePhotoSizes, a.prefs.bluetoothPhotoSizes)
+        box.addView(ui.text(line + (ratio?.let { "\n$it" } ?: ""), Type.BODY_MEDIUM).apply {
+            fontFeatureSettings = "tnum"
+            setPadding(0, ui.dp(8), 0, 0)
+            setTextIsSelectable(true)
+        })
+    }
+
     private fun mb(bytes: Long): String = String.format("%.1f MB", bytes / 1_048_576.0)
+
+    private companion object {
+        const val MAX_FILE_LINES = 20
+    }
 }
