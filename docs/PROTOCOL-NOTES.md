@@ -259,6 +259,17 @@ For units with storage (`noStorageDevice=0`):
 
 Fix needed: `A/XkGlasses.kt:271` tells users to "Import it over the cable". USB is reported to be charge-only (`B/docs/VALIDATION.md:201-203`), so remove that text.
 
+### 2.2a Live video size (3.6)
+
+The owner's E13C-5 opens live video with `5720` action 3 data `[01]` and sends 320×240 H.264 (Baseline,
+level 4.0) at about 30 fps on head `0x1E` (`LOG-2026-11-25-v340.txt`). No source names a resolution or
+profile setting for the live stream. `2410` and `2420` hold the prompt/translation language tags (`en`,
+`zh-cn`), so the app never writes them for video. 3.6 adds an opt-in probe ("Try higher quality", Live view
+and Diagnostics): with live view closed it opens `5720` with `[01]`, then `[01 01]`, `[01 02]`, `[01 03]`,
+`[02]`, `[03]`, 3 s each, reads the SPS size, fps and kbps, and always closes the same node and action with
+`[00]`, 1.5 s apart. A setting is offered as Quality "High" only if its SPS is bigger than 320×240 at 15 fps
+or more. **UNKNOWN** until the owner runs it: whether any of those data bytes changes the stream at all.
+
 ### 2.3 Capability flags
 
 **7110 `WmGlassesFunctionSupport`** (`B/docs/NODES.md:309-318`; `B/docs/PAYLOADS.md:85`)

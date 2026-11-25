@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.speech.SpeechRecognizer
+import java.io.File
 import java.util.Locale
 import java.util.concurrent.Executors
 
@@ -23,7 +24,7 @@ import java.util.concurrent.Executors
 class Assistant private constructor(context: Context, private val prefs: Prefs) {
 
     enum class Phase { IDLE, LISTENING, THINKING, SPEAKING }
-    enum class Mode { CHAT, TRANSLATE, READ_ALOUD }
+    enum class Mode { CHAT, TRANSLATE, READ_ALOUD, CONVERSATION }
     enum class Who { YOU, AI, NOTE, ERROR }
 
     data class Line(val who: Who, val text: String)
@@ -99,7 +100,11 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
         if (phase == Phase.LISTENING) speech.finishListening() else stop()
     }
 
-    private fun log(m: Mode) = if (m == Mode.TRANSLATE) translations else chat
+    private fun log(m: Mode) = when (m) {
+        Mode.TRANSLATE -> translations
+        Mode.CONVERSATION -> convoNotes
+        else -> chat
+    }
 
     private fun add(list: MutableList<Line>, who: Who, text: String): Line {
         val line = Line(who, text)
@@ -140,6 +145,7 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
     private fun startTurn(m: Mode) {
         if (phase != Phase.IDLE) { tapWhileBusy(); return }
         val lines = log(m)
+        if (m == Mode.CONVERSATION && (!convoOn || convoPaused)) return
         if (!hasKey() && m == Mode.TRANSLATE) {
             add(lines, Who.ERROR, "Add your ${prefs.aiProvider.label} key in AI setup first.")
             changed(); return
@@ -160,7 +166,9 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
             prefs.micRouteScores, route.headsetConnected(),
             linked = glasses.state == XkGlasses.State.READY && MicCapture.supported(), useGlasses = prefs.useGlassesAudio,
         )
-        if (routes.size > 1) glasses.addLog("Voice: mics to try: " + routes.joinToString(" → ") { it.label })
+        // 3.6: a conversation keeps the mic that worked for its last phrase.
+        if (m == Mode.CONVERSATION) convoMic?.takeIf { it in routes }?.let { w -> routes = listOf(w) + routes.filter { it != w } }
+        if (routes.size > 1 && (m != Mode.CONVERSATION || convoMic == null)) glasses.addLog("Voice: mics to try: " + routes.joinToString(" → ") { it.label })
         changed()
         tryRoute(my, m, 0, null)
     }
@@ -205,6 +213,7 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
             stopSpp()
             releaseRouteNow()
             add(log(m), Who.ERROR, "No mic worked" + (lastWhy?.let { ": $it" } ?: ".") + " Run Test voice in Diagnostics to see which one does.")
+            if (m == Mode.CONVERSATION) { convoErrors = CONVO_MAX_ERRORS; convoMic = null }
             endTurn()
             return
         }
@@ -223,6 +232,13 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
                 holdRoute { up ->
                     if (my != turn) return@holdRoute
                     if (!up) { releaseRouteNow(); routeFailed(my, m, i, r, route.lastReport ?: "the call audio didn't open"); return@holdRoute }
+                    // 3.6: in a conversation the link checked for the last phrase is still up: listen at once.
+                    if (m == Mode.CONVERSATION && convoMic == MicRoute.GLASSES_SCO && route.active) {
+                        throughGlasses = true
+                        useMic(r, "glasses through call audio (kept up for the conversation)")
+                        listenNow(my, m, null)
+                        return@holdRoute
+                    }
                     // 3.5: a link that came up must also carry sound (3.4 recorded -83 dBFS digital silence).
                     MicCapture.record(app, route.glassesInput(), MicCapture.PROBE_MS, callAudio = true) { take ->
                         if (my != turn) return@record
@@ -256,25 +272,34 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
 
     private fun listenNow(my: Int, m: Mode, feed: (() -> AudioFeed?)?) {
         val lines = log(m)
-        val tag = Languages.byName(if (m == Mode.CHAT) prefs.replyLanguage else prefs.translateFrom).tag
+        val tag = Languages.byName(when (m) {
+            Mode.CHAT -> prefs.replyLanguage
+            Mode.CONVERSATION -> convoListenIn
+            else -> prefs.translateFrom
+        }).tag
+        speech.dialogAllowed = m != Mode.CONVERSATION
         speech.listen(
             tag,
             onPartial = { text ->
                 if (my != turn) return@listen
-                if (prefs.voiceCommands && VoiceCommands.isEarlyStop(text)) { stop(); return@listen }
+                if (m != Mode.CONVERSATION && prefs.voiceCommands && VoiceCommands.isEarlyStop(text)) { stop(); return@listen }
                 partial = text; changed()
             },
             onResult = { text ->
                 if (my != turn) return@listen
                 stopSpp()
                 routeNow?.let { scoreRoute(it, true) }
+                if (m == Mode.CONVERSATION) convoMic = routeNow
                 heard(my, m, text)
             },
             onError = { msg, code ->
                 if (my != turn) return@listen
                 val r = routeNow
                 // A glasses mic that gave nothing, or a speech service that won't take its audio: the next mic.
-                if (r != null && r != MicRoute.PHONE && (speech.lastPipeRejected || shouldRetryWithPhone(code, glassesOrFed = true, alreadyRetried = false))) {
+                // 3.6: in a conversation, silence on the glasses' mic that already gave words is just silence, not a broken mic.
+                val silentInConvo = m == Mode.CONVERSATION && r != null && r == convoMic && !speech.lastPipeRejected &&
+                    (code == SpeechRecognizer.ERROR_NO_MATCH || code == SpeechRecognizer.ERROR_SPEECH_TIMEOUT)
+                if (r != null && r != MicRoute.PHONE && !silentInConvo && (speech.lastPipeRejected || shouldRetryWithPhone(code, glassesOrFed = true, alreadyRetried = false))) {
                     stopSpp()
                     if (r == MicRoute.GLASSES_SCO) releaseRouteNow()
                     throughGlasses = false
@@ -284,6 +309,13 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
                     return@listen
                 }
                 stopSpp()
+                // 3.6: in a conversation silence isn't a problem: listen again (two-way: in the other language).
+                if (m == Mode.CONVERSATION && (code == SpeechRecognizer.ERROR_NO_MATCH || code == SpeechRecognizer.ERROR_SPEECH_TIMEOUT)) {
+                    convoListenIn = TwoWay.afterSilence(convoListenIn, prefs.translateFrom, prefs.translateTo, prefs.convoTwoWay)
+                    endTurn()
+                    return@listen
+                }
+                if (m == Mode.CONVERSATION) { convoErrors++; convoMic = null }
                 lastVoiceError = speech.lastErrorDetail?.let { "$msg ($it)" } ?: msg
                 micNote?.let { glasses.addLog("Voice: that try used the $it mic") }
                 speech.lastErrorDetail?.let { glasses.addLog("Voice: $it") }
@@ -298,6 +330,7 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
     }
 
     private fun heard(my: Int, m: Mode, text: String) {
+        if (m == Mode.CONVERSATION) { heardInConversation(my, text); return }
         val lines = log(m)
         partial = null
         add(lines, Who.YOU, text)
@@ -568,6 +601,7 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
     /** Stops listening, thinking or talking right away. */
     fun stop() {
         turn++
+        if (convoOn) endConversation("stopped")
         stopSpp()
         pendingConfirm = null
         commands?.cancelPending()
@@ -583,11 +617,25 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
         stopSpp()
         phase = Phase.IDLE
         partial = null
-        // Call audio: keep the link up a little, so the next question in this session needn't wait for it.
-        if (callAudio() && holdingRoute) {
+        val loop = convoOn && !convoPaused
+        if (loop && convoErrors >= CONVO_MAX_ERRORS) {
+            // 3.6: a conversation that keeps failing pauses instead of trying for ever.
+            convoPaused = true
+            convoProblem = "Paused after repeated problems" + (lastVoiceError?.let { ": $it" } ?: "") + ". Tap Resume to listen again."
+            glasses.addLog("Conversation translate: paused after $convoErrors problems")
+            releaseRouteNow()
+        } else if (loop && holdingRoute) {
+            // 3.6: the call link stays up between phrases of a conversation.
+            main.removeCallbacks(lingerRelease)
+        } else if (callAudio() && holdingRoute) {
+            // Call audio: keep the link up a little, so the next question in this session needn't wait for it.
             main.removeCallbacks(lingerRelease)
             main.postDelayed(lingerRelease, SESSION_LINGER_MS)
         } else releaseRouteNow()
+        if (convoOn && !convoPaused) {
+            main.removeCallbacks(convoNext)
+            main.postDelayed(convoNext, CONVO_GAP_MS)
+        }
         changed()
     }
 
@@ -623,6 +671,282 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
     fun clearTranslations() {
         if (mode == Mode.TRANSLATE && phase != Phase.IDLE) stop()
         translations.clear()
+        changed()
+    }
+
+    // ---------------- Conversation translate (3.6) ----------------
+
+    /** Saved sessions: app-private JSON lines, never with an API key or the SupRevolt token in them. */
+    val convoStore = TranslationStore(File(app.filesDir, "translations")) {
+        AiProvider.values().mapNotNull { prefs.aiKey(it) } + listOfNotNull(prefs.srToken, prefs.userKey)
+    }
+    /** File work for [convoStore], in order, off the main thread. */
+    private val disk = Executors.newSingleThreadExecutor()
+
+    var convoOn = false; private set
+    var convoPaused = false; private set
+    /** The session being written, or null when it couldn't be created (entries still show). */
+    var convoSession: String? = null; private set
+    /** This session's entries, oldest first. */
+    val convoEntries = mutableListOf<TranslationEntry>()
+    /** Notes and problems of the conversation (the screen shows the last ones). */
+    val convoNotes = mutableListOf<Line>()
+    /** The language the next phrase is listened for in. */
+    var convoListenIn: String = prefs.translateFrom; private set
+    /** The phrase being translated right now, or null. */
+    var convoTranslating: String? = null; private set
+    /** Why the conversation can't translate or paused, in a sentence, or null. */
+    var convoProblem: String? = null; private set
+    /** True while saved entries are being read aloud. */
+    var convoReading = false; private set
+    private var convoErrors = 0
+    private var convoMic: MicRoute? = null
+    private val convoNext = Runnable { if (convoOn && !convoPaused && phase == Phase.IDLE) startTurn(Mode.CONVERSATION) }
+
+    /** Runs [work] on the store's thread and hands the result to [done] on the main thread. */
+    fun <T> withStore(work: (TranslationStore) -> T, done: (Result<T>) -> Unit) {
+        disk.execute {
+            val r = runCatching { work(convoStore) }
+            main.post { done(r) }
+        }
+    }
+
+    /** Starts listening continuously: every phrase is translated, logged, shown and (if on) spoken. */
+    fun startConversation() {
+        if (convoOn) { if (convoPaused) resumeConversation(); return }
+        if (phase != Phase.IDLE) stop()
+        if (!speech.recognitionAvailable()) {
+            convoProblem = "This phone has no speech recognition. Install or turn on Google's speech services."
+            changed(); return
+        }
+        convoOn = true
+        convoPaused = false
+        convoErrors = 0
+        convoMic = null
+        convoReading = false
+        convoProblem = if (hasKey()) null else "No AI key yet, so nothing is translated: the original words are logged. Add your key in AI setup."
+        convoEntries.clear()
+        convoNotes.clear()
+        convoTranslating = null
+        convoListenIn = prefs.translateFrom
+        convoSession = null
+        val at = System.currentTimeMillis()
+        val pending = mutableListOf<TranslationEntry>()
+        convoPendingWrites = pending
+        withStore({ it.newSession(at) }) { r ->
+            if (pending !== convoPendingWrites) return@withStore
+            convoPendingWrites = null
+            convoSession = r.getOrNull()
+            r.exceptionOrNull()?.let { convoNotes += Line(Who.ERROR, "Couldn't create the log file: ${it.message}. Phrases still show here.") }
+            convoSession?.let { id -> pending.forEach { e -> disk.execute { runCatching { convoStore.append(id, e) } } } }
+            changed()
+        }
+        glasses.addLog("Conversation translate: started, " + when {
+            prefs.convoTwoWay -> "two-way ${prefs.translateFrom} and ${prefs.translateTo}"
+            prefs.convoAutoDetect -> "auto-detect into ${prefs.translateTo}"
+            else -> "${prefs.translateFrom} into ${prefs.translateTo}"
+        } + if (prefs.convoSpeak) ", spoken" else "")
+        if (prefs.convoBackground) ConversationService.start(app)
+        changed()
+        startTurn(Mode.CONVERSATION)
+    }
+    private var convoPendingWrites: MutableList<TranslationEntry>? = null
+
+    /** Stops listening for now; the session stays open. */
+    fun pauseConversation() {
+        if (!convoOn || convoPaused) return
+        convoPaused = true
+        main.removeCallbacks(convoNext)
+        if (mode == Mode.CONVERSATION && phase != Phase.IDLE) {
+            turn++
+            stopSpp()
+            speech.cancelListening()
+            speech.stopSpeaking()
+            phase = Phase.IDLE
+            partial = null
+        }
+        releaseRouteNow()
+        glasses.addLog("Conversation translate: paused")
+        changed()
+    }
+
+    fun resumeConversation() {
+        if (!convoOn || !convoPaused) return
+        if (phase != Phase.IDLE) stopTurnOnly()
+        convoPaused = false
+        convoErrors = 0
+        convoProblem = if (hasKey()) null else convoProblem
+        glasses.addLog("Conversation translate: listening again")
+        changed()
+        startTurn(Mode.CONVERSATION)
+    }
+
+    /** Ends the conversation; its log is kept. */
+    fun stopConversation() {
+        if (!convoOn) return
+        if (phase != Phase.IDLE) stop() else { endConversation("stopped"); releaseRouteNow(); changed() }
+    }
+
+    private fun endConversation(why: String) {
+        convoOn = false
+        convoPaused = false
+        convoTranslating = null
+        main.removeCallbacks(convoNext)
+        ConversationService.stop(app)
+        glasses.addLog("Conversation translate: $why, ${convoEntries.size} phrase(s) logged")
+    }
+
+    /** Ends whatever turn runs without touching the conversation. */
+    private fun stopTurnOnly() {
+        turn++
+        stopSpp()
+        speech.cancelListening()
+        speech.stopSpeaking()
+        phase = Phase.IDLE
+        partial = null
+        convoReading = false
+    }
+
+    /** Swap the two languages; a phrase being listened for starts again in the new language. */
+    fun swapConversationLanguages() {
+        val f = prefs.translateFrom
+        prefs.translateFrom = prefs.translateTo
+        prefs.translateTo = f
+        convoListenIn = prefs.translateFrom
+        restartListening()
+    }
+
+    /** Two-way: listen for the next phrase in [language] (one of the pair). */
+    fun listenIn(language: String) {
+        convoListenIn = Languages.byName(language).name
+        restartListening()
+    }
+
+    private fun restartListening() {
+        if (convoOn && !convoPaused && mode == Mode.CONVERSATION && phase == Phase.LISTENING) {
+            turn++
+            stopSpp()
+            speech.cancelListening()
+            phase = Phase.IDLE
+            partial = null
+            startTurn(Mode.CONVERSATION)
+        } else changed()
+    }
+
+    /** Keeps the background notification in step with the setting while a conversation runs. */
+    fun conversationBackgroundChanged() {
+        if (!convoOn) return
+        if (prefs.convoBackground) ConversationService.start(app) else ConversationService.stop(app)
+    }
+
+    private fun heardInConversation(my: Int, text: String) {
+        partial = null
+        if (prefs.voiceCommands && VoiceCommands.isConversationStop(text)) {
+            stopConversation()
+            return
+        }
+        convoErrors = 0
+        if (holdingRoute && !route.active) releaseRouteNow()
+        val heardIn = convoListenIn
+        val from = prefs.translateFrom
+        val to = prefs.translateTo
+        val twoWay = prefs.convoTwoWay
+        val auto = prefs.convoAutoDetect && !twoWay
+        val at = System.currentTimeMillis()
+        if (!hasKey()) {
+            convoProblem = "No AI key yet, so nothing is translated: the original words are logged. Add your key in AI setup."
+            recordConvo(TranslationEntry(at, text, null, heardIn, to, note = "Not translated: no AI key"))
+            endTurn()
+            return
+        }
+        phase = Phase.THINKING
+        convoTranslating = text
+        changed()
+        val provider = prefs.aiProvider
+        val key = prefs.aiKey(provider) ?: ""
+        val model = prefs.aiModel(provider)
+        val system = ConversationWire.prompt(if (auto) null else if (twoWay) from else heardIn, to, twoWay)
+        val t0 = SystemClock.elapsedRealtime()
+        io.execute {
+            val result = runCatching { AiClient.ask(provider, key, model, system, listOf(AiTurn(true, text))) }
+            main.post {
+                convoTranslating = null
+                result.onSuccess { raw ->
+                    val r = ConversationWire.parse(raw)
+                    val way = TwoWay.way(r.language, heardIn, from, to, twoWay)
+                    recordConvo(TranslationEntry(at, text, r.text, r.language ?: way.from, way.to))
+                    if (my != turn) return@post
+                    convoListenIn = TwoWay.nextListen(way.from, from, to, twoWay)
+                    logTiming("conversation: heard → translated ${SystemClock.elapsedRealtime() - t0} ms (${provider.label})")
+                    if (prefs.convoSpeak && convoOn && !convoPaused) speakConvo(my, r.text, way.to) else endTurn()
+                }.onFailure { e ->
+                    val msg = e.message ?: "Something went wrong."
+                    recordConvo(TranslationEntry(at, text, null, heardIn, to, note = "Not translated: $msg"))
+                    if (my != turn) return@post
+                    convoErrors++
+                    convoNotes += Line(Who.ERROR, msg)
+                    endTurn()
+                }
+            }
+        }
+    }
+
+    private fun speakConvo(my: Int, text: String, language: String) {
+        phase = Phase.SPEAKING
+        changed()
+        tune()
+        speech.speak(text, Languages.byName(language).tag, throughCall = throughCallNow(), leadInMs = leadIn()) { err ->
+            if (my != turn) return@speak
+            if (err != null) convoNotes += Line(Who.NOTE, err)
+            endTurn()
+        }
+    }
+
+    /** Shows a phrase and appends it to the session's file (or holds it until the file exists). */
+    private fun recordConvo(e: TranslationEntry) {
+        convoEntries += e
+        while (convoNotes.size > 20) convoNotes.removeAt(0)
+        val id = convoSession
+        val waiting = convoPendingWrites
+        when {
+            id != null -> disk.execute { runCatching { convoStore.append(id, e) } }
+            waiting != null -> waiting += e
+        }
+        changed()
+    }
+
+    /**
+     * Reads entries aloud one after another, each in its own language ("Read all", or one tapped entry).
+     * A conversation that is listening pauses first, so the phone doesn't translate its own voice.
+     */
+    fun readBack(items: List<Pair<String, String>>) {
+        if (items.isEmpty()) return
+        if (convoOn && !convoPaused) pauseConversation()
+        if (phase != Phase.IDLE) stopTurnOnly()
+        val my = ++turn
+        mode = Mode.READ_ALOUD
+        phase = Phase.SPEAKING
+        convoReading = true
+        changed()
+        tune()
+        fun next(i: Int) {
+            if (my != turn) return
+            if (i >= items.size) { convoReading = false; endTurn(); return }
+            val (text, language) = items[i]
+            speech.speak(text, Languages.byName(language).tag, throughCall = throughCallNow(), leadInMs = if (i == 0) leadIn() else 0) { err ->
+                if (my != turn) return@speak
+                if (err != null) { convoNotes += Line(Who.NOTE, err); convoReading = false; endTurn(); return@speak }
+                next(i + 1)
+            }
+        }
+        next(0)
+    }
+
+    /** Stops reading entries aloud. */
+    fun stopReading() {
+        if (!convoReading) return
+        stopTurnOnly()
+        releaseRouteNow()
         changed()
     }
 
@@ -755,6 +1079,11 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
 
         /** Call audio keeps the glasses' link this long after a turn, for the next question. */
         const val SESSION_LINGER_MS = 10_000L
+
+        /** 3.6: the pause between one conversation phrase and listening for the next. */
+        const val CONVO_GAP_MS = 250L
+        /** 3.6: a conversation pauses after this many problems in a row (not counting silence). */
+        const val CONVO_MAX_ERRORS = 3
 
         @Volatile private var instance: Assistant? = null
 

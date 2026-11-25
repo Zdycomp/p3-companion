@@ -45,6 +45,9 @@ class Speech(context: Context, private val prefs: Prefs) {
     /** A recognition service to try: a component, the on-phone recognizer, or the phone's default. */
     data class Service(val key: String, val label: String, val component: ComponentName?, val onDevice: Boolean = false)
 
+    /** 3.6: false while Conversation translate listens: a phrase nobody said must never open the speech dialog. */
+    var dialogAllowed = true
+
     /** Set by the activity: opens the system speech dialog; delivers the text (or null and a reason). */
     var activityFallback: ((tag: String, deliver: (String?, String?) -> Unit) -> Boolean)? = null
 
@@ -185,7 +188,7 @@ class Speech(context: Context, private val prefs: Prefs) {
         if (index >= chain.size) {
             // Every service failed: the system speech dialog, if there is one (it records the phone's mic itself).
             val fb = activityFallback
-            if (fb != null && audioFactory == null && dialogAvailable()) {
+            if (fb != null && audioFactory == null && dialogAllowed && dialogAvailable()) {
                 note("speech dialog: opened")
                 lastService = "speech dialog"
                 val opened = fb(tag) { text, why ->

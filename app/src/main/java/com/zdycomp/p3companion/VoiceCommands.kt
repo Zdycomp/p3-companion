@@ -284,8 +284,19 @@ object VoiceCommands {
             "(?:set|change) (?:the |your )?(?:reply |answer )?language to (?<lang>$LANG)",
         ), "answer in Spanish", "Translation") { m, _ -> mapOf("lang" to (language(g(m, "lang")) ?: return@Rule null)) },
         Rule("tr.start", P2, r(
-            "translate", "start translating", "translation(?: mode)?", "(?:start|open|begin) (?:the )?translat(?:or|ion)(?: mode)?", "interpreter(?: mode)?",
+            "translate", "translation(?: mode)?", "(?:start|open|begin) (?:the )?translat(?:or|ion)(?: mode)?", "interpreter(?: mode)?",
         ), "translate", "Translation"),
+        // 3.6: Conversation translate, a continuous loop that logs every phrase.
+        Rule("tr.conversation", P2, r(
+            "(?:start |keep )?translating", "(?:start |keep )?translating (?:the |this |our |a )?conversation",
+            "(?:start |open |begin )?(?:the |a )?(?:conversation|continuous) (?:translation|translator|translate)(?: mode)?",
+            "translate (?:the |this |our |a |my )?(?:conversation|whole conversation|discussion|chat with them)",
+            "(?:start |open )?conversation mode", "interpret (?:the |this |our )?conversation", "translate everything(?: they say)?",
+            "translate as (?:they|people|you) (?:talk|speak)",
+        ), "translate conversation", "Translation"),
+        Rule("tr.conversation_stop", P2, r(
+            "(?:stop|end|finish|pause) (?:the )?(?:conversation )?translat(?:ing|ion|or)", "(?:stop|end|finish) (?:the )?conversation(?: mode)?",
+        ), "stop translating", "Translation"),
 
         // P2 phone utilities
         Rule("util.timer", P2, r(
@@ -463,6 +474,10 @@ object VoiceCommands {
 
     /** True for a stop word: the only command heard during translation. */
     fun isStop(text: String): Boolean = rules[0].patterns.any { it.matches(normalize(text)) }
+
+    /** 3.6: what ends Conversation translate while it listens: a stop word or "stop translating". */
+    fun isConversationStop(text: String): Boolean =
+        isStop(text) || rule("tr.conversation_stop")!!.patterns.any { it.matches(normalize(text)) }
 
     /**
      * The command in [raw], or null for the AI. P0 control first, then state-resolved words, then

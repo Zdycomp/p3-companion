@@ -11,8 +11,8 @@ android {
         applicationId = "com.zdycomp.p3companion"
         minSdk = 30
         targetSdk = 35
-        versionCode = 8
-        versionName = "3.5.0"
+        versionCode = 9
+        versionName = "3.6.0"
     }
 
     buildTypes {

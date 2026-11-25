@@ -20,7 +20,8 @@
 
     <!-- Assistant: talks to the AI service you choose -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- Voice questions, translation and the voice recorder, through the glasses' headset link when connected -->
+    <!-- Voice questions, translation, Conversation translate, the voice recorder and (when chosen) sound for live view
+         recordings, through the glasses' headset link when connected -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <!-- Keeps a voice recording going with the screen off -->
@@ -70,6 +71,7 @@
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -123,6 +125,12 @@
 
         <service
             android:name=".RecorderService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- 3.6: Conversation translate keeps listening with the screen closed (only when that setting is on) -->
+        <service
+            android:name=".ConversationService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
     </application>

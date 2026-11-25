@@ -1178,6 +1178,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
 
     /** 3.5: hands a picture to the screen, first replaying the cached start pictures to a screen that just reattached. */
     private fun deliver(au: VideoAu) {
+        qualityMeter?.feed(au.sps, au.picture, au.annexB.size)
         if (au.sps != null) lastSpsAu = au
         if (au.entry) lastEntryAu = au
         val sink = videoSink ?: return
@@ -1544,6 +1545,16 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
 
     @Volatile private var openToken = 0
 
+    /**
+     * 3.6: the data the 5720 open sends: `[01]`, or with Quality set to High the data "Try higher quality"
+     * found ([VideoQuality]). The close is always `[00]`.
+     */
+    private fun openData(): ByteArray = (if (prefs.liveQualityHigh) prefs.liveQualityData else null) ?: VideoQuality.STANDARD
+
+    /** 3.6: what the live view opens with, for the screen ("Standard" or "High 640×480"). */
+    val qualityLabel: String get() =
+        if (prefs.liveQualityHigh) "High " + (prefs.liveQualitySize?.let { "${it.first}×${it.second}" } ?: VideoQuality.hex(openData())) else "Standard"
+
     private fun openPreviewNow(): String? {
         if (link == null) return "Connect the glasses first."
         preview = Preview.OPENING
@@ -1585,7 +1596,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                 addLog("Live view: 5710 = %02X, opening once more".format(v))
                 val via = openedWith
                 val r = if (via != null) request(probeNode(via), probeAction(via), byteArrayOf(1), 4_000)
-                else request("5720", prefs.previewAction, byteArrayOf(1), 4_000)
+                else request("5720", prefs.previewAction, openData(), 4_000)
                 if ((r?.errCode ?: 0) == 0) preview = Preview.ON
             }
         }
@@ -1603,11 +1614,11 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         if (learned != null && learned in PROBE_PATHS && !learned.startsWith("5720/")) return openVia(learned)
         openedWith = null
         var action = prefs.previewAction
-        var r = request("5720", action, byteArrayOf(1), 4_000)
+        var r = request("5720", action, openData(), 4_000)
         if (r?.errCode in setOf(3, 4, 6)) {
             action = if (action == Xk.ACTION_EXECUTE) Xk.ACTION_WRITE else Xk.ACTION_EXECUTE
             addLog("Live view: trying action $action")
-            r = request("5720", action, byteArrayOf(1), 4_000)
+            r = request("5720", action, openData(), 4_000)
         }
         val code = r?.errCode
         preview = when (code) {
@@ -1676,6 +1687,121 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
             Preview.BUSY -> "The glasses are busy (the mic or a call is using them). Stop that, then try again."
             Preview.UNSUPPORTED -> "These glasses didn't accept the live view command."
             else -> "The glasses said no (${Xk.errorText(code ?: 1)})."
+        }
+    }
+
+    // ---------------- higher quality probe (3.6) ----------------
+
+    /** Counts pictures, bytes and the SPS size while "Try higher quality" listens to one setting (reader thread). */
+    @Volatile private var qualityMeter: VideoQuality.Meter? = null
+    /** True while "Try higher quality" runs. */
+    @Volatile var qualityProbing = false; private set
+
+    /** What [runQualityProbe] found: every setting's result, the best one (or null) and one sentence. */
+    data class QualityProbe(val standard: VideoQuality.Result?, val results: List<VideoQuality.Result>, val best: VideoQuality.Result?,
+                            val summary: String, val complete: Boolean)
+
+    /**
+     * 3.6 "Try higher quality", only when the person asks. With the live view closed, opens `5720` (the
+     * saved action) with [VideoQuality.STANDARD] and then each of [VideoQuality.CANDIDATES], listens
+     * [VideoQuality.LISTEN_MS] to each, reads the SPS size, pictures a second and kilobits a second,
+     * and always closes the same node and action with `[00]`, waiting 1.5 s before the next open. 2410
+     * and 2420 hold the translation languages and are never written. Nothing is reopened here: the
+     * Live view screen opens the standard (or chosen) setting afterwards. [onLine] and [done] run on
+     * the main thread.
+     */
+    fun runQualityProbe(onLine: ((String) -> Unit)?, done: (QualityProbe) -> Unit) {
+        if (state != State.READY || recording || capturing || micStreaming || !busyFlag.compareAndSet(false, true)) {
+            val why = when {
+                state == State.IDLE || state == State.CONNECTING -> "Connect the glasses first."
+                recording -> "The glasses are recording video. Stop that first."
+                micStreaming -> "The glasses' mic is in use. Stop the voice question first."
+                else -> "The glasses are busy. Try again in a moment."
+            }
+            main.post { done(QualityProbe(null, emptyList(), null, why, complete = false)) }
+            return
+        }
+        probing = true
+        qualityProbing = true
+        keepPreview = false
+        setBusy("Trying higher quality…")
+        io.execute {
+            fun say(s: String) {
+                addLog("Quality: $s")
+                onLine?.let { cb -> main.post { cb(s) } }
+            }
+            var standard: VideoQuality.Result? = null
+            val results = mutableListOf<VideoQuality.Result>()
+            var complete = false
+            val action = prefs.previewAction
+            try {
+                if (preview != Preview.OFF) {
+                    closePreviewNow()
+                    Thread.sleep(LIVE_DEBOUNCE_MS)
+                }
+                say("Glasses ${model ?: "?"}, firmware ${firmware ?: "?"}; open 5720/$action with each setting for " +
+                    "${VideoQuality.LISTEN_MS / 1000} s, then close [00]. 2410/2420 (languages) are not written.")
+                for (data in listOf(VideoQuality.STANDARD) + VideoQuality.CANDIDATES) {
+                    if (link == null) throw LinkException("Lost the connection to the glasses.")
+                    link?.live?.reset()
+                    val meter = VideoQuality.Meter()
+                    preview = Preview.OPENING
+                    changed()
+                    var r: Xk.Frame? = null
+                    var answered = false
+                    val t0: Long
+                    try {
+                        qualityMeter = meter
+                        r = request("5720", action, data, 3_000)
+                        answered = r != null
+                        t0 = SystemClock.elapsedRealtime()
+                        val code = r?.errCode
+                        if (answered && (code == null || code == 0)) {
+                            val end = t0 + VideoQuality.LISTEN_MS
+                            while (SystemClock.elapsedRealtime() < end && link != null) Thread.sleep(50)
+                        }
+                    } finally {
+                        qualityMeter = null
+                        // Always back to a known state: the same node and action, data [00].
+                        if (link != null) {
+                            val c = runCatching { request("5720", action, VideoQuality.CLOSE, 2_000) }.getOrNull()
+                            if (c == null) say("  close [00] for [${VideoQuality.hex(data)}]: no answer")
+                        }
+                        preview = Preview.OFF
+                        liveDebounce.closedNow(SystemClock.elapsedRealtime())
+                        changed()
+                    }
+                    val listened = if (answered && (r?.errCode ?: 0) == 0) VideoQuality.LISTEN_MS else 0L
+                    val res = meter.result(data, r?.errCode, answered, listened)
+                    if (data.contentEquals(VideoQuality.STANDARD)) standard = res else results += res
+                    say(VideoQuality.line(res, "5720", action))
+                    Thread.sleep(LIVE_DEBOUNCE_MS)
+                }
+                complete = true
+            } catch (e: Exception) {
+                say("Stopped early: ${e.message}")
+            } finally {
+                qualityMeter = null
+                preview = Preview.OFF
+                openedWith = null
+                qualityProbing = false
+                probing = false
+                busyFlag.set(false)
+                setReady()
+            }
+            val best = if (complete) VideoQuality.best(standard, results) else null
+            val summary = if (complete) VideoQuality.summary(standard, results)
+                else "The test didn't finish, so nothing was changed. The live view is closed; open it again."
+            say(summary)
+            if (complete) {
+                prefs.liveQualityData = best?.data
+                prefs.liveQualitySize = best?.size
+                if (best == null) prefs.liveQualityHigh = false
+                prefs.liveQualityReport = summary
+                prefs.liveQualityAt = System.currentTimeMillis()
+            }
+            val out = QualityProbe(standard, results.toList(), best, summary, complete)
+            main.post { done(out) }
         }
     }
 
@@ -1907,7 +2033,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         val via = openedWith
         val r = runCatching {
             if (via != null) request(probeNode(via), probeAction(via), byteArrayOf(1), 4_000)
-            else request("5720", prefs.previewAction, byteArrayOf(1), 4_000)
+            else request("5720", prefs.previewAction, openData(), 4_000)
         }.getOrNull()
         val code = r?.errCode
         if ((code == null || code == 0) && keepPreview) {
@@ -2065,7 +2191,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         log.forEach { appendLine(it) }
     }
 
-    /** "App 3.5.0 (versionCode 8)", the second line of every shared log. */
+    /** "App 3.6.0 (versionCode 9)", the second line of every shared log. */
     private fun appVersionLine(): String {
         val pi = runCatching { app.packageManager.getPackageInfo(app.packageName, 0) }.getOrNull()
         return "App ${pi?.versionName ?: "?"} (versionCode ${pi?.longVersionCode ?: "?"})"

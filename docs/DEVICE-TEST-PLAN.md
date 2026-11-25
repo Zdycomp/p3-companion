@@ -67,3 +67,23 @@ something looks wrong on screen. The report never contains your glasses key or f
     lines and "Done."; share the report once even if everything works.
 
 When everything passes, send "all 15 passed" plus one Diagnostics report from the end of the session.
+
+## 3.6 additions
+
+16. **Live view picture.** Open Live view. *Expect:* the frame has the picture's shape (no black bars),
+    the chip reads "● Live · ~N ms · 320×240 · 30 fps · … kbps". Pinch to zoom, drag, double-tap to reset;
+    Rotate 90°; Fit/Fill; the full-screen button turns the phone sideways with only the picture; a tap
+    shows the controls and they hide after 3 s; Back leaves full screen.
+17. **Snapshot and recording.** Save a snapshot (toast says "320×240", or "640×480" with 2× on). Turn on
+    "Record with the phone's mic", record 10 s while talking. *Expect:* the MP4 in Movies › album plays with
+    your voice. Turn the phone during a recording: it keeps recording.
+18. **Bluetooth drop in live view.** Turn the glasses off for 10 s while on Live view, then on. *Expect:*
+    "Bluetooth dropped. Reconnecting…", then the video comes back by itself.
+19. **Try higher quality.** Live view > Picture > Try higher quality (or Diagnostics). *Expect:* under a
+    minute, then either a Quality choice (Standard / High W×H) or "The glasses send 320×240 only".
+    Share the test's log from Diagnostics either way. Live view must open normally afterwards.
+20. **Conversation translate.** Assistant > Translate > Start Conversation translate (or say "translate
+    conversation"). Speak 5 phrases with pauses. *Expect:* grey words while speaking, then each entry with
+    time, original, translation and language, spoken aloud. Turn on Two-way and answer in the other
+    language. Say "stop translating". Open the history button: the session is there; tap a phrase to hear
+    it, Read all, Share, Delete. Without an AI key the words are still logged.

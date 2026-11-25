@@ -2,40 +2,36 @@ package com.zdycomp.p3companion
 
 /** What's new in this version, shown once after an update and on the About screen. */
 object WhatsNew {
-    const val VERSION = "3.5.0"
+    const val VERSION = "3.6.0"
 
     val headlines = listOf(
-        "Voice questions: the speech service now records the mic itself, so the phone's mic is heard again",
-        "If one speech service hears nothing, Google's network recognizer listens once more, and the one that works is remembered",
-        "The glasses' mic through call audio is only used when the link really opens and isn't silent",
-        "New: the glasses' own mic over the data link, decoded on the phone, no call audio needed",
-        "Test voice tries every mic, says \"hello glasses\" with each, and voice questions use the one that works",
-        "The Assistant screen shows which mic is in use",
-        "Live view no longer closes and reopens when the screen refreshes or the live view test finds video",
-        "No automatic photos while live view is opening or on",
-        "Broken live pictures are logged less often and the picture waits for the next key frame",
+        "New: Conversation translate keeps listening, translates every phrase, shows it with the time and saves the log",
+        "Hear any phrase again, read a whole conversation aloud, share it as text, or delete it",
+        "Two-way mode, auto-detect, speak each translation through the glasses, and keep going in the background",
+        "Live view: the picture has its exact shape, fit or fill, rotate, pinch to zoom and full screen",
+        "Live view shows \"Live\" with the delay in milliseconds and drops late pictures instead of lagging",
+        "Snapshots are saved at the glasses' own size (or 2× and sharpened), recordings can have the phone's mic",
+        "Live view opens again by itself after Bluetooth drops, if you're still on the screen",
+        "\"Try higher quality\" tests whether the glasses send a bigger picture (only when you ask)",
     )
 
     val details = listOf(
-        "Voice" to listOf(
-            "In 3.4 the app recorded the mic itself and handed the sound to the speech service. Google's on-phone recognizer heard nothing in it, even from the phone's mic. Now the speech service opens the mic itself.",
-            "If a speech service listens but understands nothing, the next one (usually Google's network recognizer) listens once more. A service only counts as working when it gives words; one that said \"no match\" while another understood is tried last from then on.",
-            "The glasses' call audio counts as ready only when the phone says the link is up (3.4 also went on after 1.5 seconds with no signal, which recorded silence). Two ways of opening it are tried, 2 seconds each, and every step is in the connection log.",
-            "Before a question goes through the glasses' call audio, 0.4 seconds are measured; a silent mic is skipped and the next mic is used.",
-            "The glasses can also send their mic over the data link (5750, Opus). The app turns it on, decodes it, and feeds the speech service 16 kHz sound, ending 1 second after you stop talking. A speech service that won't take it is remembered and another mic is used.",
-            "The order is: the mic Test voice found working, then the others, and the phone's mic last.",
-        ),
-        "Test voice" to listOf(
-            "Diagnostics › Test voice records 3 seconds from the phone's mic, the glasses' call audio and the glasses' data-link mic, and shows each level in dBFS.",
-            "With each mic it asks you to say \"hello glasses\" and shows what was heard, or the error, and which speech service listened.",
-            "It ends with one line saying what works, and voice questions start with that mic from then on.",
+        "Conversation translate" to listOf(
+            "Open it from the Assistant tab (Translate) or say \"translate conversation\" or \"start translating\". It uses the mic that works from 3.5.",
+            "Each phrase shows in grey while you speak, then the time, what was said, the translation and its language. Say \"stop\" or \"stop translating\" to end.",
+            "Two-way: English is translated into Spanish and Spanish into English, by the language the AI hears; after each phrase it listens for the other person. Auto-detect lets the AI work out the language.",
+            "Each translation can be spoken in its own language, through the glasses when they're connected; listening pauses while it speaks.",
+            "Every session is saved on the phone (never with an API key). Open one to read it, tap a phrase to hear it again, Read all, Share or Delete.",
+            "Without an AI key the words are still logged, and the screen shows how to add one.",
+            "Leaving the screen stops it, unless \"Keep translating in the background\" is on: a notification with Stop shows then.",
         ),
         "Live view" to listOf(
-            "A close waits 1.5 seconds: if the screen opens again in that time (a refresh, coming back to the app), the video simply keeps running.",
-            "When the live view test finds video on the Live view screen, it stays open instead of closing and opening again.",
-            "While live view is opening or on, the app only takes a photo you asked for. When the glasses' own button takes one, the log says so, the photo is saved, and live view opens again.",
-            "A broken picture is still skipped; the log notes it three times, then once every 10 seconds with a count, and the picture waits for the next key frame (at most 2 seconds).",
-            "When the mic starts, the live view on the glasses is now really closed.",
+            "The frame takes the video's exact shape. Fit or Fill, Rotate in quarter turns, pinch to zoom, drag to look around, double-tap to zoom or reset.",
+            "Full screen turns the phone sideways and hides everything but the picture; the controls come back with a tap and hide after 3 seconds.",
+            "Pictures are shown the moment they're decoded and a late one is skipped, so the picture doesn't fall behind. The stats show \"Live\" and the delay from the glasses to the screen.",
+            "Snapshots come from the decoded picture at the glasses' own size, turned like the screen, optionally 2× larger and sharpened. Recordings are at the native size and can include the phone's mic.",
+            "If Bluetooth drops while you watch, the screen says so and opens live view again when the glasses are back.",
+            "Try higher quality (Live view and Diagnostics) opens the live view with 5 other settings for 3 seconds each and closes it again after each. If one gives a bigger picture at 15 fps or more, you can pick it under Quality; otherwise it says the glasses send 320×240 only.",
         ),
     )
 

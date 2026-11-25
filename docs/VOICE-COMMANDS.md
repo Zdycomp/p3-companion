@@ -58,7 +58,7 @@ There is **no voice-command layer** in the app today. Every Chat utterance goes 
 
 ---
 
-## 2. The commands (47 + help)
+## 2. The commands (49 + help)
 
 Legend: **Net** = needs the internet (AI call). **Confirm** = needs a spoken "yes" first (section 3.6). Spoken replies are deliberately short. `{x}` is a slot.
 
@@ -118,14 +118,16 @@ None of these commands sends a message, places a call, shares, emails or posts. 
 
 In `Mode.TRANSLATE` only a stop word is a command, so "scan this" said while translating is translated, not run.
 
-### 2.5 Translation (5)
+### 2.5 Translation (7)
 
 | id | Example phrasings | Action | Speaks back | Net | Confirm |
 |---|---|---|---|---|---|
-| `tr.start` | "translate", "start translating", "translation mode" | `screen.section = SECTION_TRANSLATE; a.show(TAB_ASSISTANT)`. After this turn ends: `main.post { assistant.translate() }`. | "Go ahead, I'm listening in {Spanish}." | recognizer only | no |
+| `tr.start` | "translate", "translation mode", "interpreter mode" | `screen.section = SECTION_TRANSLATE; a.show(TAB_ASSISTANT)`. After this turn ends: `main.post { assistant.translate() }`. | "Go ahead, I'm listening in {Spanish}." | recognizer only | no |
 | `tr.set_pair` | "translate from {Spanish} to {English}", "set translation to {French}", "translate {German} into {English}" | `prefs.translateFrom` / `translateTo` = `Languages.byName(slot).name`. A single language means "to"; "from" stays as it was. | "Translating {Spanish} to {English}." | no | no |
 | `tr.swap` | "swap languages", "switch languages", "reverse the translation" | Swap `translateFrom` and `translateTo` | "Now {English} to {Spanish}." | no | no |
 | `tr.say_in` | "how do you say {good morning} in {Japanese}", "say {thank you} in {French}", "translate {where is the train} to {Spanish}" | One-shot `AiClient.ask(provider, key, model, AiWire.translationPrompt(reply, lang), [AiTurn(true, phrase)])`, then speak with the **target** language tag. Not added to chat history. | The translation, in the target voice | **yes** | no |
+| `tr.conversation` (3.6) | "translate conversation", "start translating", "translate this conversation", "conversation mode", "translate everything they say" | `a.showConversation()`, then `assistant.startConversation()` (mic permission first). Listens continuously; every phrase is translated, logged (`TranslationStore`, JSON lines in app storage) and spoken if that option is on. While it listens only a stop word or "stop translating" is a command (`VoiceCommands.isConversationStop`). | "Translating {English} into {Spanish}. Say stop to end." / "Translating both ways, …" | **yes** | no |
+| `tr.conversation_stop` (3.6) | "stop translating", "end the translation", "end conversation" | `assistant.stopConversation()` (the log is kept) | "Stopped translating. The log is saved." / "Conversation translate isn't running." | no | no |
 | `tr.reply_language` | "answer in {Spanish}", "reply in {French}", "talk to me in {German}" | `prefs.replyLanguage = Languages.byName(slot).name` | "{Spanish} it is." (spoken in the new language's voice) | no | no |
 
 ### 2.6 Phone utilities (7)

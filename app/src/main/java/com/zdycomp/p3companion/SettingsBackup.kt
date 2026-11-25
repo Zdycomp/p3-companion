@@ -27,7 +27,8 @@ object SettingsBackup {
         "save_button_photos" to Kind.BOOL, "show_log" to Kind.BOOL,
         // Capture
         "shutter_sound" to Kind.BOOL, "vibrate_photo" to Kind.BOOL, "open_after" to Kind.BOOL, "self_timer" to Kind.INT,
-        "live_screen_on" to Kind.BOOL,
+        "live_screen_on" to Kind.BOOL, "live_fill" to Kind.BOOL, "live_rotation" to Kind.INT, "live_sharpen" to Kind.BOOL,
+        "live_upscale" to Kind.BOOL, "live_record_audio" to Kind.BOOL,
         // Gallery
         "gallery_sort" to Kind.STRING, "gallery_cols" to Kind.INT,
         // Assistant (never the keys)
@@ -35,6 +36,8 @@ object SettingsBackup {
         "speak_photo" to Kind.BOOL, "speak_chat" to Kind.BOOL, "tr_from" to Kind.STRING, "tr_to" to Kind.STRING,
         "tts_rate" to Kind.FLOAT, "tts_pitch" to Kind.FLOAT, "history_limit" to Kind.INT, "photo_presets" to Kind.STRING,
         "speak_through" to Kind.STRING, "voice_commands" to Kind.BOOL, "keep_snapshots" to Kind.BOOL,
+        "convo_two_way" to Kind.BOOL, "convo_auto" to Kind.BOOL, "convo_speak" to Kind.BOOL, "convo_original" to Kind.BOOL,
+        "convo_background" to Kind.BOOL,
         // SupRevolt (never the token or the server address)
         "sr_scans" to Kind.STRING,
         // Privacy
@@ -45,7 +48,7 @@ object SettingsBackup {
     private val NEVER = listOf(
         "user_key", "ai_key_", "drive_uri", "drive_label", "ble_addr", "ble_name", "link_method",
         "user_stopped", "preview_action", "asked_", "last_import", "last_seen_version",
-        "live_path", "live_probe_", "recognizer_service", "recognizer_", "sr_token", "sr_url", "sr_http_ok",
+        "live_path", "live_probe_", "live_quality_", "live_hq", "recognizer_service", "recognizer_", "sr_token", "sr_url", "sr_http_ok",
     )
 
     fun isSecret(key: String): Boolean = NEVER.any { key == it || (it.endsWith("_") && key.startsWith(it)) }

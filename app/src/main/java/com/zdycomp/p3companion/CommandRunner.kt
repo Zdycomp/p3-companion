@@ -169,6 +169,15 @@ class CommandRunner(private val a: MainActivity) {
             a.openAssistant(AssistantScreen.SECTION_TRANSLATE)
             main.post { if (assistant.phase == Assistant.Phase.IDLE) assistant.translate() }
         })
+        // 3.6: Conversation translate keeps listening and logs every phrase until "stop".
+        "tr.conversation" -> if (assistant.convoOn) Reply("Already translating the conversation.", after = { a.showConversation() })
+            else Reply(
+                (if (prefs.convoTwoWay) "Translating both ways, ${prefs.translateFrom} and ${prefs.translateTo}." else "Translating ${if (prefs.convoAutoDetect) "any language" else prefs.translateFrom} into ${prefs.translateTo}.") +
+                    " Say stop to end.",
+                after = { a.showConversation(); main.post { a.withMic { assistant.startConversation() } } },
+            )
+        "tr.conversation_stop" -> if (!assistant.convoOn) Reply("Conversation translate isn't running.")
+            else { assistant.stopConversation(); Reply("Stopped translating. The log is saved.") }
         "tr.set_pair" -> {
             m.slots["from"]?.let { prefs.translateFrom = it }
             m.slots["to"]?.let { prefs.translateTo = it }

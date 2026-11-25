@@ -3,9 +3,11 @@ package com.zdycomp.p3companion
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.pm.ShortcutManager
 import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.drawable.RippleDrawable
 import android.net.Uri
@@ -78,7 +80,7 @@ class MainActivity : Activity() {
 
         screens = listOf(
             ImportScreen(this), GalleryScreen(this), GlassesScreen(this), AssistantScreen(this), SettingsScreen(this),
-            DiagnosticsScreen(this), LiveViewScreen(this), AboutScreen(this), SupRevoltScreen(this),
+            DiagnosticsScreen(this), LiveViewScreen(this), AboutScreen(this), SupRevoltScreen(this), ConversationScreen(this),
         )
 
         overlay = FrameLayout(this).apply { setBackgroundColor(ui.s.surface) }
@@ -98,7 +100,7 @@ class MainActivity : Activity() {
             val typing = insets.isVisible(WindowInsets.Type.ime())
             shell.setPadding(bars.left, bars.top, bars.right, if (typing) ime.bottom else 0)
             navBar.setPadding(0, 0, 0, bars.bottom)
-            navBar.visibility = if (typing) View.GONE else View.VISIBLE
+            navBar.visibility = if (typing || liveFullscreen) View.GONE else View.VISIBLE
             bottomInset = if (typing) ime.bottom else bars.bottom
             WindowInsets.CONSUMED
         }
@@ -147,7 +149,7 @@ class MainActivity : Activity() {
     /** Home-screen shortcuts and the tile. Returns true when [intent] was one of them. */
     private fun handleAction(intent: Intent?): Boolean {
         val action = intent?.action ?: return false
-        if (action !in listOf(ACTION_PHOTO, ACTION_LIVE, ACTION_VOICE, ACTION_GLASSES)) return false
+        if (action !in listOf(ACTION_PHOTO, ACTION_LIVE, ACTION_VOICE, ACTION_GLASSES, ACTION_CONVERSATION)) return false
         setIntent(Intent(this, MainActivity::class.java))
         if (lockCover != null || AppLock.shouldLock(this, prefs)) { pendingAction = action; return true }
         runAction(action)
@@ -159,6 +161,7 @@ class MainActivity : Activity() {
         if (id != null) runCatching { getSystemService(ShortcutManager::class.java)?.reportShortcutUsed(id) }
         when (action) {
             ACTION_GLASSES -> show(TAB_GLASSES)
+            ACTION_CONVERSATION -> showConversation()
             ACTION_PHOTO -> { show(TAB_GLASSES); whenConnected("take the photo") { glasses.takePhoto() } }
             ACTION_LIVE -> { show(TAB_GLASSES); whenConnected("open live view") { showLiveView() } }
             ACTION_VOICE -> {
@@ -388,6 +391,10 @@ class MainActivity : Activity() {
     private fun show(index: Int, animate: Boolean) {
         val switching = index != current
         if (switching && current >= 0) assistant.clearPendingConfirm()
+        // 3.6: full screen belongs to Live view only.
+        if (index != SCREEN_LIVE && liveFullscreen) setLiveFullscreen(false)
+        // 3.6: leaving Conversation translate stops listening, unless it may keep going in the background.
+        if (switching && current == SCREEN_CONVERSATION && assistant.convoOn && !prefs.convoBackground) assistant.stopConversation()
         val drillIn = switching && index >= TAB_COUNT && current < TAB_COUNT
         val drillOut = switching && current >= TAB_COUNT && index < TAB_COUNT
         if (current in screens.indices) screens[current].onHidden()
@@ -431,6 +438,38 @@ class MainActivity : Activity() {
     fun showLiveView() = show(SCREEN_LIVE)
     fun showAbout() = show(SCREEN_ABOUT)
     fun showSupRevolt() = show(SCREEN_SUPREVOLT)
+    fun showConversation() = show(SCREEN_CONVERSATION)
+
+    /** 3.6: Live view's full screen: no status, navigation or app bars, landscape. */
+    var liveFullscreen = false
+        private set
+
+    fun setLiveFullscreen(on: Boolean) {
+        if (liveFullscreen == on) return
+        liveFullscreen = on
+        val c = window.decorView.windowInsetsController
+        if (on) {
+            c?.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            c?.hide(WindowInsets.Type.systemBars())
+            navBar.visibility = View.GONE
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        } else {
+            c?.show(WindowInsets.Type.systemBars())
+            navBar.visibility = View.VISIBLE
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+        overlay.requestApplyInsets()
+    }
+
+    /**
+     * 3.6: turning the phone no longer recreates the activity (the manifest handles orientation and
+     * size), so Live view keeps its video and a recording; other screens are simply rebuilt.
+     */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val lv = screens.getOrNull(current) as? LiveViewScreen
+        if (lv != null) lv.onConfigChanged() else refresh()
+    }
 
     /** Scans one gallery photo or file with SupRevolt and shows the result screen. */
     fun sendToSupRevolt(uri: Uri) {
@@ -490,7 +529,10 @@ class MainActivity : Activity() {
         // The microphone can't be used from the background, so end any voice turn.
         // (Not while the system speech dialog is open for this voice turn: it hands back the words.)
         if (speechDelivery == null) {
-            if (assistant.phase != Assistant.Phase.IDLE) assistant.stop()
+            // 3.6: Conversation translate may keep going with the app closed (a notification shows it).
+            val keepConvo = assistant.convoOn && prefs.convoBackground && !isChangingConfigurations
+            if (assistant.convoOn && !keepConvo && !isChangingConfigurations) assistant.stopConversation()
+            if (assistant.phase != Assistant.Phase.IDLE && !keepConvo) assistant.stop()
             assistant.commands?.release()
             assistant.commands = null
             assistant.speech.activityFallback = null
@@ -506,6 +548,11 @@ class MainActivity : Activity() {
 
     private fun onGlassesTapped() {
         if (!prefs.tapToTalk || lockCover != null) return
+        // 3.6: during Conversation translate a tap pauses or resumes listening.
+        if (assistant.convoOn) {
+            if (assistant.convoPaused) assistant.resumeConversation() else assistant.pauseConversation()
+            return
+        }
         // A tap while a voice memo records stops the memo instead of starting a question.
         if (recorder.recording) { recorder.stop(); toast("Memo saved."); return }
         // 3.3: no voice question during the live view test, and none in the first 3 s of a new link
@@ -1068,11 +1115,13 @@ class MainActivity : Activity() {
         const val SCREEN_LIVE = 6
         const val SCREEN_ABOUT = 7
         const val SCREEN_SUPREVOLT = 8
+        const val SCREEN_CONVERSATION = 9
 
         const val ACTION_PHOTO = "com.zdycomp.p3companion.action.PHOTO"
         const val ACTION_LIVE = "com.zdycomp.p3companion.action.LIVE"
         const val ACTION_VOICE = "com.zdycomp.p3companion.action.VOICE"
         const val ACTION_GLASSES = "com.zdycomp.p3companion.action.GLASSES"
+        const val ACTION_CONVERSATION = "com.zdycomp.p3companion.action.CONVERSATION"
 
         private val TAB_ICONS = intArrayOf(
             R.drawable.ic_download, R.drawable.ic_photo_library, R.drawable.ic_glasses_tab,

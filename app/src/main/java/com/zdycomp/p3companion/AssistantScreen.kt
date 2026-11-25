@@ -125,6 +125,18 @@ class AssistantScreen(private val a: MainActivity) : Screen {
         langs.addView(swap, LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)).apply { marginStart = ui.dp(8); marginEnd = ui.dp(8) })
         langs.addView(to, LinearLayout.LayoutParams(0, Ui.WRAP, 1f))
         card.addView(langs)
+        // 3.6: the continuous, logged version.
+        val convo = ui.tonalCard().apply { (layoutParams as? LinearLayout.LayoutParams)?.topMargin = ui.dp(12) }
+        convo.addView(ui.text("Conversation translate", Type.TITLE_SMALL))
+        convo.addView(ui.body(
+            if (a.assistant.convoOn) "Running now. Open it to see the log." else
+                "Keeps listening: every phrase is translated, shown with the time, saved, and can be read again or spoken back. Two-way and auto-detect too.",
+            muted = true, sizeSp = 13f,
+        ).apply { setPadding(0, ui.dp(4), 0, ui.dp(4)) })
+        convo.addView(ui.button(if (a.assistant.convoOn) "Open Conversation translate" else "Start Conversation translate", Btn.TONAL, R.drawable.ic_translate, full = false) {
+            a.showConversation()
+        })
+        card.addView(convo, LinearLayout.LayoutParams(Ui.MATCH, Ui.WRAP).apply { topMargin = ui.dp(12) })
         liveBox = ui.column().also { card.addView(it) }
         card.addView(ui.button("Clear translations", Btn.TEXT, R.drawable.ic_delete_sweep, full = false) { a.assistant.clearTranslations() })
     }

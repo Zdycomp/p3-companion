@@ -89,7 +89,11 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
         tests.addView(ui.buttonRow(
             ui.button("Test live view", Btn.TONAL, R.drawable.ic_videocam, full = false) { liveTest() }.apply { isEnabled = !running },
             ui.button("Test voice", Btn.TONAL, R.drawable.ic_mic, full = false) { a.withMic { voiceTest() } }.apply { isEnabled = !running },
+            ui.button("Try higher quality", Btn.OUTLINED, R.drawable.ic_auto_awesome, full = false) { qualityTest() }.apply { isEnabled = !running },
         ).apply { setPadding(0, ui.dp(8), 0, 0) })
+        a.prefs.liveQualityReport?.let { sum ->
+            tests.addView(ui.text("Last quality try: $sum", Type.BODY_SMALL, ui.s.onSurfaceVariant).apply { setPadding(0, ui.dp(6), 0, 0) })
+        }
         if (testLog != null) {
             tests.addView(ui.button("Share this test's log", Btn.TEXT, R.drawable.ic_share, full = false) {
                 a.shareText("P3 Companion test log", redact(testLog ?: ""))
@@ -261,6 +265,47 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
             running = false
             if (visible) a.refresh()
         } }
+    }
+
+    /**
+     * 3.6 "Try higher quality": opens live view with each candidate open data for 3 s (standard first),
+     * logs the size, pictures a second and kilobits a second of each, and always closes with [00].
+     */
+    private fun qualityTest() {
+        if (running) return
+        val g = a.glasses
+        if (g.state != XkGlasses.State.READY) { a.toast("Connect the glasses first (they must not be busy)."); return }
+        running = true
+        liveReport = null
+        testLog = null
+        val sb = StringBuilder()
+        fun line(s: String) {
+            sb.appendLine(s)
+            val text = sb.toString()
+            liveReport = text
+            if (visible) renderResults(text)
+        }
+        a.refresh()
+        line("Try higher quality")
+        line("INFO  under a minute; live view opens and closes once per setting, 3 s each")
+        g.runQualityProbe(onLine = { l -> line("INFO  $l") }) { res ->
+            line(when {
+                res.best != null -> "PASS  ${res.summary}"
+                res.complete -> "INFO  ${res.summary}"
+                else -> "FAIL  ${res.summary}"
+            })
+            line("Done.")
+            testLog = buildString {
+                appendLine("P3 Companion quality test")
+                appendLine("Phone: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE}, app ${a.appVersion()}")
+                appendLine("Glasses: ${g.model ?: "?"}, firmware ${g.firmware ?: "?"}")
+                (listOfNotNull(res.standard) + res.results).forEach { appendLine(VideoQuality.line(it, "5720", a.prefs.previewAction)) }
+                appendLine(res.summary)
+            }
+            report = redact(sb.toString())
+            running = false
+            if (visible) a.refresh()
+        }
     }
 
     /**

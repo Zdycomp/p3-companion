@@ -145,6 +145,57 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
         get() = sp.getString("live_ack_report", null)
         set(v) = sp.edit().putString("live_ack_report", v).apply()
 
+    // ---------- Live view picture (3.6) ----------
+
+    /** Fill the frame (crop) instead of fitting the whole picture with bars. */
+    var liveFill: Boolean
+        get() = sp.getBoolean("live_fill", false)
+        set(v) = sp.edit().putBoolean("live_fill", v).apply()
+
+    /** Picture rotation in quarter turns: 0, 90, 180 or 270. */
+    var liveRotation: Int
+        get() = ViewMath.normRotation(sp.getInt("live_rotation", 0))
+        set(v) = sp.edit().putInt("live_rotation", ViewMath.normRotation(v)).apply()
+
+    /** Sharpen snapshots (a light unsharp mask on the saved copy; the live picture is never touched). */
+    var liveSharpen: Boolean
+        get() = sp.getBoolean("live_sharpen", false)
+        set(v) = sp.edit().putBoolean("live_sharpen", v).apply()
+
+    /** Save snapshots at twice the native size (smooth scaling). */
+    var liveUpscale: Boolean
+        get() = sp.getBoolean("live_upscale", false)
+        set(v) = sp.edit().putBoolean("live_upscale", v).apply()
+
+    /** Recordings from live view include the phone's mic. */
+    var liveRecordAudio: Boolean
+        get() = sp.getBoolean("live_record_audio", false)
+        set(v) = sp.edit().putBoolean("live_record_audio", v).apply()
+
+    /** Quality: High (the open data the probe found, [liveQualityData]) instead of Standard. */
+    var liveQualityHigh: Boolean
+        get() = sp.getBoolean("live_hq", false) && liveQualityData != null
+        set(v) = sp.edit().putBoolean("live_hq", v).apply()
+
+    /** Open data that gave a bigger picture in "Try higher quality" ("01 02"…), or null when none did. */
+    var liveQualityData: ByteArray?
+        get() = VideoQuality.parseHex(sp.getString("live_quality_data", null))
+        set(v) = sp.edit().putString("live_quality_data", v?.let { VideoQuality.hex(it) }).apply()
+
+    /** The picture size [liveQualityData] gave ("640x480"). */
+    var liveQualitySize: Pair<Int, Int>?
+        get() = VideoQuality.parseSize(sp.getString("live_quality_size", null))
+        set(v) = sp.edit().putString("live_quality_size", VideoQuality.formatSize(v)).apply()
+
+    /** The last "Try higher quality" result in one sentence, and when it ran. */
+    var liveQualityReport: String?
+        get() = sp.getString("live_quality_report", null)
+        set(v) = sp.edit().putString("live_quality_report", v).apply()
+
+    var liveQualityAt: Long
+        get() = sp.getLong("live_quality_at", 0L)
+        set(v) = sp.edit().putLong("live_quality_at", v).apply()
+
     /** Snapshot view: keep every snapshot in the gallery (off deletes each one after it's shown). */
     var keepSnapshots: Boolean
         get() = sp.getBoolean("keep_snapshots", false)
@@ -250,6 +301,33 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
         get() = sp.getString("tr_to", null)?.let { Languages.byName(it).name } ?: "Spanish"
         set(v) = sp.edit().putString("tr_to", Languages.byName(v).name).apply()
 
+
+    // ---------- Conversation translate (3.6) ----------
+
+    /** Two-way: speech in one language is translated into the other, both ways. */
+    var convoTwoWay: Boolean
+        get() = sp.getBoolean("convo_two_way", false)
+        set(v) = sp.edit().putBoolean("convo_two_way", v).apply()
+
+    /** One-way with the source language worked out by the AI ("auto-detect"). */
+    var convoAutoDetect: Boolean
+        get() = sp.getBoolean("convo_auto", false)
+        set(v) = sp.edit().putBoolean("convo_auto", v).apply()
+
+    /** Speak each translation aloud as it arrives. */
+    var convoSpeak: Boolean
+        get() = sp.getBoolean("convo_speak", true)
+        set(v) = sp.edit().putBoolean("convo_speak", v).apply()
+
+    /** Show the original words above each translation (off: the translation only). */
+    var convoShowOriginal: Boolean
+        get() = sp.getBoolean("convo_original", true)
+        set(v) = sp.edit().putBoolean("convo_original", v).apply()
+
+    /** Keep translating with the screen closed (a notification with Stop shows meanwhile). */
+    var convoBackground: Boolean
+        get() = sp.getBoolean("convo_background", false)
+        set(v) = sp.edit().putBoolean("convo_background", v).apply()
 
     // ---------- Appearance (2.1) ----------
 
@@ -493,7 +571,7 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
         val keep = sp.all.filterKeys { k ->
             k == "user_key" || k.startsWith("ai_key_") || k == "sr_token" || k == "sr_url" || k == "sr_http_ok" || k == "drive_uri" || k == "drive_label" ||
                 k == "ble_addr" || k == "ble_name" || k == "link_method" || k == "preview_action" ||
-                k == "live_path" || k.startsWith("live_probe_") || k.startsWith("live_ack") || k.startsWith("recognizer_") ||
+                k == "live_path" || k.startsWith("live_probe_") || k.startsWith("live_quality_") || k.startsWith("live_ack") || k.startsWith("recognizer_") ||
                 k.startsWith("asked_") || k == "last_import" || k == "last_seen_version" || k == "user_stopped"
         }
         val e = sp.edit().clear()

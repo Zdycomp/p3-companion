@@ -1,5 +1,57 @@
 # Changelog
 
+## 3.6.0 (versionCode 9)
+
+The owner asked for the best real-world live video and a translation log that can be read or spoken back.
+Live video at 30 fps on head 0x1E (5720 action 3 `[01]`, media ack per fragment), connect, photos, the 3.5 voice
+routes and SupRevolt are unchanged.
+
+**Conversation translate** (`Conversation.kt`, `ConversationScreen.kt`, `Assistant` `Mode.CONVERSATION`)
+- A continuous loop on the 3.5 voice routes (the chosen mic; a conversation keeps the mic that worked and, on the
+  glasses' call audio, keeps the link up between phrases without re-measuring it). Partial results show greyed;
+  each final result is translated with the configured AI. Silence just listens again; three real problems in a row
+  pause it with the reason. Never opens the system speech dialog.
+- Reply format `[Language]` + translation (`ConversationWire`), so every entry has the detected language. One-way,
+  auto-detect, or two-way (`TwoWay`: A→B, B→A, anything else →B; the next phrase is listened for in the other
+  language, and after silence too).
+- Speaks each translation in its target language (`speech.speak`, on the call link when it is held, otherwise
+  media audio: the 3.5 low-latency route). Listening pauses while it speaks so it never translates itself.
+- `TranslationStore`: one app-private JSON-lines file per session (`files/translations/conv-<date>-<n>.jsonl`),
+  appended per phrase on its own thread; listed newest first; read back in order; export as text; delete one
+  (confirm); delete all (confirm). API keys, the SupRevolt token and the glasses key are replaced with `[hidden]`,
+  and key-shaped strings (Gemini, Anthropic, OpenAI, bearer) are too.
+- No AI key: the original words are logged with "Not translated: no AI key" and the setup card is shown.
+- Pause/Resume, Stop, swap languages, "Listening for" chips in two-way, a tap on the glasses pauses or resumes.
+  Leaving the screen or the app stops it unless "Keep translating in the background" is on
+  (`ConversationService`, microphone foreground service, notification with Stop).
+- Voice commands: `tr.conversation` ("translate conversation", "start translating", …; "start translating" moved
+  from `tr.start`) and `tr.conversation_stop` ("stop translating"). `VoiceCommands.isConversationStop`.
+
+**Live view**
+- Picture: frame sized to the SPS aspect ratio (`ViewMath.frameHeight`), Fit/Fill, rotate 90/180/270, pinch zoom
+  (1-5×) with pan clamped to the picture, double-tap zoom/reset; the TextureView transform does the scaling
+  (filtered). Full screen: landscape, system and app bars hidden, controls overlay hidden after 3 s. The activity
+  now handles orientation changes itself (`configChanges`), so turning the phone never tears down the video or a
+  recording; other screens are rebuilt in place.
+- Latency: the decoder queue is 10 pictures (was 30); output is collected every 4 ms while pictures are inside the
+  decoder and only the newest decoded picture is rendered (late ones are released unrendered and counted).
+  "● Live · ~N ms" in the stats (last fragment → render, smoothed); the 5 s fps/kbps line stays.
+- Snapshot: `TextureView.getBitmap(w, h)` at the SPS size (the view transform isn't applied), turned like the
+  screen, optional 2× smooth upscale and unsharp mask (`ViewMath.unsharp`) on the copy only, JPEG 95 with size.
+- Recording: native size as before, plus optional AAC-LC 44.1 kHz mono from the phone's mic (`MicAac`,
+  `AacCsd`), timed on the same clock as the video.
+- Auto-reconnect: on a link drop the screen saves any recording, says "Bluetooth dropped. Reconnecting…", asks
+  for a reconnect itself if auto-reconnect is off, and opens live view again 1 s after the glasses are back.
+- "Try higher quality" (opt-in, Live view and Diagnostics; `XkGlasses.runQualityProbe`, `VideoQuality`): with the
+  preview closed, 5720/<saved action> with `[01]` (baseline), `[01 01]`, `[01 02]`, `[01 03]`, `[02]`, `[03]`, 3 s
+  each, SPS size / fps / kbps logged, always closed with the same node/action `[00]` and 1.5 s apart. 2410/2420
+  (language tags) are never written. A bigger SPS at >= 15 fps becomes Quality "High WxH" (saved; the open then
+  sends that data); otherwise "The glasses send 320×240 only". Live view reopens with the chosen (default
+  Standard) setting afterwards.
+
+**Tests**: 215 JVM tests (31 new: session store, two-way choice and reply format, the new voice commands, SPS
+sizes for probe results and the probe's choice, aspect/zoom/pan math, unsharp mask, AAC config).
+
 ## 3.5.0 (versionCode 8)
 
 From the owner's 3.4.0 log (`docs/LOG-2026-11-25-v340.txt`, moto g 2025, Android 15, E13C-5 fw 1.0.0).

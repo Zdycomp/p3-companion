@@ -156,6 +156,32 @@ class VoiceCommandsTest {
         assertTrue(VoiceCommands.helpText().contains("SupRevolt: \"scan this\""))
     }
 
+    @Test fun conversationTranslateCommands() {
+        listOf(
+            "translate conversation", "Start translating", "start translating the conversation", "translate this conversation",
+            "conversation mode", "hey could you translate the conversation please", "start conversation translation",
+            "interpret the conversation", "translate everything they say", "keep translating",
+        ).forEach { assertEquals(it, "tr.conversation", VoiceCommands.match(it)?.id) }
+        listOf("stop translating", "Stop the translation.", "end conversation", "finish translating").forEach {
+            assertEquals(it, "tr.conversation_stop", VoiceCommands.match(it)?.id)
+        }
+        // The one-sentence translator and the other translation commands are unchanged.
+        assertEquals("tr.start", VoiceCommands.match("translate")?.id)
+        assertEquals("tr.start", VoiceCommands.match("translation mode")?.id)
+        assertEquals("ai.translate_view", VoiceCommands.match("translate this sign")?.id)
+        assertEquals("tr.say_in", VoiceCommands.match("translate good night to French")?.id)
+        assertEquals("ai.stop", VoiceCommands.match("stop")?.id)
+    }
+
+    @Test fun whatEndsAConversationWhileItListens() {
+        assertTrue(VoiceCommands.isConversationStop("stop"))
+        assertTrue(VoiceCommands.isConversationStop("Stop translating."))
+        assertTrue(VoiceCommands.isConversationStop("never mind"))
+        assertFalse(VoiceCommands.isConversationStop("stop by the store on your way home"))
+        assertFalse(VoiceCommands.isConversationStop("translate conversation"))
+        assertFalse(VoiceCommands.isConversationStop("¿dónde está la estación?"))
+    }
+
     @Test fun atLeast34CommandsWithUniqueIds() {
         val ids = VoiceCommands.ids
         assertEquals(ids.size, ids.toSet().size)
