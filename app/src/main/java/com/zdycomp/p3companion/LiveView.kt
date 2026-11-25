@@ -49,6 +49,10 @@ class VideoPipeline(private val ctx: Context, private val album: String) {
     @Volatile private var needKey = true
     @Volatile var lastAuAt = 0L; private set
     @Volatile var received = 0L; private set
+    /** 3.4: Annex-B bytes received, for the kbps on screen. */
+    @Volatile var receivedBytes = 0L; private set
+    /** 3.4: units dropped while waiting for the first picture the decoder can start on. */
+    @Volatile var waitingForKey = 0L; private set
     @Volatile var dropped = 0L; private set
     @Volatile var shown = 0L; private set
     @Volatile var size: Pair<Int, Int> = 320 to 240; private set
@@ -69,6 +73,7 @@ class VideoPipeline(private val ctx: Context, private val album: String) {
     fun offer(au: VideoAu) {
         if (closed) return
         received++
+        receivedBytes += au.annexB.size
         lastAuAt = SystemClock.elapsedRealtime()
         if (queued.get() >= 30) { dropped++; needKey = true } // about 1 s behind: skip to the next key frame
         else {
@@ -100,7 +105,8 @@ class VideoPipeline(private val ctx: Context, private val album: String) {
         val s = surface ?: return
         val sp = sps ?: return
         val pp = pps ?: return
-        if (needKey && !au.key) return
+        // The decoder starts on an IDR, or on an intra picture carrying its own SPS and PPS (3.4).
+        if (needKey && !au.entry) { waitingForKey++; return }
         try {
             val c = codec ?: MediaCodec.createDecoderByType("video/avc").also { c ->
                 val f = MediaFormat.createVideoFormat("video/avc", size.first, size.second).apply {
@@ -210,14 +216,14 @@ class PreviewRecorder(
         }
         au.pps?.let { if (muxer == null) pps = it }
         if (muxer == null) {
-            if (!au.key || sps == null || pps == null) return
+            if (!au.entry || sps == null || pps == null) return
             if (!open()) return
             t0 = au.arrivalNs
         }
         if (!au.picture) return
         val pts = maxOf(lastPts + 1_000, (au.arrivalNs - t0) / 1000) // monotonic, at least 1 ms apart
         val data = au.sample()
-        val bi = MediaCodec.BufferInfo().apply { set(0, data.size, pts, if (au.key) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0) }
+        val bi = MediaCodec.BufferInfo().apply { set(0, data.size, pts, if (au.entry) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0) }
         try {
             muxer!!.writeSampleData(track, ByteBuffer.wrap(data), bi)
             lastPts = pts
@@ -328,6 +334,10 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
     private var flashView: View? = null
     private var modeBox: LinearLayout? = null
     private var probeLine: TextView? = null
+    /** 3.4: rate, size and ack line under the mode chip while video plays. */
+    private var rateLine: TextView? = null
+    /** 3.4: (time, pictures shown, bytes received) once a second, for 5-second averages. */
+    private val rateSamples = ArrayDeque<LongArray>()
     private var snapImage: ImageView? = null
     private var showGrid = false
     private var openedAt = 0L
@@ -579,6 +589,7 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         val p = a.prefs
         box.removeAllViews()
         probeLine = null
+        rateLine = null
         val card = ui.tonalCard()
         when (mode) {
             Mode.VIDEO -> {
@@ -591,6 +602,9 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
                         else "If nothing arrives within 6 seconds the app tests which live view command your glasses answer.",
                     muted = true, sizeSp = 13f,
                 ).apply { setPadding(0, ui.dp(8), 0, 0) })
+                val rl = ui.mono("").apply { setPadding(0, ui.dp(8), 0, 0); maxLines = 3; visibility = View.GONE }
+                rateLine = rl
+                card.addView(rl)
                 card.addView(ui.button("Use snapshot view instead", Btn.TEXT, R.drawable.ic_photo_camera, full = false) { startSnapshots() })
             }
             Mode.TESTING -> {
@@ -780,16 +794,32 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
             return
         }
         val shownNow = p.shown
-        val fps = shownNow - lastShown
         lastShown = shownNow
         val (w, h) = p.size
         val jpegs = jpegShown
         val jfps = jpegs - lastJpegShown
         lastJpegShown = jpegs
+        // 3.4: pictures shown a second and kilobits a second, averaged over the last 5 seconds.
+        val now = SystemClock.elapsedRealtime()
+        rateSamples.addLast(longArrayOf(now, shownNow, p.receivedBytes))
+        while (rateSamples.size > 1 && now - rateSamples.first()[0] > 5_000) rateSamples.removeFirst()
+        val first = rateSamples.first()
+        val span = now - first[0]
+        val fps = if (span > 0) (shownNow - first[1]) * 1000.0 / span else 0.0
+        val kbps = if (span > 0) (p.receivedBytes - first[2]) * 8.0 / span else 0.0
+        val fpsText = if (fps >= 10 || fps == 0.0) "%.0f".format(Locale.US, fps) else "%.1f".format(Locale.US, fps)
         stats?.text = when {
             mode == Mode.TESTING -> "Testing…"
             jpegs > 0 && p.received == 0L -> "Pictures · $jfps fps"
-            else -> "${w}×$h · $fps fps" + if (p.dropped > 0) " · ${p.dropped} dropped" else ""
+            else -> "${w}×$h · $fpsText fps · ${"%.0f".format(Locale.US, kbps)} kbps" + if (p.dropped > 0) " · ${p.dropped} dropped" else ""
+        }
+        rateLine?.let { rl ->
+            if (mode == Mode.VIDEO && p.received > 0) {
+                rl.visibility = View.VISIBLE
+                rl.text = "${w}×$h · $fpsText fps · ${"%.0f".format(Locale.US, kbps)} kbps (5 s average)\n" +
+                    "Acks: ${g.liveAckLabel}" + (if (g.liveDropped > 0) " · ${g.liveDropped} broken picture(s) skipped" else "") +
+                    if (shownNow == 0L && p.waitingForKey > 0) "\nWaiting for a picture the phone can start decoding on…" else ""
+            } else rl.visibility = View.GONE
         }
         if (p.received > 0 || jpegs > 0) {
             statusBox?.visibility = View.GONE
@@ -916,6 +946,8 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         flashView = null
         modeBox = null
         probeLine = null
+        rateLine = null
+        rateSamples.clear()
         snapImage = null
         openedAt = 0
         lastShown = 0

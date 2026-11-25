@@ -1,5 +1,38 @@
 # Changelog
 
+## 3.4.0 (versionCode 7)
+
+From the owner's first live video over Bluetooth (3.3.0, `docs/LOG-2026-11-25-liveview.txt`, E13C-5 fw 1.0.0).
+Connect, pairing, sign-in, reply matching, photos, voice and SupRevolt are unchanged.
+
+**Live video on head 0x1E (decode verified against the log's bytes)**
+- `0x1E` is a known frame head now (it was only taken while the sniffer ran). Its divide is the `0x4A` layout:
+  low 3 bits first/middle/last (`9D29 9D2A 9D2B` = 1, 2, 3), higher bits the element length with its header
+  (`0x59D` = 1437 = 1432 + 5). The high byte is the length's low byte, not a picture id.
+- `LiveStream`: fragment payload `[index LE4][chunk]`; index 0 starts a picture, the chunks join into
+  `[02][length LE4][Annex-B]` and the length (body only; the header-counting reading is accepted too) closes it.
+  A gap, an index without a start, or a new index 0 before the end drops the unfinished picture cleanly. Other
+  element types are counted and logged. Runs on the reader thread, copies bytes only, never blocks.
+- Whole pictures go to the existing MediaCodec Surface decoder and the MP4 recorder. Size comes from the SPS
+  (the owner's: Baseline, level 4.0, 320×240). Decoding and recording start on an IDR, or on an all-I-slice picture
+  that carries its own SPS and PPS (`H264.sliceType`, `VideoAu.entry`).
+- Acks for `0x1E` (`LiveAck`, `LiveAckPicker`): a `1E 0009 [01]` per fragment echoing its order and divide, then a
+  photo-style `1E 0009 [01]` per picture, then `1E 0004 [01, order]`, then none. Each gets 5 s of video; the first at
+  2 fps or more is kept and saved (`live_ack`, with each one's fps in `live_ack_report`); if none reaches it, the best
+  is kept. A saved one that falls under 2 fps is searched again once per session. Photo (`4A`) and control (`30`) acks
+  are byte-identical to 3.3.
+- Live view screen: size, fps and kbps (5 s averages), the ack in use and skipped pictures. The log gets the same once
+  per 5 s, the first picture's size and NAL types, and every ack switch.
+- If the glasses push `5710 = 00` while Live view is on screen, the app opens once more with the same command
+  (5720, saved action, `[01]`); again only after 30 s of video. Leaving the screen still closes it with `[00]`, and a
+  photo during live view still closes and reopens it.
+- No more "a head-1E frame not used" sniffer lines: 1E frames go to the assembler. The sniffer stays, rate-limited,
+  for heads that are really unknown. The live test logs the real time it listened (it stops at 3 pictures, so 3.3's
+  "heard for 10 s" was not 10 s and its byte count says nothing about the frame rate).
+
+**Logs**
+- The second line of the shared glasses log is the app version and versionCode.
+
 ## 3.3.0 (versionCode 6)
 
 From the owner's Diagnostics log of 3.1.0 (`docs/LOG-2026-11-23.txt`, moto g 2025 on Android 15, E13C-5 firmware 1.0.0).

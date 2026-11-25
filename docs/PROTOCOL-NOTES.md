@@ -143,6 +143,19 @@ Implementation rule, robust to both readings:
    - `elem[0]==0x00` means a photo element.
 6. Fix needed today: `A/XkProtocol.kt:212` throws on fragment types 4–7, and `A/XkGlasses.kt:393` drops media frames when no photo is pending.
 
+**3.4 update, VALIDATED-LIVE on the owner's E13C-5 (`docs/LOG-2026-11-25-liveview.txt`).** The SPP carriage is now known:
+after `5720` action 3 `[01]` and the `5710 = 01` push, video arrives on its own head, `0x1E`, cmd `0x8001`.
+
+- The divide is the `0x4A` layout, not a picture id: low 3 bits `1`/`2`/`3` first/middle/last, higher bits the element
+  length hint. Captured `9D29 9D2A 9D2B`: hint `0x59D` = 1437 = 1432 + 5; `B729…`: `0x5B7` = 1463 = 1458 + 5.
+- Payload `[index LE4: 0, 1, 2][chunk]`. The chunks join into `[02][len LE4][Annex-B]` with `len` excluding the header
+  (1432 = 583 + 583 + 283 − 3×4 − 5), as in the vendor callbacks above.
+- SPS `67 42 C0 28 B9 D0 28 3F 20`: Baseline, level 4.0, 320×240 (not 1001's 160×120). Each picture seen carried SPS+PPS.
+- Whether the glasses want an ack for `0x1E` is **UNKNOWN**. 3.4 tries, at run time, a `1E 0009 [01]` per fragment
+  (order and divide echoed), then one per picture, then `1E 0004 [01, order]`, then none; it keeps the first that gives
+  2 fps or more for 5 s (`LiveAckPicker`). The 3.3 probe stopped listening at 3 pictures, so its "10 s" did not measure
+  the rate; L's ~30 fps (1.4 below) came without any known `0x1E` ack.
+
 ### 1.3 Annex-B extraction
 
 `PreviewPayload.java` logic, summarized:

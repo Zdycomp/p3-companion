@@ -1,0 +1,29 @@
+Owner's log from 3.3.0, Nov 25 2026 (moto g 2025, E13C-5 fw 1.0.0). FIRST LIVE VIDEO OVER BLUETOOTH. Verbatim excerpt:
+
+00:22:11  → 5720 01
+00:22:11  ← 5720 00
+00:22:11  5720 answered in the device-numbered form (id 0007, ours 004D, action 8004)
+00:22:11  Live test: 5720/3 open [01]: type 0x00, 1 byte(s), data 00
+00:22:12  ← 5710 01
+00:22:12  Live test:   5710 after open: 01
+00:22:13  Sniffer: frame with head 1E cmd 8001 divide 9D29, 583 B: 00 00 00 00 02 98 05 00 00 00 00 00 01 67 42 C0 28 B9 D0 28 3F 20 00 00
+00:22:13  Live view: H.264 found in a head-1E frame (583 B)
+00:22:13  Sniffer: frame with head 1E cmd 8001 divide 9D2A, 583 B: 01 00 00 00 BF FF FF D0 24 55 F5 6D 91 82 12 3C C8 4A 5A FF FE 9A 35 FF
+00:22:13  Sniffer: a head-1E frame not used: 583 B: head 01 cmd 0000 divide FFBF len 53503: 01 00 00 00 BF FF FF D0 24 55 F5 6D 91 82 12 3C ...
+00:22:13  Sniffer: frame with head 1E cmd 8001 divide 9D2B, 283 B: 02 00 00 00 CF BE FE A7 AF FF FF 64 5F FF FE C8 6B 62 94 8F FF FF C8 6A
+00:22:13  Sniffer: a head-1E frame not used: 283 B: head 02 cmd 0000 divide BECF len 43006: ...
+00:22:13  Sniffer: frame with head 1E cmd 8001 divide B729, 583 B: 00 00 00 00 02 B2 05 00 00 00 00 00 01 67 42 C0 28 B9 D0 28 3F 20 00 00
+00:22:13  Live view: H.264 found in a head-1E frame (583 B)
+00:22:13  Sniffer: frame with head 1E cmd 8001 divide B72A, 583 B: 01 00 00 00 DF FF FF E4 04 7E F2 FF FF D8 23 75 ...
+00:22:13  Sniffer: frame with head 1E cmd 8001 divide B72B, 309 B: 02 00 00 00 89 7B C9 75 5F FF FC 12 F7 E5 2E CD ...
+00:22:13  Live view: H.264 found in a head-1E frame (583 B)
+00:22:13  Live test:   heard for 10 s: 6846 B read, 6846 B in frames, 0 B skipped, 0 media frame(s), 5 video picture(s), 0 JPEG picture(s), 0 divideType-5, 13 unknown-head frame(s)
+00:22:13  Live test: Live video works with command 5720/3. The app will use it from now on.
+
+Coordinator's decode of the 1E stream (verify in code):
+- Envelope head 0x1E, cmd 0x8001 (push). "divide" LE2: low byte steps per fragment (29,2A,2B), high byte differs per picture (9D, B7).
+- Each fragment payload = [fragIdx 1 B: 00,01,02][00 00 00] + chunk.
+- Fragment 0 chunk starts with the element header [type 02][length LE4] then Annex-B H.264 (00 00 00 01 67 42 C0 28 ... = SPS, Baseline, level 4.0).
+- Picture 1: length 0x0598 = 1432 = (583+583+283) - 3*4 - 5. Picture 2: 0x05B2 = 1458 = (583+583+309) - 12 - 5. So fragments are complete and the length field closes the picture.
+- Only ~1.3 KB per picture and ~6.8 KB in 10 s: the stream is very slow. Likely the glasses wait for a per-fragment or per-picture ack (photos needed a media ack with cmd 0x0009 divide 3 on head 0x4A) before sending more.
+- "a head-1E frame not used" lines are the sniffer re-parsing continuation payloads as if they were frames; noise.

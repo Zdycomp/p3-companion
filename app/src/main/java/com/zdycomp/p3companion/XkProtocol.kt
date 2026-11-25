@@ -10,7 +10,7 @@ import java.io.ByteArrayOutputStream
  * github.com/joaosouz4dev/lensmoo-crash-fix. See THIRD_PARTY_NOTICES.md and docs/PROTOCOL-NOTES.md.
  *
  * Envelope, 16 bytes, little-endian:
- *   [0] head      0x30 control, 0x4A image/media, 0x2B custom
+ *   [0] head      0x30 control, 0x4A image/media, 0x2B custom, 0x1E live view video (3.4)
  *   [1] order     rolling sequence number (app and glasses each keep their own)
  *   [2..3] cmd    bit 0x8000 = from the glasses; low part 0x0001 data, 0x0004 ack, 0x0009 media ack
  *   [4..5] divide low 3 bits: 0 whole, 1 first, 2 middle, 3 last fragment (higher bits: length hint)
@@ -28,6 +28,12 @@ object Xk {
     const val HEAD_CONTROL = 0x30
     const val HEAD_MEDIA = 0x4A
     const val HEAD_CUSTOM = 0x2B
+    /**
+     * 3.4: live view video. Same fragment layout as 0x4A (divide low 3 bits 1/2/3 first/middle/last,
+     * higher bits the element length, payload [index LE4][chunk]), carrying [02][length LE4][Annex-B].
+     * See [LiveStream].
+     */
+    const val HEAD_LIVE = 0x1E
 
     const val ACTION_READ = 1
     const val ACTION_WRITE = 2
@@ -77,7 +83,8 @@ object Xk {
         val fromDevice get() = cmd and 0x8000 != 0
         val operation get() = cmd and 0x7FFF
         /** A link-level acknowledgement. 0x2B frames reuse cmd 4 for data, so they never count. */
-        val isAck get() = (head == HEAD_CONTROL && operation == 0x0004) || (head == HEAD_MEDIA && operation == 0x0009)
+        val isAck get() = (head == HEAD_CONTROL && operation == 0x0004) || (head == HEAD_MEDIA && operation == 0x0009) ||
+            (head == HEAD_LIVE && (operation == 0x0004 || operation == 0x0009))
         val fragment get() = divide and 0x07
         /** Element length hint carried in the high divide bits (13 bits). */
         val logicalLength get() = (((divide and 0xF8) shl 5) or ((divide shr 8) and 0xFF)) and 0x1FFF
@@ -135,6 +142,7 @@ object Xk {
                 isAck -> "ack"
                 head == HEAD_MEDIA -> "media part $fragment"
                 head == HEAD_CUSTOM -> "custom"
+                head == HEAD_LIVE -> "live part $fragment"
                 else -> node
             }
             return "${if (fromDevice) "←" else "→"} ${"%02X".format(head)} #$order $kind (${payload.size} B)"
@@ -398,12 +406,12 @@ object Xk {
         /** Payload length if a real frame could start at [p], else -1. */
         private fun plausibleLength(p: Int): Int {
             val head = buf[p].toInt() and 0xFF
-            val known = head == HEAD_CONTROL || head == HEAD_MEDIA || head == HEAD_CUSTOM
+            val known = head == HEAD_CONTROL || head == HEAD_MEDIA || head == HEAD_CUSTOM || head == HEAD_LIVE
             val cmd = u16(p + 2)
             if (buf[p + 8].toInt() or buf[p + 9].toInt() or buf[p + 10].toInt() or buf[p + 11].toInt() != 0) return -1
             val plen = u16(p + 6)
             if (known && cmd in KNOWN_CMDS) {
-                if (head != HEAD_MEDIA && plen > maxControlPayload) return -1
+                if (head != HEAD_MEDIA && head != HEAD_LIVE && plen > maxControlPayload) return -1
                 return plen
             }
             // Sniffer mode: an unknown head or a small unknown cmd, checked by its CRC afterwards.

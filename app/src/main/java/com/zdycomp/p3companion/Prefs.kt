@@ -135,6 +135,16 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
         get() = sp.getInt("live_probe_version", 0)
         set(v) = sp.edit().putInt("live_probe_version", v).apply()
 
+    /** 3.4: the live video ack strategy that worked best ([LiveAck.Strategy] name), or null to test from the start. */
+    var liveAck: String?
+        get() = sp.getString("live_ack", null)
+        set(v) = sp.edit().putString("live_ack", v).apply()
+
+    /** 3.4: what each ack strategy gave when it was picked ("media ack per fragment 1.2 fps, …"). */
+    var liveAckReport: String?
+        get() = sp.getString("live_ack_report", null)
+        set(v) = sp.edit().putString("live_ack_report", v).apply()
+
     /** Snapshot view: keep every snapshot in the gallery (off deletes each one after it's shown). */
     var keepSnapshots: Boolean
         get() = sp.getBoolean("keep_snapshots", false)
@@ -458,7 +468,7 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
         val keep = sp.all.filterKeys { k ->
             k == "user_key" || k.startsWith("ai_key_") || k == "sr_token" || k == "sr_url" || k == "sr_http_ok" || k == "drive_uri" || k == "drive_label" ||
                 k == "ble_addr" || k == "ble_name" || k == "link_method" || k == "preview_action" ||
-                k == "live_path" || k.startsWith("live_probe_") || k == "recognizer_service" ||
+                k == "live_path" || k.startsWith("live_probe_") || k.startsWith("live_ack") || k == "recognizer_service" ||
                 k.startsWith("asked_") || k == "last_import" || k == "last_seen_version" || k == "user_stopped"
         }
         val e = sp.edit().clear()

@@ -106,13 +106,35 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     @Volatile var rxBytes = 0L; private set
     @Volatile var skippedRuns = 0L; private set
     @Volatile var skippedBytes = 0L; private set
-    /** Frames with a head other than 30/4A/2B (only accepted while the sniffer runs). */
+    /** Frames with a head other than 30/4A/2B/1E (only accepted while the sniffer runs). */
     @Volatile var otherFrames = 0L; private set
     /** Whole JPEG pictures that arrived as live view frames (a small preview, 160×120 on some firmware). */
     @Volatile var jpegFrames = 0L; private set
     /** Gets each JPEG live view frame (reader thread; must not block). */
     @Volatile var jpegSink: ((ByteArray) -> Unit)? = null
     @Volatile private var sniffing = false
+    // Live video on head 0x1E (3.4): reassembly is per link ([Link.live]), acks picked at run time.
+    /** Head-0x1E fragments and their payload bytes since the app started. */
+    @Volatile var liveFragments = 0L; private set
+    @Volatile var liveBytes = 0L; private set
+    /** Whole H.264 pictures rebuilt from 0x1E fragments. */
+    @Volatile var livePictures = 0L; private set
+    @Volatile var liveDropped = 0L; private set
+    /** Pictures a second and kilobits a second over the last 5 s of live video (0 when none). */
+    @Volatile var liveFps = 0.0; private set
+    @Volatile var liveKbps = 0.0; private set
+    private val ackPicker = LiveAckPicker(LiveAck.parse(prefs.liveAck))
+    /** Which ack the app sends for live fragments, and whether it is still being tried out. */
+    val liveAckLabel: String get() = ackPicker.current.label + if (ackPicker.locked) "" else " (testing)"
+    @Volatile private var lastLiveAt = 0L
+    private var liveStatAt = 0L
+    private var liveStatPics = 0L
+    private var liveStatBytes = 0L
+    private var liveNotes = 0
+    @Volatile private var livePicturesAtOpen = 0L
+    /** The Live view screen wants video: a 5710 = 00 from the glasses is answered by opening once more. */
+    @Volatile private var keepPreview = false
+    @Volatile private var reopenedAt = 0L
     private var sniffLines = 0
     private var sniffLastAt = 0L
     /** What the last Wi-Fi check during the live view test found (names only). */
@@ -143,6 +165,8 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     private inner class Link(val socket: BluetoothSocket, val session: Int) {
         val parser = Xk.Parser().apply { onSkip = ::onSkipped; lenient = sniffing }
         val demux = Xk.MediaDemux(::onMediaElement, ::onMediaBroken)
+        /** Live view pictures from head-0x1E fragments (3.4). */
+        val live = LiveStream()
         private val outQ = LinkedBlockingQueue<ByteArray>(512)
         @Volatile var lastRxAt = SystemClock.elapsedRealtime()
         @Volatile var writeStartedAt = 0L
@@ -233,6 +257,36 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         parserDropped = l.parser.dropped
         parserBadCrc = l.parser.badCrc
         maxMediaFrame = l.parser.maxMediaPayload
+        liveTick(now)
+    }
+
+    /** Every 500 ms: the ack strategy's verdict, and once per 5 s the live video rate in the log. */
+    private fun liveTick(now: Long) {
+        if (preview == Preview.OFF && !probing) { liveStatAt = 0L; liveFps = 0.0; liveKbps = 0.0; return }
+        if (!probing) ackPicker.tick(now)?.let { d ->
+            when (d.kind) {
+                LiveAckPicker.Kind.MEASURED -> {}
+                LiveAckPicker.Kind.SWITCHED -> addLog("Live view: %s gave %.1f fps (under 2); trying %s".format(Locale.US, d.tried.label, d.fps, d.now.label))
+                LiveAckPicker.Kind.CHOSEN -> {
+                    prefs.liveAck = d.now.name
+                    prefs.liveAckReport = ackPicker.report()
+                    addLog("Live view: using %s for live video from now on (%s)".format(Locale.US, d.now.label, ackPicker.report()))
+                }
+            }
+        }
+        if (liveStatAt == 0L) { liveStatAt = now; liveStatPics = livePictures; liveStatBytes = liveBytes; return }
+        val dt = now - liveStatAt
+        if (dt < 5_000) return
+        val pics = livePictures - liveStatPics
+        val bytes = liveBytes - liveStatBytes
+        liveStatAt = now
+        liveStatPics = livePictures
+        liveStatBytes = liveBytes
+        liveFps = pics * 1000.0 / dt
+        liveKbps = bytes * 8.0 / dt
+        if (pics > 0 || bytes > 0) {
+            addLog("Live view: %.1f fps, %.0f kbps, %d dropped so far, acks: %s".format(Locale.US, liveFps, liveKbps, liveDropped, liveAckLabel))
+        }
     }
 
     // ---------------- requests and replies ----------------
@@ -885,6 +939,10 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                         (f.errCode?.let { " (${Xk.errorText(it)})" } ?: ""))
                     onControl(f, node)
                 }
+                Xk.HEAD_LIVE -> {
+                    if (f.isAck || !f.fromDevice) return
+                    onLiveFrame(l, f)
+                }
                 Xk.HEAD_CUSTOM -> {
                     addLog("← 2B frame (${f.payload.size} B)")
                     if (sniffing) sniffLog("2B " + Xk.describeRaw(f.payload))
@@ -1044,6 +1102,43 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         return false
     }
 
+    /**
+     * 3.4: one head-0x1E fragment (reader thread, never blocks). The ack goes out first, as for
+     * photos, then the fragment joins its picture; a whole H.264 picture goes to [videoSink].
+     */
+    private fun onLiveFrame(l: Link, f: Xk.Frame) {
+        val now = SystemClock.elapsedRealtime()
+        val fed = l.live.feed(f)
+        LiveAck.framesFor(ackPicker.current, f, fed.lastOfPicture, ::nextOrder).forEach { l.trySend(it.encode()) }
+        liveFragments++
+        liveBytes += f.payload.size
+        lastLiveAt = now
+        if (!probing) ackPicker.onFragment(now)
+        fed.dropped?.let { liveDropped++; liveNote("Live view: dropped an unfinished picture ($it)") }
+        val e = fed.element ?: return
+        if (e.type != Xk.MEDIA_H264) {
+            liveNote("Live view: element type ${e.type} on head 1E (${e.body.size} B), not video; counted")
+            if (previewWanted) liveElement(e.body, "a type-${e.type} element on head 1E")
+            return
+        }
+        val ns = SystemClock.elapsedRealtimeNanos()
+        val au = (if (H264.nals(e.body) != null) VideoAu(e.body, ns) else null)?.takeIf { it.picture || it.sps != null }
+            ?: VideoAu.scan(e.body, ns)
+        if (au == null) { liveNote("Live view: a head-1E picture without H.264 (${e.body.size} B): " + Xk.describeRaw(e.body)); return }
+        livePictures++
+        if (!probing) ackPicker.onPicture(now)
+        videoFrames++
+        if (livePictures - livePicturesAtOpen == 1L) {
+            val size = au.sps?.let { H264.spsSize(it) }?.let { "${it.first}×${it.second}" } ?: "size not in this picture"
+            addLog("Live view: first picture on head 1E, ${e.body.size} B, NAL types ${au.nalTypes}, $size, acks: $liveAckLabel")
+        }
+        if (preview != Preview.ON && preview != Preview.OFF) { preview = Preview.ON; changed() }
+        videoSink?.invoke(au)
+    }
+
+    /** Live view notes: at most 20 per open, so a broken stream can't fill the log. */
+    private fun liveNote(line: String) { if (liveNotes++ < 20) addLog(line) }
+
     // ---------------- receive sniffer (3.3) ----------------
 
     private fun onSkipped(first: ByteArray, length: Int) {
@@ -1068,6 +1163,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     private fun startSniff(why: String) {
         synchronized(this) { sniffLines = 0 }
         mediaNotes = 0
+        livePicturesAtOpen = livePictures
         sniffing = true
         link?.parser?.lenient = true
         addLog("Sniffer on ($why): ${rxBytes} B read so far, ${skippedBytes} B skipped")
@@ -1082,7 +1178,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     /** Counters for one listening window, so the log shows what the radio carried. */
     private inner class RxWindow {
         val rx0 = rxBytes; val skip0 = skippedBytes; val other0 = otherFrames; val media0 = mediaFramesSeen
-        val video0 = videoFrames; val jpeg0 = jpegFrames; val f50 = mediaFrag5
+        val video0 = videoFrames; val jpeg0 = jpegFrames; val f50 = mediaFrag5; val live0 = liveFragments
         val frameBytes0 = link?.parser?.frameBytes ?: 0L
         val media get() = mediaFramesSeen - media0
         val pictures get() = (videoFrames - video0) + (jpegFrames - jpeg0)
@@ -1090,7 +1186,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
             val fb = (link?.parser?.frameBytes ?: 0L) - frameBytes0
             return "${rxBytes - rx0} B read, $fb B in frames, ${skippedBytes - skip0} B skipped, $media media frame(s), " +
                 "${videoFrames - video0} video picture(s), ${jpegFrames - jpeg0} JPEG picture(s), ${mediaFrag5 - f50} divideType-5, " +
-                "${otherFrames - other0} unknown-head frame(s)"
+                "${liveFragments - live0} live video fragment(s), ${otherFrames - other0} unknown-head frame(s)"
         }
     }
 
@@ -1348,6 +1444,8 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
 
     /** Opens the glasses' live video. [done] gets null when it's open, or a message. */
     fun openPreview(done: (String?) -> Unit) = io.execute {
+        keepPreview = true
+        reopenedAt = 0L
         val msg = try { openPreviewNow() } catch (e: Exception) { e.message ?: "Couldn't open live view." }
         main.post { done(msg) }
     }
@@ -1358,6 +1456,11 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         videoFrames = 0
         changed()
         startSniff("live view")
+        link?.live?.reset()
+        ackPicker.restart()
+        liveNotes = 0
+        addLog("Live view: acks for live video fragments: ${ackPicker.current.label}" +
+            if (ackPicker.locked) " (saved)" else " (testing; switches if under 2 fps for 5 s)")
         val q5710 = expectPush("5710")
         try {
             val msg = openPreviewInner()
@@ -1428,10 +1531,11 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     }
 
     /** Always close the live view when leaving it, or the glasses keep flooding the link. */
-    fun closePreview() = io.execute { closePreviewNow() }
+    fun closePreview() { keepPreview = false; io.execute { closePreviewNow() } }
 
     private fun closePreviewNow() {
         if (!probing) stopSniff()
+        ackPicker.restart()
         if (preview == Preview.OFF) return
         preview = Preview.OFF
         val via = openedWith
@@ -1566,9 +1670,11 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                         // Wi-Fi: the preview might go over the glasses' own access point or Wi-Fi Direct.
                         val finder = if (wifi && !wifiTried) { wifiTried = true; WifiFinder(app).also { it.start(wifiTokens()) } } else null
                         val listen = if (st == 1) PROBE_LISTEN_ON_MS else PROBE_LISTEN_MS
-                        val end = SystemClock.elapsedRealtime() + listen
+                        val heardFrom = SystemClock.elapsedRealtime()
+                        val end = heardFrom + listen
                         while (SystemClock.elapsedRealtime() < end && w.pictures < 3 && link != null) Thread.sleep(100)
-                        say("  heard for ${listen / 1000} s: ${w.text()}")
+                        // 3.4: the real time listened (it stops at 3 pictures), so the rate in the log is true.
+                        say("  heard for %.1f s (of %d): %s".format(Locale.US, (SystemClock.elapsedRealtime() - heardFrom) / 1000.0, listen / 1000, w.text()))
                         if (w.media > 0) anyMedia = true
                         if (w.pictures >= 3) { found = path; break }
                         // Maybe the preview is fetched like photos are: ask, then listen.
@@ -1642,12 +1748,50 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
 
     private fun onPreviewState(v: Int) {
         when (v) {
-            0 -> if (preview == Preview.ON || preview == Preview.OPENING) {
+            0 -> if (preview == Preview.ON && mayReopen()) {
+                // 3.4: the glasses closed the preview by themselves while Live view is on screen.
+                reopenedAt = SystemClock.elapsedRealtime()
+                preview = Preview.OPENING
+                ackPicker.restart()
+                link?.live?.reset()
+                addLog("Live view: the glasses closed it (5710 = 00) while it's on screen; opening once more")
+                io.execute { reopenAfterClose() }
+            } else if (preview == Preview.ON || preview == Preview.OPENING) {
                 preview = Preview.OFF
                 main.post { previewStateSink?.invoke(false) }
             }
             1 -> preview = Preview.ON
             2 -> preview = Preview.BUSY
+        }
+        changed()
+    }
+
+    /** Once per closing: again only after video flowed for [REOPEN_AGAIN_MS] since the last reopen. */
+    private fun mayReopen(): Boolean {
+        if (!keepPreview || probing || capturing || link == null) return false
+        val at = reopenedAt
+        val now = SystemClock.elapsedRealtime()
+        return at == 0L || (now - at > REOPEN_AGAIN_MS && lastLiveAt > at + REOPEN_AGAIN_MS / 2)
+    }
+
+    /** Sends the open again (5720 with the saved action, data [01], or the learned command). */
+    private fun reopenAfterClose() {
+        if (!keepPreview || link == null || preview != Preview.OPENING) return
+        val via = openedWith
+        val r = runCatching {
+            if (via != null) request(probeNode(via), probeAction(via), byteArrayOf(1), 4_000)
+            else request("5720", prefs.previewAction, byteArrayOf(1), 4_000)
+        }.getOrNull()
+        val code = r?.errCode
+        if ((code == null || code == 0) && keepPreview) {
+            if (preview == Preview.OPENING) preview = Preview.ON
+            addLog("Live view: reopened (${via ?: "5720/${prefs.previewAction}"})")
+        } else {
+            addLog("Live view: the glasses didn't reopen it (${code?.let { Xk.errorText(it) } ?: "closed meanwhile"})")
+            if (preview != Preview.OFF) {
+                preview = Preview.OFF
+                main.post { previewStateSink?.invoke(false) }
+            }
         }
         changed()
     }
@@ -1661,6 +1805,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
 
     /** The mic link (SCO) is about to start: the glasses can't stream video at the same time. */
     fun micWillStart() {
+        keepPreview = false
         if (preview == Preview.OFF) return
         addLog("Closing live view: the mic is starting")
         setPreviewOff()
@@ -1705,11 +1850,20 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     @Synchronized
     fun logText(): String = buildString {
         appendLine("P3 Companion glasses log")
+        appendLine(appVersionLine())
         appendLine("Device: ${deviceName ?: prefs.glassesName ?: "-"}  Model: ${model ?: "-"}  Firmware: ${firmware ?: "-"}")
         log.forEach { appendLine(it) }
     }
 
+    /** "App 3.4.0 (versionCode 7)", the second line of every shared log. */
+    private fun appVersionLine(): String {
+        val pi = runCatching { app.packageManager.getPackageInfo(app.packageName, 0) }.getOrNull()
+        return "App ${pi?.versionName ?: "?"} (versionCode ${pi?.longVersionCode ?: "?"})"
+    }
+
     companion object {
+        /** A second reopen after the glasses close the preview needs this much video since the first. */
+        private const val REOPEN_AGAIN_MS = 30_000L
         private val SPP: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
         private const val TOKEN_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
         private val BACKOFF_MS = longArrayOf(2_000, 5_000, 10_000, 20_000, 40_000, 60_000)

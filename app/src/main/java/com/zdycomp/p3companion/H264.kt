@@ -61,6 +61,19 @@ object H264 {
         fun se(): Int { val k = ue(); return if (k and 1 == 1) (k + 1) / 2 else -(k / 2) }
     }
 
+    /**
+     * 3.4: slice_type (0-9) of a coded slice NAL (type 1 or 5, header byte included), or null.
+     * 2 and 7 are I slices, 4 and 9 SI: a picture made only of those decodes on its own.
+     */
+    fun sliceType(nal: ByteArray): Int? = runCatching {
+        require(nal.size >= 2 && (type(nal[0]) == 1 || type(nal[0]) == 5))
+        val r = Bits(rbsp(nal.copyOf(minOf(nal.size, 32))))
+        r.ue() // first_mb_in_slice
+        r.ue().also { require(it in 0..9) }
+    }.getOrNull()
+
+    fun isIntraSlice(t: Int?) = t != null && (t % 5 == 2 || t % 5 == 4)
+
     /** Display width and height from an SPS NAL (header byte included, still escaped). */
     fun spsSize(sps: ByteArray): Pair<Int, Int>? = runCatching {
         require(sps.isNotEmpty() && type(sps[0]) == 7)
@@ -114,6 +127,14 @@ class VideoAu(val annexB: ByteArray, val arrivalNs: Long) {
     val pps: ByteArray? = units.firstOrNull { H264.type(annexB[it.first]) == 8 }?.let { annexB.copyOfRange(it.first, it.last + 1) }
     val key: Boolean = nalTypes.contains(5)
     val picture: Boolean = nalTypes.any { it == 1 || it == 5 }
+    /** 3.4: every slice is an I slice (an IDR, or a non-IDR picture that needs no earlier one). */
+    val intra: Boolean = key || (picture && units.filter { val t = H264.type(annexB[it.first]); t == 1 || t == 5 }
+        .all { H264.isIntraSlice(H264.sliceType(annexB.copyOfRange(it.first, minOf(it.last + 1, it.first + 32)))) })
+    /**
+     * 3.4: decoding and recording can start here: an IDR, or an intra picture that carries its own
+     * SPS and PPS (some firmware repeats them on every picture and may never send an IDR).
+     */
+    val entry: Boolean = key || (intra && sps != null && pps != null)
 
     /** A muxer sample: everything but SPS, PPS and AUD, each NAL with a 4-byte start code. */
     fun sample(): ByteArray {

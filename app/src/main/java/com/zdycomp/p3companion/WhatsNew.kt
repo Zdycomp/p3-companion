@@ -2,9 +2,12 @@ package com.zdycomp.p3companion
 
 /** What's new in this version, shown once after an update and on the About screen. */
 object WhatsNew {
-    const val VERSION = "3.3.0"
+    const val VERSION = "3.4.0"
 
     val headlines = listOf(
+        "Live view shows real video from the glasses over Bluetooth",
+        "Record that video to your phone, with the picture size, frame rate and data rate on screen",
+        "If the glasses close the live view by themselves, the app opens it again",
         "Commands no longer wait for an answer that already came: photos, snapshots and sign-in are quicker",
         "Live view listens longer, logs everything the glasses send, and also looks for the glasses on Wi-Fi",
         "Voice questions: the app records the mic itself and switches to the phone's mic if the glasses' mic is silent",
@@ -17,6 +20,14 @@ object WhatsNew {
     )
 
     val details = listOf(
+        "Live video" to listOf(
+            "Your glasses send live video on a channel the app now understands: each picture comes in a few pieces, and the app puts them back together and plays them.",
+            "The screen shows the picture size, frames a second and kilobits a second, averaged over 5 seconds.",
+            "The app tries a few ways of answering the glasses' video pieces and keeps the one that gives the smoothest video. It remembers it for next time.",
+            "If the glasses close the live view while you're watching, it opens again by itself.",
+            "Recording to the phone and taking a photo during live view work as before.",
+            "Shared logs now say which app version made them.",
+        ),
         "Glasses link" to listOf(
             "The glasses answer most commands in a form the app didn't recognise, so it waited 2 to 4 seconds for nothing each time. Every answer is now recognised at once.",
             "Taking a photo, saving it and Snapshot view no longer pause between steps.",
