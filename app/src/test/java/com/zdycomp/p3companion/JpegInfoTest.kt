@@ -5,28 +5,37 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
-import javax.imageio.IIOImage
-import javax.imageio.ImageIO
-import javax.imageio.ImageWriteParam
 
-/** 3.8: the JPEG frame-header reader behind "Photo 640x480, 71 KB", with real encoder output as fixtures. */
+/**
+ * 3.8: the JPEG frame-header reader behind "Photo 640x480, 71 KB". The fixtures are built byte by byte
+ * (SOI, APP0 JFIF, DQT, SOF0/SOF2, DHT, SOS, stuffed entropy bytes, EOI), so the tests need nothing
+ * beyond the Android unit-test classpath.
+ */
 class JpegInfoTest {
 
-    /** A real JPEG from the JDK's encoder: [w] x [h], baseline or progressive. */
+    /** A structurally complete JPEG of [w] x [h]: baseline (SOF0) or progressive (SOF2), colour 4:2:0 or grey. */
     private fun jpeg(w: Int, h: Int, progressive: Boolean = false, grey: Boolean = false): ByteArray {
-        val img = BufferedImage(w, h, if (grey) BufferedImage.TYPE_BYTE_GRAY else BufferedImage.TYPE_INT_RGB)
-        for (y in 0 until h) for (x in 0 until w) img.setRGB(x, y, (x * 16 shl 16) or (y * 32 shl 8) or 0x40)
-        val writer = ImageIO.getImageWritersByFormatName("jpeg").next()
         val out = ByteArrayOutputStream()
-        ImageIO.createImageOutputStream(out).use { ios ->
-            writer.output = ios
-            val p = writer.defaultWriteParam
-            if (progressive) p.progressiveMode = ImageWriteParam.MODE_DEFAULT
-            writer.write(null, IIOImage(img, null, null), p)
-        }
-        writer.dispose()
+        out.write(byteArrayOf(0xFF.toByte(), 0xD8.toByte()))
+        // APP0 JFIF 1.01, no thumbnail
+        out.write(segment(0xE0, "JFIF".toByteArray() + byteArrayOf(0, 1, 1, 0, 0, 1, 0, 1, 0, 0)))
+        // DQT: table 0, 64 entries
+        out.write(segment(0xDB, byteArrayOf(0) + ByteArray(64) { 1 }))
+        // SOF: precision 8, height, width, components (id, HxV, table)
+        val comps = if (grey) listOf(0x11) else listOf(0x22, 0x11, 0x11)
+        val sof = byteArrayOf(8, (h shr 8).toByte(), h.toByte(), (w shr 8).toByte(), w.toByte(), comps.size.toByte()) +
+            comps.flatMapIndexed { k, hv -> listOf((k + 1).toByte(), hv.toByte(), (if (k == 0) 0 else 1).toByte()) }.toByteArray()
+        out.write(segment(if (progressive) 0xC2 else 0xC0, sof))
+        // DHT stub: one DC table with no codes
+        out.write(segment(0xC4, ByteArray(17)))
+        // SOS: components, then Ss/Se/AhAl
+        val sos = byteArrayOf(comps.size.toByte()) + comps.indices.flatMap { listOf((it + 1).toByte(), 0) }.toByteArray() +
+            byteArrayOf(0, 63, 0)
+        out.write(segment(0xDA, sos))
+        // Entropy-coded bytes, FF stuffed as FF 00, sized roughly like the picture.
+        repeat(maxOf(64, w * h / 40)) { i -> out.write(i * 37 and 0xFF); if (i * 37 and 0xFF == 0xFF) out.write(0) }
+        out.write(byteArrayOf(0xFF.toByte(), 0xD9.toByte()))
         return out.toByteArray()
     }
 
@@ -63,7 +72,7 @@ class JpegInfoTest {
         assertEquals(1, i.sofCount)
         assertFalse(i.hasExif)
         assertTrue("the JFIF block counts as an APP segment", i.appSegments >= 1)
-        assertTrue(i.sampling, i.sampling in setOf("4:2:0", "4:2:2", "4:4:4"))
+        assertEquals("4:2:0", i.sampling)
         assertEquals("16x8", i.size)
         assertEquals(1, JpegInfo.soiCount(j))
     }
