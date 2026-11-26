@@ -678,6 +678,14 @@ class MainActivity : Activity() {
         }
     }
 
+    private var wifiAddResult: ((Boolean, Intent?) -> Unit)? = null
+
+    /** 3.9: Android's Add networks dialog (Settings.ACTION_WIFI_ADD_NETWORKS); [onResult] gets RESULT_OK and its data. */
+    fun addWifiNetwork(intent: Intent, onResult: (Boolean, Intent?) -> Unit) {
+        wifiAddResult = onResult
+        launchForResult(intent, REQ_WIFI_ADD, "This phone can't add Wi-Fi networks from an app. Use the Wi-Fi panel.")
+    }
+
     @Deprecated("Framework activity result")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         @Suppress("DEPRECATION")
@@ -721,6 +729,11 @@ class MainActivity : Activity() {
                     SupRevolt.get(prefs).scanUri(contentResolver, uri)
                     if (current != SCREEN_SUPREVOLT) showSupRevolt()
                 }
+            }
+            REQ_WIFI_ADD -> {
+                val cb = wifiAddResult
+                wifiAddResult = null
+                cb?.invoke(resultCode == RESULT_OK, data)
             }
             REQ_BACKUP_SAVE -> data?.data?.takeIf { resultCode == RESULT_OK }?.let { writeBackup(it) }
             REQ_BACKUP_OPEN -> data?.data?.takeIf { resultCode == RESULT_OK }?.let { readBackup(it) }
@@ -1141,6 +1154,7 @@ class MainActivity : Activity() {
         private const val REQ_BACKUP_OPEN = 47
         private const val REQ_SPEECH = 48
         private const val REQ_SR_DOC = 49
+        private const val REQ_WIFI_ADD = 50
 
         const val TAB_IMPORT = 0
         const val TAB_GALLERY = 1

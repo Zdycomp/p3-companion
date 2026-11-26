@@ -85,7 +85,7 @@ class WifiMathTest {
         assertNull(WifiText.passphraseProblem("12345678", WifiText.Security.WPA2))
         assertTrue(WifiText.passphraseProblem("1234567", WifiText.Security.WPA2)!!.contains("at least 8"))
         assertTrue(WifiText.passphraseProblem("x".repeat(64), WifiText.Security.WPA2)!!.contains("at most 63"))
-        assertNull("64 hex digits is a raw key", WifiText.passphraseProblem("a".repeat(64), WifiText.Security.WPA2))
+        assertTrue("3.9: 64 hex digits is refused too (8-63 only)", WifiText.passphraseProblem("a".repeat(64), WifiText.Security.WPA2)!!.contains("at most 63"))
         assertNull(WifiText.passphraseProblem("", WifiText.Security.OPEN))
     }
 

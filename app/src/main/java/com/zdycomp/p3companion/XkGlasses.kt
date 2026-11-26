@@ -2,9 +2,12 @@ package com.zdycomp.p3companion
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothA2dp
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothHeadset
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothSocket
 import android.content.BroadcastReceiver
 import android.content.ContentValues
@@ -184,6 +187,12 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         val live = LiveStream()
         private val outQ = LinkedBlockingQueue<ByteArray>(512)
         @Volatile var lastRxAt = SystemClock.elapsedRealtime()
+        /** 3.9 diagnostics: when anything was last written, the last request and when the link came up. */
+        @Volatile var lastWriteAt = 0L
+        @Volatile var lastRequestAt = 0L
+        @Volatile var lastRequestNode: String? = null
+        val openedAt = SystemClock.elapsedRealtime()
+        @Volatile var rxSeen = false
         @Volatile var writeStartedAt = 0L
         @Volatile var closed = false
         @Volatile var closeReason = "the link closed"
@@ -215,6 +224,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                     writeStartedAt = SystemClock.elapsedRealtime()
                     os.write(b)
                     writeStartedAt = 0
+                    lastWriteAt = SystemClock.elapsedRealtime()
                 }
             } catch (_: InterruptedException) {
             } catch (e: Exception) {
@@ -232,6 +242,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                     if (n == 0) continue
                     rxBytes += n
                     lastRxAt = SystemClock.elapsedRealtime()
+                    rxSeen = true
                     parser.feed(buf, n).forEach { f -> synchronized(this) { handle(this, f) } }
                 }
             } catch (e: Exception) {
@@ -253,6 +264,59 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
 
     init {
         watchdog.scheduleWithFixedDelay({ runCatching { tick() } }, 500, 500, TimeUnit.MILLISECONDS)
+    }
+
+    // ---------------- 3.9: Bluetooth event log (diagnostics only) ----------------
+
+    private val eventClock = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+
+    init {
+        runCatching { watchBluetoothEvents() }
+    }
+
+    /**
+     * Logs the glasses' ACL connect/disconnect and their hands-free and A2DP connection and audio
+     * changes, each with a millisecond clock and whether the SPP link is up, so a log shows whether a
+     * profile change coincides with an SPP drop. Only events for the saved glasses' address are logged.
+     * It reacts to nothing: the connect order, timings and retries are untouched.
+     */
+    private fun watchBluetoothEvents() {
+        val rx = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, i: Intent) {
+                val dev = deviceExtra(i) ?: return
+                val ours = prefs.glassesAddress ?: return
+                if (!dev.address.equals(ours, ignoreCase = true)) return
+                val clock = synchronized(eventClock) { eventClock.format(Date()) }
+                val up = link != null
+                fun st(key: String) = i.getIntExtra(key, Int.MIN_VALUE)
+                val line = when (i.action) {
+                    BluetoothDevice.ACTION_ACL_CONNECTED -> BtDiag.event(clock, "ACL", "connected", null, up)
+                    BluetoothDevice.ACTION_ACL_DISCONNECTED -> BtDiag.event(clock, "ACL", "disconnected", null, up)
+                    BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED -> BtDiag.event(clock, "hands-free",
+                        BtDiag.profileState(st(BluetoothProfile.EXTRA_STATE)),
+                        st(BluetoothProfile.EXTRA_PREVIOUS_STATE).takeIf { it != Int.MIN_VALUE }?.let(BtDiag::profileState), up)
+                    BluetoothHeadset.ACTION_AUDIO_STATE_CHANGED -> BtDiag.event(clock, "hands-free",
+                        BtDiag.headsetAudio(st(BluetoothProfile.EXTRA_STATE)),
+                        st(BluetoothProfile.EXTRA_PREVIOUS_STATE).takeIf { it != Int.MIN_VALUE }?.let(BtDiag::headsetAudio), up)
+                    BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED -> BtDiag.event(clock, "A2DP",
+                        BtDiag.profileState(st(BluetoothProfile.EXTRA_STATE)),
+                        st(BluetoothProfile.EXTRA_PREVIOUS_STATE).takeIf { it != Int.MIN_VALUE }?.let(BtDiag::profileState), up)
+                    BluetoothA2dp.ACTION_PLAYING_STATE_CHANGED -> BtDiag.event(clock, "A2DP",
+                        BtDiag.a2dpPlaying(st(BluetoothProfile.EXTRA_STATE)),
+                        st(BluetoothProfile.EXTRA_PREVIOUS_STATE).takeIf { it != Int.MIN_VALUE }?.let(BtDiag::a2dpPlaying), up)
+                    else -> return
+                }
+                addLog(line)
+            }
+        }
+        AudioRoute.registerSystemReceiver(app, rx, IntentFilter().apply {
+            addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+            addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+            addAction(BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED)
+            addAction(BluetoothHeadset.ACTION_AUDIO_STATE_CHANGED)
+            addAction(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED)
+            addAction(BluetoothA2dp.ACTION_PLAYING_STATE_CHANGED)
+        })
     }
 
     /** Releases a parser stuck on a partial frame, and drops a link whose writes hang. */
@@ -345,6 +409,8 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         pending[node] = p
         try {
             l.send(Xk.control(nextOrder(), node, action, rid, data).encode())
+            l.lastRequestAt = SystemClock.elapsedRealtime()
+            l.lastRequestNode = node
             addLog("→ $node" + if (logData && data.isNotEmpty()) " " + hex(data.take(24).toByteArray()) else "")
             val f = p.q.poll(timeoutMs, TimeUnit.MILLISECONDS)
             if (f === linkDown) throw LinkException("Lost the connection to the glasses.")
@@ -830,7 +896,9 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         micStreaming = false
         micSink = null
         setPreviewOff()
-        addLog("Link lost: $reason")
+        val now = SystemClock.elapsedRealtime()
+        addLog(BtDiag.lostLine(reason, if (l.rxSeen) now - l.lastRxAt else -1, l.lastRequestNode,
+            if (l.lastRequestAt > 0) now - l.lastRequestAt else -1, if (l.lastWriteAt > 0) now - l.lastWriteAt else -1, now - l.openedAt))
         if (!userDisconnect) lastError = "Lost the connection to the glasses."
         changed()
         if (!userDisconnect) main.post { scheduleReconnect("link lost") }
@@ -2101,6 +2169,57 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
             say(summary)
             prefs.fullResReport = summary
             val out = FullResProbe(summary, synchronized(lines) { lines.toList() }, complete)
+            main.post { done(out) }
+        }
+    }
+
+    // ---------------- 3.9: wake the glasses' Wi-Fi ----------------
+
+    /**
+     * Asks the glasses, with read-only requests (action 1, no data) on [WifiWake.nodes] only, whether
+     * anything switches their Wi-Fi on. Every request passes [FullRes.allowed] and skips any that dropped
+     * the link in an earlier full-size probe. Refused while live view, a photo, a recording, the mic or a
+     * test is running. Media that arrives anyway is closed with 7500. [done] gets the log lines, on the
+     * main thread.
+     */
+    fun askWifiWake(done: (List<String>) -> Unit) {
+        val nodes = WifiWake.nodes()
+        if (nodes.isEmpty()) { main.post { done(listOf(WifiWake.intro(nodes))) }; return }
+        val why = when {
+            state == State.IDLE || state == State.CONNECTING -> "The glasses aren't connected over Bluetooth, so nothing was asked."
+            preview == Preview.OPENING || preview == Preview.ON || preview == Preview.BUSY -> "Live view is open, so nothing was asked (close it to try the wake)."
+            recording -> "The glasses are recording video, so nothing was asked."
+            micStreaming -> "The glasses' mic is in use, so nothing was asked."
+            capturing || assembler != null || pendingAnnounce != null || probing -> "The glasses are busy with a photo or a test, so nothing was asked."
+            !busyFlag.compareAndSet(false, true) -> "The glasses are busy, so nothing was asked."
+            else -> null
+        }
+        if (why != null) { main.post { done(listOf(why)) }; return }
+        setBusy("Asking the glasses about Wi-Fi…")
+        io.execute {
+            val out = mutableListOf(WifiWake.intro(nodes))
+            val dropped = prefs.fullResDropped
+            val mediaBefore = lastMediaAt
+            try {
+                for (node in nodes) {
+                    val key = FullRes.key(node, Xk.ACTION_READ, ByteArray(0))
+                    if (!FullRes.allowed(node, Xk.ACTION_READ)) { out += "$key: not sent (outside the safety list)"; continue }
+                    if (key in dropped) { out += "$key: skipped (it dropped the link in an earlier run)"; continue }
+                    if (link == null) throw LinkException("Lost the connection to the glasses.")
+                    val r = request(node, Xk.ACTION_READ, ByteArray(0), 1_500)
+                    out += "$key → " + FullRes.replyText(r?.replyType, r?.errCode, r?.data ?: ByteArray(0), r?.json())
+                    Thread.sleep(300)
+                }
+                Thread.sleep(700)
+                if (lastMediaAt != mediaBefore) { release("media arrived during the Wi-Fi wake"); out += "Media arrived, so the transfer was closed (7500)." }
+            } catch (e: Exception) {
+                out += "Stopped: ${e.message}"
+            } finally {
+                busyFlag.set(false)
+                setReady()
+                fetchPendingAnnounce()
+            }
+            out.forEach { addLog("Wi-Fi wake: $it") }
             main.post { done(out) }
         }
     }

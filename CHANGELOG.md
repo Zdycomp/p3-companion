@@ -1,5 +1,68 @@
 # Changelog
 
+## 3.9.0 (versionCode 12)
+
+Goal: a real Wi-Fi network controller. The owner's 3.8.0 log showed "Couldn't join "Rippleinstillwaters"" twice:
+3.8 joined every network with a `WifiNetworkSpecifier` request, which is Android's local-only, no-internet
+request for a device's own network. It is the wrong tool for an ordinary router, and the old message couldn't
+say whether Android timed out, the dialog was declined or the network was missing. Live view, photos, voice,
+translation, SupRevolt and connect are unchanged.
+
+**Join ordinary networks properly**
+- **Join on this phone** (any network that isn't the glasses): `Settings.ACTION_WIFI_ADD_NETWORKS` with one
+  `WifiNetworkSuggestion` built from the scan result: the exact SSID, open, enhanced open (`setIsEnhancedOpen`),
+  WPA2-PSK (`setWpa2Passphrase`), WPA3-SAE (`setWpa3Passphrase`, only when the capabilities say SAE without
+  PSK), and WPA2/WPA3 transition with the WPA2 builder. WEP and enterprise go to the Wi-Fi panel. Android asks,
+  saves it like any network, and uses it with internet.
+- The result list (`EXTRA_WIFI_NETWORK_RESULT_LIST`) is read in plain words: `ADD_WIFI_RESULT_SUCCESS` "Saved …",
+  `ALREADY_EXISTS` "already saved, nothing changed", `ADD_OR_UPDATE_FAILED` "Android couldn't save …", and a
+  closed dialog "Nothing was saved". "Saved" in the list means saved from this app (Android doesn't let apps read
+  the phone's saved networks).
+- Passwords: 8 to 63 plain ASCII characters, checked before anything is sent (64 hex digits are no longer
+  accepted). Typed by the person, handed to Android's builder, never stored or logged.
+- "Open Android Wi-Fi panel" stays on the screen and in every network's details.
+
+**For this app only** (the glasses, or a network marked "This is a device's network")
+- Exact SSID and BSSID from the scan, the right builder method, 30 s limit (`WifiControl.JOIN_TIMEOUT_MS`).
+- On failure the real reason (`WifiText.joinFailure`): Android's dialog stayed open until the timeout; it never
+  showed its dialog (not found in its own scan); the dialog closed early (declined, or the password was refused);
+  ended at once; not in the latest scan; the phone can't use that band (5/6/60 GHz) or that security (WPA3,
+  enhanced open). The dialog is tracked through the app's own pause/resume while the request waits.
+- Ordinary networks can't be joined this way any more unless marked as a device's network.
+
+**Lists**
+- Every scanned network, hidden ones included ("Hidden network"): signal bars and dBm, band, security, how many
+  access points share the name, connected / saved / device-network flags. Tap for details.
+- Every Wi-Fi Direct device with its name, primary device type (phone, printer, TV, camera…) and status, sorted
+  by `WifiMatch.score` (likely glasses first). Tap for details and "Is this the glasses?" (`WifiMatch.verdict`);
+  Wi-Fi Direct connect is requested only when Connect is tapped (Android shows its own prompt).
+
+**Wake the glasses' Wi-Fi**
+- The SDK docs (NODES.md, PAYLOADS.md) name no Wi-Fi or network command for these glasses; the log says "No
+  Wi-Fi command is known for these glasses". While the phone scans, the app asks the transfer nodes the docs do
+  name, read-only (action 1, no data) and only those on the full-size probe's safety list: 7200, 7310, 7600
+  (`WifiWake`, `XkGlasses.askWifiWake`). Never 7300, 7400, 7500, 9000 or 9001. Refused while live view, a photo,
+  a recording or the mic is running; any media that arrives is closed with 7500.
+- Scans again 5 s and 15 s after those requests. The scan line and the last line say plainly when no glasses
+  network or Wi-Fi Direct name has been seen in any scan so far.
+
+**Phone Wi-Fi**
+- State, network, signal with bars and a 60 s trace, link speed up/down, Wi-Fi standard, frequency, access
+  point, IPv4, IPv6, gateway, DNS and private DNS (from `LinkProperties`), internet, metered.
+- The Wi-Fi switch opens `Settings.Panel.ACTION_WIFI` and says why: apps can't switch Wi-Fi since Android 10.
+
+**Bluetooth drop diagnostics** (logging only; connect order, timings and retries unchanged)
+- The connection log records the glasses' ACL connect/disconnect, hands-free connection and audio (SCO) changes,
+  and A2DP connection and playing changes, each with a millisecond clock and whether the SPP link was up
+  (`BtDiag`), to see whether a profile change coincides with an SPP drop.
+- "Link lost" now also says how long since the last byte received, the last request (and its node) and the last
+  write, and how long the link was up.
+- Live view already reopens itself after an automatic reconnect while the person stays on it (3.6); unchanged.
+
+**Tests**: `WifiNetTest` (security and builder from capability strings, passwords, result-code wording and
+constants, band from frequency, bars and trace, failure reasons, glasses scoring and verdicts, scan summary, the
+wake's request list) and `BtDiagTest`. 288 JVM tests.
+
 ## 3.8.0 (versionCode 11)
 
 Goal: answer "where are my 20 MP photos?" with measurements, and a Wi-Fi controller. The owner's Bluetooth photos
