@@ -1,5 +1,32 @@
 # Changelog
 
+## 3.9.1 (versionCode 13)
+
+Goal: reconnect cleanly when the glasses drop their whole Bluetooth connection. The owner's 3.9.0 log: after
+1.9 h up, right after a touch (`C107`), the SPP link, the ACL and hands-free all went down within 2 s (the glasses
+restarting their radio, or reacting to the gesture). The 2 s retry opened a link while they were still coming back
+(`Link open (sdp-secure) in 3395 ms`), bound, and died 2.1 s later; the link came back on `ch8-secure` at the next
+backoff step. Additive only: the normal first connect, its order and timings are unchanged.
+
+**The glasses dropped Bluetooth** (`DropRecovery`, pure and JVM-tested)
+- A link loss within 2 s of an ACL disconnect for the saved glasses, in either order, is logged as "The glasses
+  dropped Bluetooth (the whole connection went down, not just the app's link)". When the ACL event comes after the
+  loss (as in the log, 1.98 s later), the 2 s retry already scheduled is cancelled.
+- The reconnect after a drop waits for ACL connected, then hands-free to settle (connected, or 4 s after the ACL,
+  whichever first), then 1.5 s, before opening SPP and binding. Each phase is logged once. If the ACL hasn't come
+  back 10 s after the drop it tries anyway (the app's connect pages the glasses).
+- A reconnect whose link dies within 5 s of opening (like 19:17:16) makes the next attempt wait the same way.
+- The wait is used once per trigger; a failed attempt after it goes back to the usual backoff (2, 5, 10, 20, 40,
+  60 s, 3 min active window, unchanged). Wake events ("glasses in range" and the like) don't cut the wait short.
+  Disconnect and pause forget the drop.
+- After recovery, once the new link has stayed up 5 s: "Back after the glasses dropped Bluetooth: N s, M tries".
+- The Glasses tab shows "The glasses dropped Bluetooth; reconnecting when they're ready" while it waits.
+
+**Tests**
+- `DropRecoveryTest`: drop classification (ACL before/after the loss, the 2 s edges), the early-death rule, the
+  settle phases and their deadlines, the 10 s ACL cap, one wait per trigger, the summary and its try count, and
+  the unchanged backoff.
+
 ## 3.9.0 (versionCode 12)
 
 Goal: a real Wi-Fi network controller. The owner's 3.8.0 log showed "Couldn't join "Rippleinstillwaters"" twice:

@@ -262,6 +262,14 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     @Volatile private var gaveUp = false
     @Volatile private var infoRead = false
 
+    // 3.9.1: reconnecting after the glasses drop Bluetooth (declared before the init blocks that use it).
+    private val recovery = DropRecovery()
+    private val settleCheck = Runnable { pumpSettle() }
+    /** The connect that opened the current link was automatic (a retry), not one the person tapped. */
+    @Volatile private var lastConnectAuto = false
+    /** The settle phase last logged, so each phase is logged once. */
+    private var settlePhase: DropRecovery.Phase? = null
+
     init {
         watchdog.scheduleWithFixedDelay({ runCatching { tick() } }, 500, 500, TimeUnit.MILLISECONDS)
     }
@@ -307,6 +315,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                     else -> return
                 }
                 addLog(line)
+                onBluetoothEvent(i)
             }
         }
         AudioRoute.registerSystemReceiver(app, rx, IntentFilter().apply {
@@ -336,6 +345,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         parserDropped = l.parser.dropped
         parserBadCrc = l.parser.badCrc
         maxMediaFrame = l.parser.maxMediaPayload
+        if (recovery.dropped && (state == State.READY || state == State.BUSY)) recovery.stableSummary(now, l.openedAt)?.let(::addLog)
         liveTick(now)
     }
 
@@ -489,6 +499,10 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         state = State.CONNECTING
         val mine = session.incrementAndGet()
         main.removeCallbacks(retry)
+        main.removeCallbacks(settleCheck)
+        recovery.attemptStarted()
+        lastConnectAuto = !manual
+        settlePhase = null
         changed()
         GlassesService.start(app)
         io.execute {
@@ -501,6 +515,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                 if (mine != session.get()) { dropLink("cancelled"); return@execute }
                 state = State.READY
                 readySince = SystemClock.elapsedRealtime()
+                recovery.ready(readySince)
                 lastMessage = if (signedIn) "Connected." else "Connected without your key. " + keylessSummary()
                 attempt = 0
                 main.removeCallbacks(retry)
@@ -863,6 +878,8 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         userDisconnect = true
         prefs.userStopped = true
         main.removeCallbacks(retry)
+        main.removeCallbacks(settleCheck)
+        recovery.reset()
         runCatching { retryLock?.release() }
         attempt = 0
         runCatching { pendingSocket?.close() } // aborts a connect() still blocking
@@ -899,6 +916,10 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         val now = SystemClock.elapsedRealtime()
         addLog(BtDiag.lostLine(reason, if (l.rxSeen) now - l.lastRxAt else -1, l.lastRequestNode,
             if (l.lastRequestAt > 0) now - l.lastRequestAt else -1, if (l.lastWriteAt > 0) now - l.lastWriteAt else -1, now - l.openedAt))
+        if (!userDisconnect) {
+            val loss = recovery.linkLost(now, now - l.openedAt, lastConnectAuto)
+            DropRecovery.lossLine(loss, now - l.openedAt)?.let(::addLog)
+        }
         if (!userDisconnect) lastError = "Lost the connection to the glasses."
         changed()
         if (!userDisconnect) main.post { scheduleReconnect("link lost") }
@@ -932,6 +953,8 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         pausedForBackground = true
         session.incrementAndGet()
         main.removeCallbacks(retry)
+        main.removeCallbacks(settleCheck)
+        recovery.reset()
         runCatching { retryLock?.release() }
         attempt = 0
         runCatching { pendingSocket?.close() }
@@ -973,13 +996,20 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         main.removeCallbacks(retry)
         val now = SystemClock.elapsedRealtime()
         if (attempt == 0) { retryStart = now; runCatching { retryLock?.acquire(ACTIVE_RETRY_MS) } }
+        if (recovery.settling) {
+            // 3.9.1: after the glasses dropped Bluetooth (or a reconnect died at once), wait for them to settle.
+            attempt = maxOf(attempt, 1)
+            settlePhase = null
+            pumpSettle()
+            return
+        }
         if (now - retryStart > ACTIVE_RETRY_MS) {
             attempt = 0
             runCatching { retryLock?.release() }
             addLog("Waiting for the glasses to come back ($why)")
             changed(); return
         }
-        val d = BACKOFF_MS[minOf(attempt++, BACKOFF_MS.lastIndex)]
+        val d = DropRecovery.backoffMs(attempt++)
         addLog("Trying again in ${d / 1000} s ($why)")
         changed()
         main.postDelayed(retry, d)
@@ -988,6 +1018,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     /** The glasses came back in range, Bluetooth turned on, or the phone was unlocked. */
     fun onGlassesSeen(why: String) {
         if (!wantsLink || !prefs.autoReconnect || state != State.IDLE) return
+        if (recovery.settling) { pumpSettle(); return } // 3.9.1: the settle wait decides when
         attempt = 0
         main.removeCallbacks(retry)
         addLog("Trying again: $why")
@@ -996,6 +1027,51 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
 
     /** The radio link dropped: close the socket now instead of waiting for the read to time out. */
     fun linkDownHint() { link?.close("Bluetooth link dropped") }
+
+    // ---------------- 3.9.1: after the glasses drop Bluetooth ----------------
+
+    /** For the Glasses tab: set while the app waits for the glasses to come back after a drop. */
+    val dropWaitText: String?
+        get() = if (recovery.dropped && recovery.settling && state == State.IDLE && wantsLink && prefs.autoReconnect) DropRecovery.WAIT_TEXT else null
+
+    /** ACL and hands-free events for the saved glasses (main thread), after they were logged. */
+    private fun onBluetoothEvent(i: Intent) {
+        val now = SystemClock.elapsedRealtime()
+        when (i.action) {
+            BluetoothDevice.ACTION_ACL_CONNECTED -> recovery.aclConnected(now)
+            BluetoothDevice.ACTION_ACL_DISCONNECTED -> if (recovery.aclDisconnected(now)) {
+                // The link loss came first and the ACL followed: it was a drop, so the short retry is off.
+                addLog(DropRecovery.lossLine(DropRecovery.Loss.DROPPED_BLUETOOTH, 0) ?: return)
+                if (state == State.IDLE) {
+                    main.removeCallbacks(retry)
+                    settlePhase = null
+                }
+            }
+            BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED ->
+                recovery.handsFree(i.getIntExtra(BluetoothProfile.EXTRA_STATE, Int.MIN_VALUE), now)
+            else -> return
+        }
+        if (recovery.settling && state == State.IDLE) pumpSettle()
+    }
+
+    /** Main thread: logs the settle phase once, then waits for it or connects when it's done. */
+    private fun pumpSettle() {
+        main.removeCallbacks(settleCheck)
+        if (!recovery.settling || state != State.IDLE || !wantsLink || !prefs.autoReconnect) return
+        val now = SystemClock.elapsedRealtime()
+        val step = recovery.step(now)
+        main.removeCallbacks(retry) // only the settle wait decides when, until its attempt starts
+        if (step.phase != settlePhase) {
+            settlePhase = step.phase
+            addLog(DropRecovery.stepLine(step))
+            changed()
+        }
+        if (step.phase == DropRecovery.Phase.GO) {
+            main.postDelayed(retry, maxOf(0L, step.atMs - now))
+        } else {
+            main.postDelayed(settleCheck, maxOf(0L, step.atMs - now))
+        }
+    }
 
     // ---------------- frames from the glasses ----------------
 
@@ -2622,7 +2698,6 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         private const val REOPEN_AGAIN_MS = 30_000L
         private val SPP: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
         private const val TOKEN_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-        private val BACKOFF_MS = longArrayOf(2_000, 5_000, 10_000, 20_000, 40_000, 60_000)
         private const val ACTIVE_RETRY_MS = 3 * 60_000L
         private const val ELEMENT_RETRIES = 1
         private const val ELEMENT_IDLE_MS = 4_000L

@@ -2,9 +2,10 @@ package com.zdycomp.p3companion
 
 /** What's new in this version, shown once after an update and on the About screen. */
 object WhatsNew {
-    const val VERSION = "3.9.0"
+    const val VERSION = "3.9.1"
 
     val headlines = listOf(
+        "When the glasses drop Bluetooth altogether, the app waits for them to come back and settle before reconnecting",
         "Wi-Fi: Join on this phone saves an ordinary network the proper way, through Android's own dialog, with internet",
         "Wi-Fi: every network and Wi-Fi Direct device is listed, likely glasses first, with details for each",
         "Wi-Fi: when joining the glasses fails, the app now says why",
@@ -32,6 +33,8 @@ object WhatsNew {
             "Android 10 and later don't let apps switch Wi-Fi on or off, so the Wi-Fi switch opens Android's own Wi-Fi panel.",
         ),
         "Bluetooth drops" to listOf(
+            "3.9.1: when the glasses drop their whole Bluetooth connection (not just the app's link), the app says so and waits for them to come back, for hands-free to settle and 1.5 s more before reconnecting, instead of trying again while they're still restarting. The Glasses tab shows \"The glasses dropped Bluetooth; reconnecting when they're ready\" meanwhile.",
+            "3.9.1: if a reconnect dies within 5 s, the next try waits the same way. Once it's back, the log says how long it took and how many tries. Other drops keep the usual quick retries.",
             "The connection log now notes when the glasses' Bluetooth audio connections change, with the time to the millisecond, and how long since the last data when the link drops. Nothing about connecting changed.",
         ),
     )

@@ -80,7 +80,10 @@ class GlassesScreen(private val a: MainActivity) : Screen {
 
         col.addView(hero())
 
-        g.lastError?.let { err ->
+        // 3.9.1: while waiting for the glasses to come back after they dropped Bluetooth, say so instead.
+        val dropWait = g.dropWaitText
+        if (dropWait != null) col.addView(ui.banner(dropWait, Tone.WARN, "Details") { a.showDiagnostics() })
+        g.lastError?.takeIf { dropWait == null }?.let { err ->
             col.addView(ui.banner(err, Tone.BAD, "Details") { a.showDiagnostics() })
             if (err.contains("LensMoo") && g.state == XkGlasses.State.IDLE) {
                 col.addView(ui.button("Open LensMoo's app info", Btn.OUTLINED, R.drawable.ic_open_in_new) {

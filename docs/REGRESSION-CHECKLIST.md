@@ -47,6 +47,7 @@ and after the move.
 | `wantsLink` | `!userDisconnect && !gaveUp && !userStopped && address != null && userKey != null && (state != IDLE \|\| autoReconnect)`. G2 may add one more `&& !pausedForBackground` term and nothing else. |
 | `reconnectSaved` | Only when `IDLE`, key saved, Bluetooth on, and still bonded; always `manual = false`. |
 | `scheduleReconnect` / `onGlassesSeen` / `linkDownHint` | Backoff `2, 5, 10, 20, 40, 60 s` for `ACTIVE_RETRY_MS = 3 min` under the `p3c:reconnect` wake lock, then wait for a wake event; wake events retry after 1.5 s. |
+| 3.9.1 `DropRecovery` (additive) | Only after a link loss within 2 s of an ACL disconnect, or a reconnect that died within 5 s of opening: the next try waits for ACL connected, then hands-free connected or 4 s, then 1.5 s (ACL cap 10 s), once; `onGlassesSeen` doesn't cut it short. Every other case, and the first connect, keep the backoff above untouched. |
 | `XkGlasses.get` | One instance per process. The QS tile (X2) and widget (X3) must use `get()`, never a second instance. |
 
 ## 2. FROZEN: `XkProtocol.kt` (`object Xk`)
