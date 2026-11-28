@@ -46,6 +46,8 @@ object SettingsBackup {
         "gesture_map" to Kind.STRING, "barge_in" to Kind.BOOL, "reply_volume_auto" to Kind.BOOL, "reply_volume_cap" to Kind.INT,
         "voice_chain" to Kind.BOOL, "pause_live_listen" to Kind.BOOL, "burst_count" to Kind.INT, "live_burst" to Kind.BOOL,
         "media_keys_always" to Kind.BOOL, "adopt_glasses_mic" to Kind.BOOL,
+        // 4.1.2 (the remembered open data stays with these glasses)
+        "live_detail_first" to Kind.BOOL,
         // SupRevolt (never the token or the server address)
         "sr_scans" to Kind.STRING,
         // Privacy

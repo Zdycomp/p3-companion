@@ -146,89 +146,140 @@ class VideoQualityTest {
         assertTrue(SettingsBackup.isSecret("live_hq"))
     }
 
-    // ---------------- 4.1.1: the detail (bitrate) ladder ----------------
+    // ---------------- 4.1.1: the detail (bitrate) ladder; 4.1.2: Smooth first ----------------
 
     private fun hexes(l: List<ByteArray>) = l.map { VideoQuality.hex(it) }
 
-    @Test fun ladderStartsAtMostDetailAndStepsDownToTheStandardOpen() {
-        assertEquals(listOf("01 03", "01 02", "01 01", "01"), hexes(VideoQuality.LADDER))
-        assertArrayEquals(VideoQuality.STANDARD, VideoQuality.LADDER.last())
+    @Test fun ladderStartsSmoothAndFallsBackToTheDetailSettings() {
+        assertEquals(listOf("01", "01 03", "01 02", "01 01"), hexes(VideoQuality.LADDER))
+        assertArrayEquals(VideoQuality.STANDARD, VideoQuality.LADDER.first())
+        assertEquals(listOf("01 03", "01 02", "01 01", "01"), hexes(VideoQuality.DETAIL_LADDER))
         assertTrue(VideoQuality.LADDER.none { it.contentEquals(VideoQuality.CLOSE) })
+        assertTrue(VideoQuality.DETAIL_LADDER.none { it.contentEquals(VideoQuality.CLOSE) })
         assertEquals(3_000L, VideoQuality.NO_VIDEO_MS)
         val l = VideoQuality.OpenLadder(high = null, remembered = null)
-        assertEquals(listOf("01 03", "01 02", "01 01", "01"), hexes(l.order))
-        assertArrayEquals(byteArrayOf(1, 3), l.current)
+        assertEquals(listOf("01", "01 03", "01 02", "01 01"), hexes(l.order))
+        assertArrayEquals(byteArrayOf(1), l.current)
+        val d = VideoQuality.OpenLadder(high = null, remembered = null, detail = true)
+        assertEquals(listOf("01 03", "01 02", "01 01", "01"), hexes(d.order))
+        assertArrayEquals(byteArrayOf(1, 3), d.current)
     }
 
     @Test fun refusedAndNoVideoFallBackInOrderAndTheWorkingOneIsRemembered() {
         val l = VideoQuality.OpenLadder(null, null)
-        assertArrayEquals(byteArrayOf(1, 2), l.next(VideoQuality.Outcome.REFUSED))
-        assertArrayEquals(byteArrayOf(1, 1), l.next(VideoQuality.Outcome.NO_VIDEO))
-        assertArrayEquals(byteArrayOf(1), l.next(VideoQuality.Outcome.REFUSED))
+        assertArrayEquals(byteArrayOf(1, 3), l.next(VideoQuality.Outcome.REFUSED))
+        assertArrayEquals(byteArrayOf(1, 2), l.next(VideoQuality.Outcome.NO_VIDEO))
+        assertArrayEquals(byteArrayOf(1, 1), l.next(VideoQuality.Outcome.REFUSED))
         assertTrue(l.isLast)
         assertNull(l.next(VideoQuality.Outcome.VIDEO))
-        assertArrayEquals(byteArrayOf(1), l.remember)
+        assertArrayEquals(byteArrayOf(1, 1), l.remember)
+        // Detail steps down the same way, to the standard open last.
+        val d = VideoQuality.OpenLadder(null, null, detail = true)
+        assertArrayEquals(byteArrayOf(1, 2), d.next(VideoQuality.Outcome.REFUSED))
+        assertArrayEquals(byteArrayOf(1, 1), d.next(VideoQuality.Outcome.NO_VIDEO))
+        assertArrayEquals(byteArrayOf(1), d.next(VideoQuality.Outcome.REFUSED))
+        assertNull(d.next(VideoQuality.Outcome.VIDEO))
+        assertArrayEquals(byteArrayOf(1), d.remember)
         // The last setting with no video: nothing more to try, nothing remembered.
-        val m = VideoQuality.OpenLadder(null, byteArrayOf(1))
-        assertEquals(listOf("01"), hexes(m.order))
+        val m = VideoQuality.OpenLadder(null, byteArrayOf(1, 1))
+        assertEquals(listOf("01 01"), hexes(m.order))
         assertNull(m.next(VideoQuality.Outcome.NO_VIDEO))
         assertNull(m.remember)
     }
 
-    @Test fun theOwnersGlassesOpenWithMostDetailAtOnce() {
+    @Test fun theOwnersGlassesOpenSmoothAtOnce() {
         val l = VideoQuality.OpenLadder(null, null)
         assertNull(l.next(VideoQuality.Outcome.VIDEO))
-        assertArrayEquals(byteArrayOf(1, 3), l.remember)
+        assertArrayEquals(byteArrayOf(1), l.remember)
+        assertEquals("smooth", VideoQuality.detailName(byteArrayOf(1)))
         assertEquals("most detail", VideoQuality.detailName(byteArrayOf(1, 3)))
-        assertEquals("basic", VideoQuality.detailName(byteArrayOf(1)))
+        assertEquals("high detail", VideoQuality.detailName(byteArrayOf(1, 2)))
+        assertEquals("medium detail", VideoQuality.detailName(byteArrayOf(1, 1)))
         assertNull(VideoQuality.detailName(byteArrayOf(2)))
     }
 
     @Test fun theRememberedSettingGoesFirstThenTheOnesBelowIt() {
-        assertEquals(listOf("01 02", "01 01", "01"), hexes(VideoQuality.OpenLadder(null, byteArrayOf(1, 2)).order))
-        assertEquals(listOf("01 01", "01"), hexes(VideoQuality.OpenLadder(null, byteArrayOf(1, 1)).order))
+        assertEquals(listOf("01 02", "01 01"), hexes(VideoQuality.OpenLadder(null, byteArrayOf(1, 2)).order))
+        assertEquals(listOf("01 03", "01 02", "01 01"), hexes(VideoQuality.OpenLadder(null, byteArrayOf(1, 3)).order))
+        assertEquals(listOf("01 02", "01 01", "01"), hexes(VideoQuality.OpenLadder(null, byteArrayOf(1, 2), detail = true).order))
+        assertEquals(listOf("01"), hexes(VideoQuality.OpenLadder(null, byteArrayOf(1), detail = true).order))
         // Data that isn't on the ladder is ignored: the whole ladder from the top.
-        assertEquals(listOf("01 03", "01 02", "01 01", "01"), hexes(VideoQuality.OpenLadder(null, byteArrayOf(2)).order))
+        assertEquals(listOf("01", "01 03", "01 02", "01 01"), hexes(VideoQuality.OpenLadder(null, byteArrayOf(2)).order))
+        assertEquals(listOf("01 03", "01 02", "01 01", "01"), hexes(VideoQuality.OpenLadder(null, byteArrayOf(2), detail = true).order))
     }
 
     @Test fun highGoesFirstAndIsNeverRememberedAsTheDetailSetting() {
         val l = VideoQuality.OpenLadder(high = byteArrayOf(3), remembered = byteArrayOf(1, 2))
-        assertEquals(listOf("03", "01 02", "01 01", "01"), hexes(l.order))
+        assertEquals(listOf("03", "01 02", "01 01"), hexes(l.order))
         assertNull(l.next(VideoQuality.Outcome.VIDEO))
         assertNull("High's data is kept as High, not as the detail setting", l.remember)
         // High data that is itself on the ladder isn't tried twice.
-        assertEquals(listOf("01 03", "01 02", "01 01", "01"), hexes(VideoQuality.OpenLadder(byteArrayOf(1, 3), null).order))
+        assertEquals(listOf("01 03", "01", "01 02", "01 01"), hexes(VideoQuality.OpenLadder(byteArrayOf(1, 3), null).order))
+        assertEquals(listOf("01 03", "01 02", "01 01", "01"), hexes(VideoQuality.OpenLadder(byteArrayOf(1, 3), null, detail = true).order))
         val h = VideoQuality.OpenLadder(byteArrayOf(3), null)
-        assertArrayEquals(byteArrayOf(1, 3), h.next(VideoQuality.Outcome.REFUSED))
+        assertArrayEquals(byteArrayOf(1), h.next(VideoQuality.Outcome.REFUSED))
     }
 
     @Test fun busyOrLeavingNeverStepsDownOrRemembers() {
-        for (o in listOf(VideoQuality.Outcome.BUSY, VideoQuality.Outcome.STOPPED)) {
-            val l = VideoQuality.OpenLadder(null, null)
+        for (detail in listOf(false, true)) for (o in listOf(VideoQuality.Outcome.BUSY, VideoQuality.Outcome.STOPPED)) {
+            val l = VideoQuality.OpenLadder(null, null, detail)
             assertNull(l.next(o))
             assertEquals(0, l.index)
             assertNull(l.remember)
         }
     }
 
+    private fun meas(d: ByteArray, fps: Double, kbps: Double, code: Int? = null) =
+        VideoQuality.Result(d, code, true, if (fps > 0) 320 else null, if (fps > 0) 240 else null,
+            Math.round(fps * 3), Math.round(kbps * 3_000 / 8), 3_000)
+
     @Test fun theProbeFeedsTheRememberedSetting() {
         // The owner's 4.1.0 quality test.
-        fun r(d: ByteArray, fps: Double, kbps: Double, code: Int? = null) =
-            VideoQuality.Result(d, code, true, if (fps > 0) 320 else null, if (fps > 0) 240 else null,
-                (fps * 3).toLong(), (kbps * 3_000 / 8).toLong(), 3_000)
-        val std = r(byteArrayOf(1), 10.7, 162.0)
-        val results = listOf(r(byteArrayOf(1, 1), 14.0, 180.0), r(byteArrayOf(1, 2), 15.7, 199.0), r(byteArrayOf(1, 3), 15.3, 203.0),
-            r(byteArrayOf(2), 0.0, 0.0), r(byteArrayOf(3), 0.0, 0.0))
-        assertArrayEquals(byteArrayOf(1, 3), VideoQuality.detailFromProbe(std, results))
-        assertEquals("Live view opens with [01 03] (most detail, 203 kbps).", VideoQuality.detailSentence(std, results))
+        val std = meas(byteArrayOf(1), 10.7, 162.0)
+        val results = listOf(meas(byteArrayOf(1, 1), 14.0, 180.0), meas(byteArrayOf(1, 2), 15.7, 199.0), meas(byteArrayOf(1, 3), 15.3, 203.0),
+            meas(byteArrayOf(2), 0.0, 0.0), meas(byteArrayOf(3), 0.0, 0.0))
+        // 4.1.2: Smooth remembers [01]; Detail remembers [01 03].
+        assertArrayEquals(byteArrayOf(1), VideoQuality.detailFromProbe(std, results))
+        assertEquals("Live view opens with [01] (smooth, 162 kbps).", VideoQuality.detailSentence(std, results))
+        assertArrayEquals(byteArrayOf(1, 3), VideoQuality.detailFromProbe(std, results, detail = true))
+        assertEquals("Live view opens with [01 03] (most detail, 203 kbps).", VideoQuality.detailSentence(std, results, detail = true))
         assertNull("no bigger picture, so High stays off", VideoQuality.best(std, results))
-        // [01 03] refused and [01 02] silent: the most detail that sent pictures is [01 01].
-        val worse = listOf(r(byteArrayOf(1, 1), 14.0, 180.0), r(byteArrayOf(1, 2), 0.0, 0.0), r(byteArrayOf(1, 3), 0.0, 0.0, code = 3))
-        assertArrayEquals(byteArrayOf(1, 1), VideoQuality.detailFromProbe(std, worse))
+        // [01] silent: Smooth falls back to [01 03]. [01 03] refused and [01 02] silent: Detail's next is [01 01].
+        val noStd = meas(byteArrayOf(1), 0.0, 0.0)
+        assertArrayEquals(byteArrayOf(1, 3), VideoQuality.detailFromProbe(noStd, results))
+        val worse = listOf(meas(byteArrayOf(1, 1), 14.0, 180.0), meas(byteArrayOf(1, 2), 0.0, 0.0), meas(byteArrayOf(1, 3), 0.0, 0.0, code = 3))
+        assertArrayEquals(byteArrayOf(1, 1), VideoQuality.detailFromProbe(noStd, worse, detail = true))
         // Nothing sent pictures: the remembered setting is left alone.
-        assertNull(VideoQuality.detailFromProbe(r(byteArrayOf(1), 0.0, 0.0), listOf(r(byteArrayOf(1, 3), 0.0, 0.0))))
+        assertNull(VideoQuality.detailFromProbe(meas(byteArrayOf(1), 0.0, 0.0), listOf(meas(byteArrayOf(1, 3), 0.0, 0.0))))
         assertEquals("No setting sent pictures, so the live view keeps its setting.",
-            VideoQuality.detailSentence(null, listOf(r(byteArrayOf(1, 3), 0.0, 0.0))))
+            VideoQuality.detailSentence(null, listOf(meas(byteArrayOf(1, 3), 0.0, 0.0))))
+    }
+
+    @Test fun theOwners411TestRecommendsSmoothByFpsTimesBits() {
+        // 4.1.1 on the E13C-5: [01] 30.0 fps 378 kbps, [01 01] 16.0/221, [01 02] 16.7/238, [01 03] 16.0/233.
+        val std = meas(byteArrayOf(1), 30.0, 378.0)
+        val results = listOf(meas(byteArrayOf(1, 1), 16.0, 221.0), meas(byteArrayOf(1, 2), 16.7, 238.0), meas(byteArrayOf(1, 3), 16.0, 233.0),
+            meas(byteArrayOf(2), 0.0, 0.0), meas(byteArrayOf(3), 0.0, 0.0))
+        assertEquals(12.6, VideoQuality.kbitPerFrame(std), 0.05)
+        val rec = VideoQuality.recommendation(std, results)!!
+        assertEquals("Smooth [01] 30.0 fps × 12.6 kbit, Detail [01 03] 16.0 fps × 14.6 kbit: Smooth gives the most frames; " +
+            "Detail gives ~16% more per frame. Recommended by fps × bits: Smooth.", rec)
+        assertEquals("$rec Live view opens with [01] (smooth, 378 kbps).", VideoQuality.detailSummary(std, results))
+        // The 4.1.0 numbers ([01] at 10.7 fps) would have recommended Detail.
+        val old = VideoQuality.recommendation(meas(byteArrayOf(1), 10.7, 162.0), listOf(meas(byteArrayOf(1, 3), 15.3, 203.0)))!!
+        assertTrue(old, old.contains("Detail gave more frames this time"))
+        assertTrue(old, old.endsWith("Recommended by fps × bits: Detail."))
+        // Only one side sent pictures: no comparison, just the setting.
+        assertNull(VideoQuality.recommendation(std, listOf(meas(byteArrayOf(1, 3), 0.0, 0.0))))
+        assertEquals("Live view opens with [01] (smooth, 378 kbps).", VideoQuality.detailSummary(std, listOf(meas(byteArrayOf(1, 3), 0.0, 0.0))))
+    }
+
+    @Test fun sharpSnapshotPrefersSmooth() {
+        assertNull(VideoQuality.sharpSnapshotHint(byteArrayOf(1)))
+        assertNull(VideoQuality.sharpSnapshotHint(null))
+        assertTrue(VideoQuality.sharpSnapshotHint(byteArrayOf(1, 3))!!.startsWith("Smooth"))
+        assertTrue(VideoQuality.isDetailData(byteArrayOf(1, 1)))
+        assertTrue(!VideoQuality.isDetailData(byteArrayOf(1)) && !VideoQuality.isDetailData(byteArrayOf(2)) && !VideoQuality.isDetailData(byteArrayOf(2, 3)))
     }
 
     @Test fun theDetailSettingIsSavedPerDeviceAndNotBackedUp() {
@@ -236,9 +287,73 @@ class VideoQualityTest {
         assertNull(p.liveDetailData)
         p.liveDetailData = byteArrayOf(1, 2)
         assertArrayEquals(byteArrayOf(1, 2), p.liveDetailData)
-        assertEquals(listOf("01 02", "01 01", "01"), hexes(VideoQuality.OpenLadder(null, p.liveDetailData).order))
+        assertEquals(listOf("01 02", "01 01"), hexes(VideoQuality.OpenLadder(null, p.liveDetailData).order))
         p.liveDetailData = null
         assertNull(p.liveDetailData)
         assertTrue(SettingsBackup.isSecret("live_quality_open"))
+        assertTrue("the Smooth/Detail choice is the person's, so it's backed up", !SettingsBackup.isSecret("live_detail_first"))
+    }
+
+    // ---------------- 4.1.2: Smooth by default, Detail by choice, and the migration ----------------
+
+    @Test fun smoothIsTheDefaultAndChoosingStartsAfresh() {
+        val p = Prefs(FakeSharedPreferences())
+        assertEquals(false, p.liveDetailFirst)
+        p.liveDetailData = byteArrayOf(1)
+        p.chooseLiveDetail(true)
+        assertEquals(true, p.liveDetailFirst)
+        assertNull("a new choice starts from its own top", p.liveDetailData)
+        p.liveDetailData = byteArrayOf(1, 3)
+        p.chooseLiveDetail(true)
+        assertArrayEquals("the same choice again keeps what worked", byteArrayOf(1, 3), p.liveDetailData)
+        p.chooseLiveDetail(false)
+        assertEquals(false, p.liveDetailFirst)
+        assertNull(p.liveDetailData)
+    }
+
+    @Test fun migrationResetsA411DetailSettingToSmooth() {
+        for (old in listOf(byteArrayOf(1, 3), byteArrayOf(1, 2), byteArrayOf(1, 1))) {
+            val p = Prefs(FakeSharedPreferences())
+            p.liveDetailData = old
+            assertTrue(p.migrateLiveDetail())
+            assertArrayEquals(byteArrayOf(1), p.liveDetailData)
+            assertEquals(listOf("01", "01 03", "01 02", "01 01"), hexes(VideoQuality.OpenLadder(null, p.liveDetailData, p.liveDetailFirst).order))
+            // Once only: a setting remembered later (say [01] failed and [01 03] worked) stays.
+            p.liveDetailData = byteArrayOf(1, 3)
+            assertTrue(!p.migrateLiveDetail())
+            assertArrayEquals(byteArrayOf(1, 3), p.liveDetailData)
+        }
+    }
+
+    @Test fun migrationKeepsAnExplicitDetailChoiceAndEverythingElse() {
+        val chose = Prefs(FakeSharedPreferences())
+        chose.liveDetailFirst = true
+        chose.liveDetailData = byteArrayOf(1, 3)
+        assertTrue(!chose.migrateLiveDetail())
+        assertArrayEquals(byteArrayOf(1, 3), chose.liveDetailData)
+        val none = Prefs(FakeSharedPreferences())
+        assertTrue(!none.migrateLiveDetail())
+        assertNull(none.liveDetailData)
+        val smooth = Prefs(FakeSharedPreferences())
+        smooth.liveDetailData = byteArrayOf(1)
+        assertTrue(!smooth.migrateLiveDetail())
+        assertArrayEquals(byteArrayOf(1), smooth.liveDetailData)
+        // The pure rule.
+        assertArrayEquals(byteArrayOf(1), VideoQuality.migrateRemembered(byteArrayOf(1, 2), detailChosen = false))
+        assertArrayEquals(byteArrayOf(1, 2), VideoQuality.migrateRemembered(byteArrayOf(1, 2), detailChosen = true))
+        assertArrayEquals(byteArrayOf(3), VideoQuality.migrateRemembered(byteArrayOf(3), detailChosen = false))
+        assertNull(VideoQuality.migrateRemembered(null, detailChosen = false))
+    }
+
+    // ---------------- 4.1.2: the 0x2B frame's bytes are always logged ----------------
+
+    @Test fun customFramesLogTheirBytesOnEverySignIn() {
+        val owner = byteArrayOf(0x01, 0x10, 0x03, 0xF0.toByte(), 0x60, 0x00, 0x00)
+        assertEquals("← 2B frame (7 B): 01 10 03 F0 60 00 00", Xk.customFrameLine(owner, raw = false))
+        assertEquals("← 2B frame (7 B): 01 10 03 F0 60 00 00", Xk.customFrameLine(owner, raw = true))
+        assertEquals("← 2B frame (0 B)", Xk.customFrameLine(ByteArray(0), raw = false))
+        val long = ByteArray(40) { it.toByte() }
+        assertTrue(Xk.customFrameLine(long, raw = false).endsWith("1F (first 32 B)"))
+        assertTrue(Xk.customFrameLine(long, raw = true).endsWith(" 27"))
     }
 }

@@ -276,6 +276,17 @@ object Xk {
         return "$total B:$hdr: " + b.take(48).joinToString(" ") { "%02X".format(it) }
     }
 
+    /**
+     * 4.1.2: the log line for a `0x2B` vendor frame. Its bytes are always logged (up to 32; 64 under hardware test
+     * T13), so the 7-byte frame after every sign-in can be compared across sign-ins (HARDWARE-MAP §9.6, §9.8).
+     */
+    fun customFrameLine(payload: ByteArray, raw: Boolean): String {
+        val max = if (raw) 64 else 32
+        val shown = payload.take(max).joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
+        return "← 2B frame (${payload.size} B)" + (if (payload.isEmpty()) "" else ": $shown") +
+            if (payload.size > max) " (first $max B)" else ""
+    }
+
     /** Offset of a JPEG start (FF D8 FF) within the first [within] bytes of [e], or -1. */
     fun jpegStart(e: ByteArray, within: Int = 24): Int {
         var i = 0

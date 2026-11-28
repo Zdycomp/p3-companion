@@ -189,11 +189,41 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
 
     /**
      * 4.1.1: the detail (bitrate) setting the live view last opened with and got pictures from
-     * ([VideoQuality.LADDER]), tried first next time; null until one worked (the ladder starts at `[01 03]`).
+     * ([VideoQuality.LADDER]), tried first next time; null until one worked (4.1.2: the ladder starts at `[01]`,
+     * or at `[01 03]` with [liveDetailFirst]).
      */
     var liveDetailData: ByteArray?
         get() = VideoQuality.parseHex(sp.getString("live_quality_open", null))
         set(v) = sp.edit().putString("live_quality_open", v?.let { VideoQuality.hex(it) }).apply()
+
+    /**
+     * 4.1.2: Settings › Live view: Detail (`[01 03]` first, about 16 fps) when true; Smooth (`[01]` first, 30 fps,
+     * the default) when false. Only the person's own choice sets it to true.
+     */
+    var liveDetailFirst: Boolean
+        get() = sp.getBoolean("live_detail_first", false)
+        set(v) = sp.edit().putBoolean("live_detail_first", v).apply()
+
+    /** 4.1.2: picks Smooth or Detail and starts the ladder afresh from that choice's top at the next open. */
+    fun chooseLiveDetail(detail: Boolean) {
+        if (detail == liveDetailFirst) return
+        liveDetailFirst = detail
+        liveDetailData = null
+    }
+
+    /**
+     * 4.1.2, once: a remembered `[01 0x]` from 4.1.1 becomes `[01]` unless Detail was chosen ([VideoQuality.migrateRemembered]).
+     * Returns true when it changed the remembered setting.
+     */
+    fun migrateLiveDetail(): Boolean {
+        if (sp.getBoolean("live_detail_412", false)) return false
+        val before = liveDetailData
+        val after = VideoQuality.migrateRemembered(before, liveDetailFirst)
+        val changed = !(before?.contentEquals(after) ?: (after == null))
+        if (changed) liveDetailData = after
+        sp.edit().putBoolean("live_detail_412", true).apply()
+        return changed
+    }
 
     /** The last "Try higher quality" result in one sentence, and when it ran. */
     var liveQualityReport: String?

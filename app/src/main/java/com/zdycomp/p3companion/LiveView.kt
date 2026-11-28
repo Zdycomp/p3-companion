@@ -1017,11 +1017,11 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
                 setPadding(0, ui.dp(8), 0, 0)
             })
         }
-        // 4.1.1: the detail (bitrate) setting the live view opens with.
-        val detail = p.liveDetailData ?: VideoQuality.LADDER.first()
-        card.addView(ui.text("Detail: [${VideoQuality.hex(detail)}] ${VideoQuality.detailName(detail) ?: ""}" +
-            (if (p.liveDetailData == null) ", tried first; steps down by itself if no picture comes" else ", the most that worked") +
-            ". Live view opens with the most detail that works.", Type.BODY_SMALL, s.onSurfaceVariant).apply { setPadding(0, ui.dp(4), 0, 0) })
+        // 4.1.1: the detail (bitrate) setting the live view opens with. 4.1.2: Smooth ([01], 30 fps) or Detail first.
+        val detail = p.liveDetailData ?: VideoQuality.ladder(p.liveDetailFirst).first()
+        card.addView(ui.text("Live view: ${if (p.liveDetailFirst) "Detail" else "Smooth"} · [${VideoQuality.hex(detail)}] ${VideoQuality.detailName(detail) ?: ""}" +
+            (if (p.liveDetailData == null) ", tried first; steps down by itself if no picture comes" else ", the one that worked last") +
+            ". Change it in Settings › Capture.", Type.BODY_SMALL, s.onSurfaceVariant).apply { setPadding(0, ui.dp(4), 0, 0) })
         p.liveQualityReport?.let { card.addView(ui.text("Last try: $it", Type.BODY_SMALL, s.onSurfaceVariant).apply { setPadding(0, ui.dp(4), 0, 0) }) }
         card.addView(ui.button("Try higher quality", Btn.TEXT, R.drawable.ic_auto_awesome, full = false) { askTryQuality() })
         card.addView(ui.choiceRow("Shape", listOf("Fit", "Fill"), if (p.liveFill) 1 else 0) { i ->
@@ -1529,7 +1529,9 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         a.toast("Combining ${frames.size} live pictures…")
         BurstCapture.liveBurst(a, frames, liveRing.w, liveRing.h, a.prefs.liveRotation) { uri, line ->
             a.glasses.addLog(line)
-            a.toast(if (uri != null) "Sharp snapshot saved." else line)
+            // 4.1.2: Sharp snapshot prefers Smooth (16 pictures in about half a second, so less moves between them).
+            val hint = if (uri != null) VideoQuality.sharpSnapshotHint(a.glasses.liveOpenData) else null
+            a.toast(if (uri != null) "Sharp snapshot saved." + (hint?.let { " $it" } ?: "") else line)
             if (uri != null) a.refreshGalleryIfShown()
         }
     }

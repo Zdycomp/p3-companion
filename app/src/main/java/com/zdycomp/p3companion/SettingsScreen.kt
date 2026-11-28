@@ -239,6 +239,12 @@ class SettingsScreen(private val a: MainActivity) : Screen {
             p.selfTimer = steps[it]
         }))
         g.addView(ui.switchRow("Keep screen on in live view", null, p.liveKeepScreenOn, R.drawable.ic_videocam) { p.liveKeepScreenOn = it })
+        // 4.1.2: Smooth ([01], 30 fps) is the default; Detail ([01 03]) trades frames for a little more per frame.
+        g.addView(pad(ui.choiceRow("Live view", listOf("Smooth (30 fps, default)", "Detail (about 16 fps, a little more detail per frame)"),
+            if (p.liveDetailFirst) 1 else 0) { p.chooseLiveDetail(it == 1) }))
+        g.addView(note("Smooth opens with [01], the glasses' 30 pictures a second, and is best for Sharp snapshot. Detail opens with [01 03]: " +
+            "about 15% more data a picture at about 16 pictures a second. Either steps down by itself if no picture comes. " +
+            "Applies the next time live view opens."))
         g.addView(note("Live view and its recordings come in the size the glasses send (often 320×240). There's no command to change it, so the live view header shows what arrives."))
         col.addView(g)
 

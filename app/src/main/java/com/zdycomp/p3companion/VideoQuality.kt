@@ -83,27 +83,51 @@ object VideoQuality {
             .maxWithOrNull(compareBy<Result>({ it.pixels }, { it.fps }))
     }
 
-    // ---------------- 4.1.1: the detail (bitrate) ladder ----------------
+    // ---------------- 4.1.1: the detail (bitrate) ladder; 4.1.2: Smooth first ----------------
 
     /**
-     * 4.1.1: open data by detail, most first. The owner's 4.1.0 quality test on the E13C-5 (fw 1.0.0):
-     * `[01]` 320×240 10.7 fps 162 kbps, `[01 01]` 14.0 fps 180 kbps, `[01 02]` 15.7 fps 199 kbps,
-     * `[01 03]` 15.3 fps 203 kbps; `[02]` and `[03]` accepted with no video. The second byte reads as a
-     * bitrate level: more bits for each picture at the same size, so less blur from compression.
+     * 4.1.2: the open data in the order the live view tries them, Smooth (the default) first. The owner's 4.1.1
+     * quality test on the E13C-5 (fw 1.0.0): `[01]` 320×240 30.0 fps 378 kbps (12.6 kbit a picture), `[01 01]`
+     * 16.0 fps 221 kbps (13.8), `[01 02]` 16.7 fps 238 kbps (14.3), `[01 03]` 16.0 fps 233 kbps (14.6). The second
+     * byte caps the rate near 16 fps for only ~15% more bits a picture, so plain `[01]` goes first and the
+     * second-byte settings are the fallbacks, most detail first (4.1.1 opened with `[01 03]`).
      */
-    val LADDER: List<ByteArray> = listOf(byteArrayOf(1, 3), byteArrayOf(1, 2), byteArrayOf(1, 1), STANDARD)
+    val LADDER: List<ByteArray> = listOf(STANDARD, byteArrayOf(1, 3), byteArrayOf(1, 2), byteArrayOf(1, 1))
+
+    /** 4.1.2: the order when Settings › Live view is set to Detail: `[01 03]` first, stepping down to `[01]`. */
+    val DETAIL_LADDER: List<ByteArray> = listOf(byteArrayOf(1, 3), byteArrayOf(1, 2), byteArrayOf(1, 1), STANDARD)
+
+    /** The ladder for the Settings choice: Detail ([detail] true) or Smooth. */
+    fun ladder(detail: Boolean): List<ByteArray> = if (detail) DETAIL_LADDER else LADDER
 
     /** How long an accepted open may go without a picture before the next setting down is tried. */
     const val NO_VIDEO_MS = 3_000L
 
-    /** A short plain name for a ladder setting ("most detail"), or null for other data. */
-    fun detailName(data: ByteArray?): String? = when (data?.let { d -> LADDER.indexOfFirst { it.contentEquals(d) } }) {
+    /** A short plain name for a ladder setting ("smooth", "most detail"), or null for other data. */
+    fun detailName(data: ByteArray?): String? = when (data?.let { d -> DETAIL_LADDER.indexOfFirst { it.contentEquals(d) } }) {
         0 -> "most detail"
         1 -> "high detail"
         2 -> "medium detail"
-        3 -> "basic"
+        3 -> "smooth"
         else -> null
     }
+
+    /** True for a second-byte (detail) setting, `[01 0x]`. */
+    fun isDetailData(data: ByteArray?): Boolean = data != null && data.size == 2 && data[0] == STANDARD[0]
+
+    /**
+     * 4.1.2 migration: 4.1.1 remembered `[01 03]` (or the next one down) whenever it gave pictures. Unless the person
+     * chose Detail in Settings, that becomes `[01]` so the live view opens Smooth again; anything else is kept.
+     */
+    fun migrateRemembered(remembered: ByteArray?, detailChosen: Boolean): ByteArray? =
+        if (!detailChosen && isDetailData(remembered)) STANDARD.copyOf() else remembered
+
+    /**
+     * 4.1.2: a line for Sharp snapshot when the live view runs a detail setting: its 16 pictures then span about a
+     * second instead of half a second, so Smooth suits it better. Null when the live view runs Smooth (or isn't open).
+     */
+    fun sharpSnapshotHint(open: ByteArray?): String? =
+        if (isDetailData(open)) "Smooth (Settings › Capture › Live view) gives Sharp snapshot about twice the pictures a second." else null
 
     /** What one open with one setting came to. */
     enum class Outcome {
@@ -122,18 +146,20 @@ object VideoQuality {
     /**
      * 4.1.1: the order the live view tries open data in, and what to remember. [high] (Quality set to
      * High, a bigger picture the probe found) goes first; then the ladder from [remembered] down (the
-     * whole ladder from `[01 03]` when nothing is remembered or the remembered data isn't on it).
+     * whole ladder from its top when nothing is remembered or the remembered data isn't on it). 4.1.2: the
+     * ladder is Smooth's (`[01]` first) unless [detail] (Settings › Live view › Detail, `[01 03]` first).
      * Pure state, so the JVM tests run exactly what the app runs.
      */
-    class OpenLadder(high: ByteArray?, remembered: ByteArray?) {
+    class OpenLadder(high: ByteArray?, remembered: ByteArray?, detail: Boolean = false) {
         val order: List<ByteArray>
         var index = 0; private set
         /** The ladder setting that gave pictures, to save; null when none did (or it was the High data). */
         var remember: ByteArray? = null; private set
 
         init {
-            val start = remembered?.let { r -> LADDER.indexOfFirst { it.contentEquals(r) } }?.takeIf { it >= 0 } ?: 0
-            val rest = LADDER.drop(start)
+            val steps = ladder(detail)
+            val start = remembered?.let { r -> steps.indexOfFirst { it.contentEquals(r) } }?.takeIf { it >= 0 } ?: 0
+            val rest = steps.drop(start)
             order = (listOfNotNull(high) + rest).fold(mutableListOf()) { acc, d -> if (acc.none { it.contentEquals(d) }) acc += d; acc }
         }
 
@@ -149,20 +175,48 @@ object VideoQuality {
     }
 
     /**
-     * 4.1.1: what "Try higher quality" teaches the live view: the most-detail ladder setting that was
-     * accepted and sent pictures, or null when none did (the remembered setting is then left alone).
+     * 4.1.1: what "Try higher quality" teaches the live view: the first setting of the chosen ladder (4.1.2: Smooth's
+     * `[01]` first, or Detail's `[01 03]` first) that was accepted and sent pictures, or null when none did (the
+     * remembered setting is then left alone).
      */
-    fun detailFromProbe(standard: Result?, results: List<Result>): ByteArray? {
+    fun detailFromProbe(standard: Result?, results: List<Result>, detail: Boolean = false): ByteArray? {
         val worked = (listOfNotNull(standard) + results).filter { it.accepted && it.pictures > 0 }
-        return LADDER.firstOrNull { d -> worked.any { it.data.contentEquals(d) } }
+        return ladder(detail).firstOrNull { d -> worked.any { it.data.contentEquals(d) } }
     }
 
     /** One sentence for the report: which setting the live view now opens with. */
-    fun detailSentence(standard: Result?, results: List<Result>): String {
-        val d = detailFromProbe(standard, results) ?: return "No setting sent pictures, so the live view keeps its setting."
+    fun detailSentence(standard: Result?, results: List<Result>, detail: Boolean = false): String {
+        val d = detailFromProbe(standard, results, detail) ?: return "No setting sent pictures, so the live view keeps its setting."
         val r = (listOfNotNull(standard) + results).first { it.data.contentEquals(d) }
         return "Live view opens with [${hex(d)}] (${detailName(d)}, %.0f kbps).".format(Locale.US, r.kbps)
     }
+
+    /** Kilobits a picture (0 with no pictures). */
+    fun kbitPerFrame(r: Result): Double = if (r.fps > 0) r.kbps / r.fps else 0.0
+
+    /**
+     * 4.1.2: Smooth against Detail by pictures a second × kilobits a picture (the picture data a second). Smooth
+     * is the `[01]` result; Detail is the `[01 0x]` result with the most bits a picture. Null unless both sent
+     * pictures.
+     */
+    fun recommendation(standard: Result?, results: List<Result>): String? {
+        val all = (listOfNotNull(standard) + results).filter { it.accepted && it.pictures > 0 }
+        val smooth = all.firstOrNull { it.data.contentEquals(STANDARD) } ?: return null
+        val det = all.filter { isDetailData(it.data) }.maxByOrNull { kbitPerFrame(it) } ?: return null
+        val sk = kbitPerFrame(smooth)
+        val dk = kbitPerFrame(det)
+        val pct = if (sk > 0) Math.round((dk / sk - 1) * 100).toInt() else 0
+        val frames = if (smooth.fps >= det.fps) "Smooth gives the most frames" else "Detail gave more frames this time"
+        val more = if (pct > 0) "Detail gives ~$pct% more per frame" else "Detail gives no more per frame"
+        val pick = if (smooth.fps * sk >= det.fps * dk) "Smooth" else "Detail"
+        fun n(v: Double) = "%.1f".format(Locale.US, v)
+        return "Smooth [${hex(smooth.data)}] ${n(smooth.fps)} fps × ${n(sk)} kbit, Detail [${hex(det.data)}] ${n(det.fps)} fps × ${n(dk)} kbit: " +
+            "$frames; $more. Recommended by fps × bits: $pick."
+    }
+
+    /** 4.1.2: the quality test's live-view line: the recommendation (when there is one), then the setting used. */
+    fun detailSummary(standard: Result?, results: List<Result>, detail: Boolean = false): String =
+        listOfNotNull(recommendation(standard, results), detailSentence(standard, results, detail)).joinToString(" ")
 
     fun hex(b: ByteArray): String = b.joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
 

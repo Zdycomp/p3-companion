@@ -49,7 +49,7 @@ class HardwareTestsScreen(private val a: MainActivity) : Screen {
         Test("T12", "Indicator light", "Look at the frame while taking a photo, during live view and during voice chat. Note any light and its colour (observation only).", false),
         Test("T13", "Raw setup bytes", "Run, then disconnect and connect again on the Glasses tab. The next sign-in also reads 7100 (a read) and logs the whole device info (MAC hidden) and the 2B frames.", true),
         Test("T14", "Photo during live view", "With live view open, tap Take photo. Note whether the stream pauses and the photo arrives whole.", false),
-        Test("T15", "Wake word", "With the app connected and this screen open, say \"Hey\", \"Hi\" or similar near the glasses. Any touch push or mic audio shows below.", false),
+        Test("T15", "Wake word", "With the app connected and this screen open, say \"Hey\", \"Hi\" or similar near the glasses, then \"take a photo\" (don't press any button). Any touch push, mic audio, 2B frame, or photo or media push the app didn't ask for (57B1, 7320, 4A) shows below and in the log.", false),
     )
 
     override fun build(): View {
@@ -78,6 +78,7 @@ class HardwareTestsScreen(private val a: MainActivity) : Screen {
             "Glasses: " + g.state.name.lowercase(Locale.US) + (g.battery?.let { ", battery $it%" + if (g.charging == true) " (charging)" else "" } ?: ""),
             "Phone media volume: ${HardwareKeys.volumeText}",
             "Mic audio the glasses started themselves: ${g.unsolicitedMicFrames} frames",
+            "Photo or media pushes the app didn't ask for: ${g.unaskedPhotoPushes}",
             "Audio to Gemini: ${AudioUpload.label(a.prefs.geminiOggState)}",
             "Learned touch codes: " + a.prefs.gestureCodes.entries.joinToString { "${it.key} = ${it.value.label}" }.ifEmpty { "none yet" },
         ).joinToString("\n"), Type.BODY_SMALL, ui.s.onSurfaceVariant))

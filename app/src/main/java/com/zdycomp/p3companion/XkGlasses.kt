@@ -753,7 +753,8 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
             addLog("7110 flags: $flags7110")
         }
         // 4.1 hardware test T13 (only when asked for, once): the capability mask 7100 (a read) and the
-        // whole 1001 JSON. The normal setup order above and below is unchanged.
+        // whole 1001 JSON. The normal setup order above and below is unchanged. 4.1.2: 7100 is the watch
+        // platform's template (HARDWARE-MAP §9.3), so it is only logged: no app feature is ever turned on or off by it.
         val rawOnce = rawSetupLog
         if (rawOnce) request("7100", Xk.ACTION_READ, ByteArray(0), 1_200).let {
             addLog("T13 7100 capabilities: " + (it?.let { f -> f.errCode?.let { c -> "refused (${Xk.errorText(c)})" } ?: hex(f.data.take(48).toByteArray()) } ?: "no answer"))
@@ -1099,6 +1100,17 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                     if (f.fragment == 3) l.trySend(Xk.mediaAck(nextOrder()).encode())
                     if (sniffing && assembler == null) sniffLog("0x4A frame divide %04X, %d B: %s".format(f.divide, f.payload.size, hex(f.payload.take(24).toByteArray())))
                     if (micStreaming && assembler == null) micBytes("4A frames", f.payload)
+                    // 4.1.2 (T15): media the app asked for nothing about (no photo, live view, probe or mic): an
+                    // offline "take a photo" would look like this. Listed once per burst, never acted on here.
+                    if (assembler == null && !capturing && !previewWanted && !micStreaming && !fullResProbing && !qualityProbing) {
+                        val now = SystemClock.elapsedRealtime()
+                        if (now - lastUnaskedMediaAt > 3_000) {
+                            lastUnaskedMediaAt = now
+                            unaskedPhotoPushes++
+                            addLog("← 4A media the app didn't ask for (${f.payload.size} B, divide %04X)".format(f.divide))
+                            recordHw("4A media, not asked for (${f.payload.size} B)")
+                        }
+                    }
                     l.demux.feed(f)
                 }
                 Xk.HEAD_CONTROL -> {
@@ -1124,8 +1136,9 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                 }
                 Xk.HEAD_CUSTOM -> {
                     if (micStreaming) micBytes("2B frames", f.payload)
-                    if (micSource != "2B frames") addLog("← 2B frame (${f.payload.size} B)" +
-                        if (rawSetupLog) ": " + hex(f.payload.take(64).toByteArray()) else "")
+                    // 4.1.2: the bytes are logged on every sign-in (not only under T13) and listed for T15.
+                    if (micSource != "2B frames") addLog(Xk.customFrameLine(f.payload, rawSetupLog))
+                    if (!micStreaming && !previewWanted) recordHw("2B " + hex(f.payload.take(32).toByteArray()))
                     if (sniffing) sniffLog("2B " + Xk.describeRaw(f.payload))
                     if (previewWanted) liveElement(f.payload, "a 2B frame")
                 }
@@ -1175,6 +1188,11 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         when (node) {
             "7320" -> {
                 val waiter = pushWaiters["7320"]
+                // 4.1.2 (T15): a photo announce with no photo command from the app (button, or a voice command?).
+                if (waiter == null && !capturing && !fullResProbing) {
+                    unaskedPhotoPushes++
+                    recordHw("7320 photo announced, no photo command from the app" + if (f.data.isNotEmpty() && f.data.size <= 24) ": " + hex(f.data) else "")
+                }
                 when {
                     waiter != null -> waiter.offer(f)
                     assembler != null -> { pendingAnnounce = f; addLog("Button photo waiting for the current download") }
@@ -1205,6 +1223,12 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                     addLog("Live view: the glasses fired their own shutter (57B1; the app sent no photo command). " +
                         "That photo is saved as a button photo, then live view opens again")
                     shutterWhileLive = true
+                }
+                // 4.1.2 (T15): the shutter with no photo command from the app: the button, or an offline voice command.
+                if (!capturing && !fullResProbing) {
+                    unaskedPhotoPushes++
+                    addLog("← 57B1 shutter with no photo command from the app (the photo button, or a voice command?)")
+                    recordHw("57B1 shutter, no photo command from the app")
                 }
                 if (!quietCapture) onShutter?.let { cb -> main.post { cb() } } // 2.1 hook: phone-side shutter sound
                 if (capturing) { busyText = "Processing the photo…"; changed() }
@@ -1790,15 +1814,18 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
 
     /**
      * 3.6: the data the 5720 open sends. 4.1.1: the data the last open actually used (the detail
-     * ladder, [VideoQuality.OpenLadder]), else High's data, else the remembered detail setting, else
-     * `[01 03]`. The close is always `[00]`.
+     * ladder, [VideoQuality.OpenLadder]), else High's data, else the remembered detail setting, else the
+     * top of the chosen ladder (4.1.2: `[01]` for Smooth, `[01 03]` for Detail). The close is always `[00]`.
      */
     private fun openData(): ByteArray = openUsed
         ?: (if (prefs.liveQualityHigh) prefs.liveQualityData else null)
-        ?: prefs.liveDetailData ?: VideoQuality.LADDER.first()
+        ?: prefs.liveDetailData ?: VideoQuality.ladder(prefs.liveDetailFirst).first()
 
     /** 4.1.1: the open data the live view is running with now (null before the first open). */
     @Volatile private var openUsed: ByteArray? = null
+
+    /** 4.1.2: the open data the live view is running with, while it runs (for Sharp snapshot's hint). */
+    val liveOpenData: ByteArray? get() = if (preview == Preview.ON) openUsed else null
 
     /** 4.1.1: true while an open is still trying settings, so the screen doesn't start its own test. */
     @Volatile var liveOpening = false; private set
@@ -1806,7 +1833,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     /** 4.1.1: true while the open closes one setting itself before trying the next one down. */
     @Volatile private var ladderClosing = false
 
-    /** 3.6: what the live view opens with, for the screen ("Standard · [01 03] most detail" or "High 640×480"). */
+    /** 3.6: what the live view opens with, for the screen ("Standard · [01] smooth" or "High 640×480"). */
     val qualityLabel: String get() {
         val d = openData()
         if (prefs.liveQualityHigh && d.contentEquals(prefs.liveQualityData)) return "High " + (prefs.liveQualitySize?.let { "${it.first}×${it.second}" } ?: VideoQuality.hex(d))
@@ -1838,8 +1865,9 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     }
 
     /**
-     * 4.1.1: opens with the most detail that works. Tries [VideoQuality.OpenLadder]'s order (High's
-     * data first when chosen, then `[01 03]`, `[01 02]`, `[01 01]`, `[01]` from the remembered one down):
+     * 4.1.1: opens with the first setting that works. Tries [VideoQuality.OpenLadder]'s order (High's
+     * data first when chosen, then 4.1.2's Smooth order `[01]`, `[01 03]`, `[01 02]`, `[01 01]`, or with
+     * Settings › Live view › Detail `[01 03]`, `[01 02]`, `[01 01]`, `[01]`, from the remembered one down):
      * a refused setting goes straight to the next; an accepted one with no picture in
      * [VideoQuality.NO_VIDEO_MS] is closed with `[00]` and, [LIVE_DEBOUNCE_MS] later, the next is opened.
      * The setting that gave pictures is remembered ([Prefs.liveDetailData]). Busy is never a reason to
@@ -1847,7 +1875,9 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
      */
     private fun openLadder(q5710: LinkedBlockingQueue<Xk.Frame>): String? {
         val high = if (prefs.liveQualityHigh) prefs.liveQualityData else null
-        val ladder = VideoQuality.OpenLadder(high, prefs.liveDetailData)
+        if (prefs.migrateLiveDetail()) addLog("Live view: 4.1.2 opens Smooth [01] first (30 fps); the remembered detail setting was reset")
+        val detail = prefs.liveDetailFirst
+        val ladder = VideoQuality.OpenLadder(high, prefs.liveDetailData, detail)
         var data = ladder.current
         while (true) {
             val name = VideoQuality.detailName(data)?.let { " ($it)" } ?: if (high != null && data.contentEquals(high)) " (High)" else ""
@@ -2130,15 +2160,17 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                 setReady()
             }
             val best = if (complete) VideoQuality.best(standard, results) else null
-            // 4.1.1: the most-detail setting that sent pictures becomes the one the live view opens with.
-            val summary = if (complete) VideoQuality.summary(standard, results) + " " + VideoQuality.detailSentence(standard, results)
+            // 4.1.1: the first setting of the chosen ladder that sent pictures becomes the one the live view opens
+            // with. 4.1.2: the line also weighs Smooth against Detail by fps × bits a picture.
+            val detailFirst = prefs.liveDetailFirst
+            val summary = if (complete) VideoQuality.summary(standard, results) + " " + VideoQuality.detailSummary(standard, results, detailFirst)
                 else "The test didn't finish, so nothing was changed. The live view is closed; open it again."
             say(summary)
             if (complete) {
                 prefs.liveQualityData = best?.data
                 prefs.liveQualitySize = best?.size
                 if (best == null) prefs.liveQualityHigh = false
-                VideoQuality.detailFromProbe(standard, results)?.let { d ->
+                VideoQuality.detailFromProbe(standard, results, detailFirst)?.let { d ->
                     prefs.liveDetailData = d
                     addLog("Quality: live view will open with [${VideoQuality.hex(d)}] (${VideoQuality.detailName(d)})")
                 }
@@ -2784,6 +2816,10 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
 
     // ---- 4.1: mic audio the glasses start by themselves ----
     @Volatile var unsolicitedMicFrames = 0L; private set
+
+    /** 4.1.2 (T15): photo and media pushes (57B1, 7320, 0x4A) that came with no photo command from the app. */
+    @Volatile var unaskedPhotoPushes = 0L; private set
+    @Volatile private var lastUnaskedMediaAt = 0L
     @Volatile private var micStoppedAt = 0L
     private var lastUnsolicitedAt = 0L
     private val unsolicitedFramer = OpusFramer()

@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.1.2 (versionCode 17)
+
+Goal: the owner's 4.1.1 quality test on the E13C-5 (fw 1.0.0): `5720/3 [01]` 320×240 30.0 fps 378 kbps (≈12.6
+kbit a picture), `[01 01]` 16.0 fps 221 kbps (≈13.8), `[01 02]` 16.7 fps 238 kbps (≈14.3), `[01 03]` 16.0 fps 233 kbps
+(≈14.6). The second byte caps the rate near 16 fps for only ~15% more bits a picture; plain `[01]` reaches 30 fps.
+Everything else is unchanged (all earlier tests pass; the 4.1.1 ladder tests are updated for the new order).
+
+**Live view opens Smooth again** (`VideoQuality.LADDER`, `VideoQuality.DETAIL_LADDER`, `VideoQuality.OpenLadder`)
+- The default order is `[01]`, `[01 03]`, `[01 02]`, `[01 01]`, with the same step-down as 4.1.1 (refused: next;
+  accepted with no picture in 3 s: close `[00]`, wait, next; busy never steps down; the working one is remembered).
+- Settings › Capture › Live view: "Smooth (30 fps, default)" or "Detail (about 16 fps, a little more detail per
+  frame)" (`Prefs.liveDetailFirst`, key `live_detail_first`, backed up). Detail opens `[01 03]`, `[01 02]`, `[01 01]`,
+  `[01]`. A new choice clears the remembered setting so the next open starts from that choice's top.
+- Migration, once (`Prefs.migrateLiveDetail`, `VideoQuality.migrateRemembered`): a remembered `[01 0x]` becomes `[01]`
+  unless Detail was chosen; anything else is kept.
+- Sharp snapshot prefers Smooth: when the live view runs a `[01 0x]` setting, its saved message says Smooth gives it
+  about twice the pictures a second. The Picture card shows Smooth or Detail and the setting in use.
+
+**Quality test summary** (`VideoQuality.recommendation`, `VideoQuality.detailSummary`)
+- Weighs Smooth (`[01]`) against Detail (the `[01 0x]` with the most kbit a picture) by fps × kbit a picture, e.g.
+  "Smooth [01] 30.0 fps × 12.6 kbit, Detail [01 03] 16.0 fps × 14.6 kbit: Smooth gives the most frames; Detail gives
+  ~16% more per frame. Recommended by fps × bits: Smooth." The setting it teaches the live view follows the chosen ladder.
+
+**Hardware map T13 follow-ups** (docs/HARDWARE-MAP.md §9.8)
+- Every `0x2B` frame's bytes are logged (up to 32 B; 64 under T13), so the 7-byte frame after each sign-in can be
+  compared (`Xk.customFrameLine`).
+- T15 also lists `57B1`, `7320` and `0x4A` media that arrive with no photo command from the app, and `0x2B` frames;
+  the Live card counts them (`XkGlasses.unaskedPhotoPushes`). Listed and logged only, never acted on.
+- `7100` stays log-only (read under T13): it is the watch platform's template, and no app feature depends on it.
+
 ## 4.1.1 (versionCode 16)
 
 Goal: the owner's 4.1.0 quality test on the E13C-5 (fw 1.0.0, moto g 2025, Android 16): `5720/3 [01]` 320×240 10.7 fps

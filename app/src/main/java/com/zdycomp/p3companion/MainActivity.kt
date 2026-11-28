@@ -68,6 +68,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         prefs = Prefs(this)
+        prefs.migrateLiveDetail() // 4.1.2: a remembered [01 0x] from 4.1.1 opens Smooth [01] again
         ui = Themes.ui(this, prefs)
         setTheme(if (ui.p.isDark) android.R.style.Theme_DeviceDefault_NoActionBar else android.R.style.Theme_DeviceDefault_Light_NoActionBar)
         super.onCreate(savedInstanceState)

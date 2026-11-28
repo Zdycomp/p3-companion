@@ -2,10 +2,10 @@ package com.zdycomp.p3companion
 
 /** What's new in this version, shown once after an update and on the About screen. */
 object WhatsNew {
-    const val VERSION = "4.1.1"
+    const val VERSION = "4.1.2"
 
     val headlines = listOf(
-        "Sharper live view: it opens with the glasses' highest-detail setting and steps down by itself only if that one sends no picture",
+        "Live view opens Smooth again (the glasses' 30 pictures a second); Detail, about 16 a second with a little more per picture, is a choice in Settings › Capture",
         "The Wi-Fi screen says plainly that the glasses have no Wi-Fi; Wake and the hardware tests ask you to connect the glasses first",
         "Hands-free voice chat through the glasses: their own mic stays open the whole conversation, answers in Gemini's voice, and you can talk over a reply to interrupt it",
         "Tap the glasses to send, interrupt or cancel; double tap starts or ends voice chat; every button, touch and media key can be set in Settings",
@@ -14,6 +14,12 @@ object WhatsNew {
     )
 
     val details = listOf(
+        "4.1.2" to listOf(
+            "Your quality test showed [01] at 30 pictures a second and the [01 0x] settings at about 16, with only about 15% more data a picture. So live view opens with [01] (Smooth) again, and steps down to [01 03], [01 02], [01 01] only if no picture comes.",
+            "Settings › Capture › Live view: Smooth (30 fps, the default) or Detail (about 16 fps, a little more detail per frame). A [01 0x] setting remembered by 4.1.1 is reset to Smooth unless you chose Detail. Sharp snapshot works best with Smooth (its 16 pictures come in about half a second).",
+            "Try higher quality now weighs Smooth against Detail by pictures a second × data a picture and says which it recommends.",
+            "The connection log shows the bytes of the glasses' 2B frame at every sign-in, and Hardware test T15 also lists photo and media pushes that came without a photo command from the app.",
+        ),
         "4.1.1" to listOf(
             "Live view now asks the glasses for their most detailed picture ([01 03]: more data a picture at the same 320×240, so less blur). If they refuse it, or no picture comes in 3 seconds, it tries the next setting down, and remembers the one that worked. Try higher quality also updates it.",
             "The glasses' own mic is loud (peaks at full scale). The voice chain already turns it down to a steady level with no clipping; a test now checks that.",
