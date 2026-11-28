@@ -45,7 +45,7 @@ Code references are to `app/src/main/java/com/zdycomp/p3companion/` (abbreviated
 | 15 | Media keys (AVRCP) | `MediaSession` key events | No (`MediaSession` not used anywhere) | INFERRED |
 | 16 | HFP voice-dial key (AT+BVRA) | `Intent.ACTION_VOICE_COMMAND` | No | INFERRED |
 | 17 | Battery and charging | `1003` read; push every ~6 min; `1001.battery_main` | Yes | SEEN |
-| 18 | Capability flags | `7110` (answers only in setup), `7100` | `7110` logged raw; `7100` never read | SEEN `7110`; `7100` DOC |
+| 18 | Capability flags | `7110` (answers only in setup), `7100` | `7110` logged raw; `7100` read once by T13 (section 9) | SEEN both (4.1.1 T13); meanings mostly DOC/GUESS |
 | 19 | Device info | `1001` JSON | Name, firmware, model, battery, preview size, MAC check | SEEN/DOC |
 | 20 | Language list / prompt language | `2410` read / `2420` write | Read only inside the live view probe | SEEN |
 | 21 | Sound settings | `1017` read mask, write act 2 | No (write has no effect on B's unit) | DOC |
@@ -229,7 +229,7 @@ phone's torch.
 | Node | E13C-5 bytes | Use |
 |---|---|---|
 | `7110` | `10 37 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 64 00 02 08 0C` (SEEN) | 5 of 7 glasses flags set; order UNKNOWN. Logged only. |
-| `7100` | never read here | DOC: mask with bit 22 preview = 1, 23 video transfer = 0, 47 language = 1, 49 app volume = 0, 58 reboot = 1, `sideButtons = 2`. Read it once in setup (READ only) and log it (T13). |
+| `7100` | read by T13 on 4.1.1: see section 9 (SEEN) | DOC: mask with bit 22 preview = 1, 23 video transfer = 0, 47 language = 1, 49 app volume = 0, 58 reboot = 1, `sideButtons = 2`. Read it once in setup (READ only) and log it (T13). |
 | `1001` | name, `soft_ver 1.0.0`, `prod_mode E13C-5`, `preview_width/height 160/120` (SEEN) | Other fields (`screen`, `dial_ability`, `offline_asr_auth`, `ch`/`cw`…) are smartwatch leftovers or unknown. Log the whole JSON once (T13). |
 
 ### 2.15 Vendor channel `0x2B`
@@ -478,3 +478,137 @@ on 4.0.0; "needs" names the small app change that makes the result visible.
 | T15 | Wake word | With the app connected and the screen on, say "Hey" / "Hi" / "Xiao" style wake words near the glasses. Any `C101`/`C107`? | Same as T1 |
 
 Report back the shared logs; each result moves one UNKNOWN row above to SEEN.
+
+---
+
+## 9. T13 results (2026-11-28)
+
+Rick's 4.1.1 Hardware test T13 on the E13C-5, firmware 1.0.0, battery 27%. The app sent only reads (`7110`,
+`7100`, `1001`, `1003`, action 1, no data). `dev_id` and `mac_addr` were withheld from the report and are not
+recorded here. Labels in this section: **SEEN** = the bytes in Rick's log; **INFERRED** = follows from SEEN bytes
+plus the DOC sources in section 0; **GUESS** = a plausible reading with no direct evidence, to be tested (9.7).
+
+### 9.1 Raw bytes (SEEN)
+
+| Node | Reply data |
+|---|---|
+| `7110` | `10 37 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 64 00 02 08 0C` (22 B, byte-identical to the 3.1 log) |
+| `7100` | `10 FF FF 4B 0A 5F A3 0D 04 00 00 00 00 00 00 00 00 64 00 02 08 0C` (22 B) |
+| `0x2B` after bind | payload `01 10 03 F0 60 00 00` (7 B) |
+| `1001` | `prod_mode E13C-5`, `soft_ver 1.0.0`, `prod_category 01`, `prod_subcate 01`, `battery_main 27`, `dial_ability 2`, `screen w320h380`, `ch 304`, `cw 320`, `nch 304`, `ncw 320`, `screen_shape 0`, `preview_width 160`, `preview_height 120`, `offline_asr_auth 1` |
+| `1003` | `00 1B 00 00 00 00 00 00 00 00` |
+| Earlier logs | `2410` = three 6-byte NUL-padded slots `en`, `en`, `zh-cn`; `2420` = `en`; `57A0` refused (status 03); live video SPS 320×240 |
+
+### 9.2 Shared layout of `7100` and `7110`
+
+Read with the documented `7100` layout `[ver 1][mask 16][maxContacts LE2][sideButtons 1][2 more bytes]`
+(PROTOCOL-NOTES 2.3):
+
+| Bytes | `7100` | `7110` | Reading |
+|---|---|---|---|
+| 0 | `10` | `10` | Struct version 0x10. SEEN (equal in both). |
+| 1-16 | `FF FF 4B 0A 5F A3 0D 04` + 8×`00` | `37` + 15×`00` | The two masks. SEEN. |
+| 17-18 | `64 00` | `64 00` | `maxContacts` = 100 (LE). INFERRED from the DOC layout. A phone-book limit for a watch; the glasses have no contacts screen, so a leftover. GUESS that it does anything. |
+| 19 | `02` | `02` | `sideButtons` = 2. INFERRED (DOC calls it real); fits the photo button plus one more (rear/touch). Which two is UNKNOWN. |
+| 20-21 | `08 0C` | `08 0C` | Two more small values (8, 12) or one LE2 (3080). UNKNOWN. GUESS: two more watch limits (counts of something like alarms or dial slots). |
+
+The shared tail `64 00 02 08 0C` is identical in both replies. INFERRED: the firmware fills both answers from the
+same capability struct and only the 16-byte mask differs, so the tail tells nothing glasses-specific and must not
+be read as part of the `7110` flags. The tail is also byte-for-byte the one on the E13C-1 unit (FULL-RES-PLAN),
+so it is a firmware constant, not a per-unit setting. INFERRED.
+
+### 9.3 `7100` mask bits
+
+Reading the 16 mask bytes LSB-first (bit 0 = byte 1 bit 0), 36 bits are set. SEEN bytes; the bit order itself is
+still unverified (DOC).
+
+- Set: 0-15 (all), 16, 17, 19, 22, 25, 27, 32, 33, 34, 35, 36, 38, 40, 41, 45, 47, 48, 50, 51, 58. Bytes 9-16 are zero.
+- The five positions the DOC names all agree with this unit: 22 camera preview = 1, 23 video transfer = 0,
+  47 language = 1, 49 app volume = 0, 58 reboot = 1. SEEN for this unit. Because those DOC positions came from the
+  same LSB-first reading of another unit, the agreement shows the two units match there; it does **not** prove
+  the bit order. INFERRED.
+- Most of the 36 claimed features can't exist on camera glasses with no display (a watch's 16 base features in
+  bytes 1-2 are all `FF`; notification nodes `1004`/`4700` are INVALID_URN or silent on other units). INFERRED:
+  `7100` is the watch platform's template, not a statement of what works. **Do not gate any app feature on it.**
+  Names for the other 31 bits: UNKNOWN (no source in the repo names them).
+
+**Bits set in `7100` but not in `7110`** (same positions compared): 3, 6, 7, 8-15, 16, 17, 19, 22, 25, 27,
+32-36, 38, 40, 41, 45, 47, 48, 50, 51, 58 (31 bits). Every `7110` bit (0, 1, 2, 4, 5) is also set in `7100`,
+but only because `7100` byte 1 is `FF`. INFERRED: the two masks are different namespaces (watch functions vs
+glasses flags), so the "subset" is a coincidence and carries no meaning.
+
+### 9.4 `7110` glasses flags
+
+`0x37` = `0011 0111`: bits 0, 1, 2, 4, 5 set; 3 and 6 clear; bit 7 and bytes 2-16 zero. SEEN. Seven flags are
+documented (alphabetically, not in wire order): `noStorageDevice`, `supportAiChat`, `supportFunctionVersion`,
+`supportScoLink`, `supportVolcEngine`, `supportWakeWord`, `supportZlsyEngine`, so seven bits fit bits 0-6 exactly.
+INFERRED. What behaviour says about each:
+
+| Flag | Expected value | Why |
+|---|---|---|
+| `noStorageDevice` | 1 | E13C-1 with identical bytes reports 1 (DOC); `5713` counts stay 0. INFERRED |
+| `supportScoLink` | 1 | SCO mic works on this unit (2.6, SEEN). INFERRED |
+| `supportAiChat` | 1 | The vendor app offers AI chat on these glasses (DOC). GUESS |
+| `supportVolcEngine` / `supportZlsyEngine` | one of the two | Two alternative cloud speech/AI engines; a unit normally ships with one. GUESS |
+| `supportWakeWord` / `supportFunctionVersion` | one of the two | Whatever is left for the fifth set bit. GUESS |
+
+So which of bits 3 and 6 is the clear flag can't be told from one unit's bytes; test T18 (9.7) is the way.
+
+### 9.5 `1001` fields
+
+- `battery_main 27` equals `1003` `00 1B` (not charging, 0x1B = 27%). SEEN. The `1003` layout `[charging][level]`
+  + 8×`00` holds. SEEN.
+- Every key and every non-identity value except `prod_mode`, `soft_ver` and the battery is the same as on the
+  E13C-1 (`tools/make_vectors.py` vector from the SDK's documented reply). SEEN (comparison). INFERRED: these are
+  firmware-template constants, not measured per device.
+- `screen w320h380`, `screen_shape 0`, `cw 320`/`ch 304`, `ncw 320`/`nch 304`, `dial_ability 2`: a watch's screen
+  (320×380, rectangular), dial (watch-face) canvas and dial capability. The glasses have no display. INFERRED
+  leftovers. GUESS for the details: `cw`/`ch` = watch-face canvas (380 − 304 = 76 px status area),
+  `ncw`/`nch` = a second canvas (e.g. notification or "new" dial), `dial_ability 2` = level of custom watch-face
+  support.
+- `preview_width/height 160×120` vs real video 320×240 (SEEN): exactly half in each direction. GUESS: the size of
+  a watch's camera-remote preview window, another leftover. Keep ignoring it for live view (as today).
+- `prod_category 01` / `prod_subcate 01`: a product family code, same on both units. INFERRED; what 01/01 means
+  is UNKNOWN.
+- `offline_asr_auth 1`: "offline speech-recognition authorisation" = the firmware holds an **activated licence
+  for an on-glasses offline speech engine**. INFERRED from the name. Together with the `supportWakeWord` flag
+  this most likely means on-glasses keyword spotting: a wake phrase and perhaps a few fixed offline commands
+  (photo, record, volume) that work without the phone or the cloud. GUESS for the command set. GUESS: the `2410`
+  list (`en`, `zh-cn`) is the languages its models cover, and the first slot repeating `en` is the current one. Whether the wake word is on by default, and its phrase, are UNKNOWN; no repo doc names a phrase.
+
+Known nodes and paths that could carry a wake/offline-command event (none has yet shown one unasked on this unit):
+
+| Path | Evidence | Relation |
+|---|---|---|
+| `C101` push | DOC: voice-assistant trigger on other units; never SEEN here | Most likely wake-word event. GUESS |
+| `C107` push | SEEN on every touch; SEEN once when the glasses started their own audio (`102A` probe) | Possible "assistant started" event. INFERRED/GUESS |
+| Head `0x1F` mic stream started by the glasses | Handled since 4.1 (`unsolicitedMic`, `MIC_HEAD = 0x1F`); never SEEN | After a wake word the glasses would stream the question. GUESS |
+| `5760 01`/`00` | SEEN only around the app's own `5750` | Unasked `5760 01` = the glasses opened their mic. INFERRED |
+| `57B1` + `7320` | SEEN on the photo button | An offline "take a photo" command would look exactly like a button photo. GUESS |
+| `0x2B` frames | SEEN once at sign-in only | The vendor cloud assistant runs here (DOC); a wake word in the vendor flow may produce one. GUESS |
+| `2410`/`2420` | SEEN reads | Language of prompts, maybe of the offline models. GUESS |
+
+### 9.6 The `0x2B` frame
+
+`01 10 03 F0 60 00 00`: no ASCII, no `FGS`/`FND` text, and 7 bytes is too short for a key or token. SEEN. So it is
+not the documented credential exchange itself. INFERRED. The bytes `F0 60` also appear in the app-side `0x2B`
+example `F0 60 01 00` (rf/04 F12), and app-side frames start `01 00 <seq>` (rf/05 F13). INFERRED: a common
+sub-header. GUESS at the layout: `[01 version][10 direction or "from glasses"][03 sequence][F0 60 message id LE2]
+[00 00 value]`, i.e. the glasses answer message 0x60F0 with 0 where the vendor app sends 1, perhaps "cloud AI
+session not open" (this app never opens it). T16 checks whether byte 2 counts and whether the rest is fixed.
+
+### 9.7 New device tests (each read-only or listen-only)
+
+| # | Confirms | Steps for Rick | Needs |
+|---|---|---|---|
+| T16 | `0x2B` layout (9.6) | Arm T13, reconnect; repeat three times, once at a different battery level. Share log. | Existing (T13 logs the 2B hex) |
+| T17 | Wake phrase and offline commands (9.5) | Open Diagnostics › Hardware tests › T15. If LensMoo's settings or the P3 manual name a wake phrase or voice-wake switch, note it (look only; close LensMoo after). Near the glasses say that phrase 3 times, 5 s apart; then "Hey", "Hi", and "take a photo" / "take a picture" 3 times each. Repeat once with the prompt language `zh-cn` only if the manual's phrase is Chinese. | Watch for `C101`, `C107`, `5760 01`, `0x1F` audio, `57B1` with no button press, any new `0x2B`. Add `57B1` and `2B` lines to T15's results list |
+| T18 | Which `7110` bit is `supportWakeWord` (9.4) | Only if LensMoo has a voice-wake switch: turn it off in LensMoo, close LensMoo, arm T13 here, reconnect. Turn it back on and repeat. | Existing. A bit that flips in `7110` (or `offline_asr_auth` in `1001`) names the flag; no change means the flag is static |
+| T19 | `1017` sound mask on this unit | Arm T13 and reconnect after the app also reads `1017` (action 1) once. | Small change: add a `1017` read to the T13 setup reads. A wake-word on/off bit may live here. GUESS |
+
+### 9.8 App changes worth making
+
+- Log the `0x2B` hex on every sign-in, not only under T13 (7 bytes, read-only). Needed to see it change.
+- Never gate a feature on `7100`; keep behaviour-based checks (storage from `5712`/`5713`, live size from the SPS).
+- T15: also list `57B1` without a button press and any `0x2B` frame, so an offline "take a photo" or a vendor
+  wake event is visible.
