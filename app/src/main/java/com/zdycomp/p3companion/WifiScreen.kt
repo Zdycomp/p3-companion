@@ -32,6 +32,12 @@ class WifiScreen(private val a: MainActivity) : Screen {
 
     private val listener = WifiControl.Listener { scheduleRefresh() }
 
+    /** 4.1.1: the Wake button follows whether the glasses are connected over Bluetooth. */
+    private var lastBt: Boolean? = null
+    private val glassesListener = XkGlasses.Listener { if (btConnected() != lastBt) scheduleRefresh() }
+
+    private fun btConnected(): Boolean = a.glasses.state.let { it == XkGlasses.State.READY || it == XkGlasses.State.BUSY }
+
     private val tick = object : Runnable {
         override fun run() {
             if (!visible) return
@@ -52,6 +58,10 @@ class WifiScreen(private val a: MainActivity) : Screen {
         val w = wifi
         visible = true
         w.addListener(listener)
+        a.glasses.removeListener(glassesListener)
+        a.glasses.addListener(glassesListener)
+        val bt = btConnected()
+        lastBt = bt
         val col = ui.page()
         val st = w.status()
 
@@ -134,11 +144,12 @@ class WifiScreen(private val a: MainActivity) : Screen {
                 "(their name, P3, E13C, D6BE, XK, Shenju) first. Wake also asks the glasses over Bluetooth, with read-only " +
                 "requests, whether anything switches their Wi-Fi on, and scans again 5 s and 15 s later.",
             muted = true, sizeSp = 13f))
+        find.addView(ui.body(WifiText.NO_GLASSES_WIFI, sizeSp = 13f).apply { setPadding(0, ui.dp(6), 0, 0) })
         val busy = w.scanning || w.waking
         val findRow = ui.buttonRow(
             ui.button(if (w.scanning && !w.waking) "Scanning…" else "Scan", Btn.FILLED, R.drawable.ic_wifi, full = false) { scan() }
                 .apply { isEnabled = !busy },
-            ui.button(if (w.waking) "Waking…" else "Wake the glasses' Wi-Fi", Btn.TONAL, R.drawable.ic_bolt, full = false) { wake() }
+            ui.button(WifiText.wakeLabel(bt, w.waking), Btn.TONAL, if (bt) R.drawable.ic_bolt else R.drawable.ic_bluetooth, full = false) { wake() }
                 .apply { isEnabled = !busy },
         )
         find.addView(findRow, LinearLayout.LayoutParams(Ui.MATCH, Ui.WRAP).apply { topMargin = ui.dp(8) })
@@ -224,7 +235,7 @@ class WifiScreen(private val a: MainActivity) : Screen {
                 if (f.count > 1) add("${f.count} access points")
                 if (w.isConnected(f, st)) add("connected")
                 if (w.isSaved(f)) add("saved")
-                if (w.isMarkedDevice(f)) add("device network")
+                if (w.isMarkedDevice(f)) add(WifiText.MARKED_TAG)
             }
             if (f.match != null) add("matches \"${f.match}\"")
         }.joinToString(" · ")
@@ -268,8 +279,16 @@ class WifiScreen(private val a: MainActivity) : Screen {
         actions += ui.button("Open Android Wi-Fi panel", Btn.TEXT, R.drawable.ic_settings, full = false) { dialog?.dismiss(); openPanel() }
         box.addView(ui.buttonRow(*actions.toTypedArray()), LinearLayout.LayoutParams(Ui.MATCH, Ui.WRAP).apply { topMargin = ui.dp(8) })
         if (!f.looksLikeGlasses && !f.hidden) {
-            box.addView(ui.switchRow("This is a device's network", "Allows \"For this app only\" (local, no internet), as for the glasses",
-                w.isMarkedDevice(f)) { on -> w.markDevice(f, on); dialog?.dismiss(); networkDetails(f) })
+            // 4.1.1: the glasses have no Wi-Fi, so the mark sits under an advanced note (and says so when set).
+            val marked = w.isMarkedDevice(f)
+            if (marked) box.addView(ui.banner(WifiText.markedWarning(f.name), Tone.WARN, "Unmark") {
+                w.markDevice(f, false); dialog?.dismiss(); networkDetails(f)
+            }, LinearLayout.LayoutParams(Ui.MATCH, Ui.WRAP).apply { topMargin = ui.dp(12) })
+            box.addView(ui.text(WifiText.MARK_TITLE, Type.TITLE_SMALL, ui.s.onSurfaceVariant).apply { setPadding(0, ui.dp(16), 0, ui.dp(2)) })
+            box.addView(ui.body(WifiText.NO_GLASSES_WIFI + " " + WifiText.MARK_NOTE, muted = true, sizeSp = 12f))
+            box.addView(ui.switchRow("Mark as another device's network", "Not the glasses: they have no Wi-Fi", marked) { on ->
+                w.markDevice(f, on); dialog?.dismiss(); networkDetails(f)
+            })
         }
         box.addView(ui.body(
             if (f.looksLikeGlasses) "This looks like your glasses, so it's joined for this app only: local, no internet, and the phone goes back to its usual Wi-Fi afterwards."
@@ -360,6 +379,8 @@ class WifiScreen(private val a: MainActivity) : Screen {
     }
 
     private fun wake() {
+        // 4.1.1: Wake asks the glasses over Bluetooth; without that link it says so and doesn't scan.
+        if (!btConnected()) { a.toast("Connect the glasses first: Wake asks them over Bluetooth. Scan still looks for networks."); return }
         wifi.wake(tokens()) { out -> a.toast(out.substringBefore(". ").take(120)) }
         a.refresh()
     }
@@ -428,6 +449,7 @@ class WifiScreen(private val a: MainActivity) : Screen {
         visible = false
         main.removeCallbacks(tick)
         wifi.removeListener(listener)
+        a.glasses.removeListener(glassesListener)
         statusBox = null
         probeView = null
         // Leaving the screen (not a refresh of it, nor Android's own dialog over it) leaves the app-only network.

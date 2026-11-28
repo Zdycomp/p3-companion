@@ -102,6 +102,32 @@ object WifiMatch {
 
 object WifiText {
 
+    /**
+     * 4.1.1: what the owner's tests showed: the E13C-5 makes no Wi-Fi network and no Wi-Fi Direct group.
+     * Said wherever the app offers to mark a network as a device's, so a home router isn't taken for the glasses.
+     */
+    const val NO_GLASSES_WIFI = "Your glasses have no Wi-Fi: 8 scans and Bluetooth probes never found a glasses network or Wi-Fi Direct device. " +
+        "They talk to the phone over Bluetooth only."
+
+    /** 4.1.1: the "device's network" mark, only under an advanced note. */
+    const val MARK_TITLE = "Advanced: another device's own network"
+    const val MARK_NOTE = "Not for the glasses, and never for your home router. Only for a different device that makes its own Wi-Fi " +
+        "(a camera, a drone, a test hotspot): it allows \"For this app only\" (local, no internet)."
+
+    /** The warning on a network that is marked: most likely a mistake, since the glasses have no Wi-Fi. */
+    fun markedWarning(name: String): String =
+        "\"$name\" is marked as a device's network. The glasses have no Wi-Fi, so if this is your router or home network, turn the mark off."
+
+    /** The short tag in a network's row. */
+    const val MARKED_TAG = "marked as a device's network (not the glasses)"
+
+    /** 4.1.1: the Wake button: it asks the glasses over Bluetooth, so without them it says so instead of scanning. */
+    fun wakeLabel(bluetoothConnected: Boolean, waking: Boolean): String = when {
+        !bluetoothConnected -> "Connect the glasses first"
+        waking -> "Waking…"
+        else -> "Wake the glasses' Wi-Fi"
+    }
+
     /** The SSID without its quotes; null for none, blank or Android's "<unknown ssid>" (no location permission). */
     fun ssid(raw: String?): String? {
         val s = raw?.trim()?.removeSurrounding("\"") ?: return null

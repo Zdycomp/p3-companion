@@ -25,6 +25,14 @@ class HardwareTestsScreen(private val a: MainActivity) : Screen {
 
     private class Test(val id: String, val title: String, val steps: String, val run: Boolean)
 
+    /** 4.1.1: redraw when the Bluetooth link to the glasses comes or goes. */
+    private var lastConnected: Boolean? = null
+    private val glassesListener = XkGlasses.Listener {
+        main.post { if (visible && connected() != lastConnected) a.refresh() }
+    }
+
+    private fun connected(): Boolean = a.glasses.state.let { it == XkGlasses.State.READY || it == XkGlasses.State.BUSY }
+
     private val tests = listOf(
         Test("T1", "Touch pad, buttons and keys", "Run, then do each gesture when asked (single tap, double tap, long press, swipe forward, swipe back, rear button, play/pause). " +
             "The app logs every push with its bytes and timing and learns the codes it can tell apart, so those gestures get their own actions in Settings › Glasses buttons.", true),
@@ -47,7 +55,14 @@ class HardwareTestsScreen(private val a: MainActivity) : Screen {
     override fun build(): View {
         val ui = a.ui
         visible = true
+        val bt = connected()
+        lastConnected = bt
+        a.glasses.removeListener(glassesListener)
+        a.glasses.addListener(glassesListener)
         val col = ui.page()
+        // 4.1.1: say it at the top when the glasses aren't connected, and don't run the tests that need them.
+        if (!bt) col.addView(ui.banner(notConnectedText(), Tone.WARN, "Glasses tab") { a.show(MainActivity.TAB_GLASSES) },
+            LinearLayout.LayoutParams(Ui.MATCH, Ui.WRAP).apply { bottomMargin = ui.dp(8) })
         val intro = ui.card()
         intro.addView(ui.body("These tests find out what your glasses really do. None of them changes anything on the glasses. " +
             "Results go to the connection log; share it from Diagnostics when you're done.", muted = true, sizeSp = 13f))
@@ -77,8 +92,12 @@ class HardwareTestsScreen(private val a: MainActivity) : Screen {
             c.addView(ui.heading("${t.id}  ${t.title}", null))
             c.addView(ui.body(t.steps, muted = true, sizeSp = 13f))
             results[t.id]?.let { c.addView(ui.text(it, Type.BODY_MEDIUM, ui.s.primary).apply { setPadding(0, ui.dp(6), 0, 0) }) }
-            if (t.run) c.addView(ui.button(if (running == t.id) "Running…" else "Run ${t.id}", Btn.OUTLINED, R.drawable.ic_play, full = false) { start(t.id) }
-                .apply { isEnabled = running == null })
+            if (t.run) {
+                val can = canRun(t.id, bt)
+                c.addView(ui.button(if (running == t.id) "Running…" else if (!can) "Needs the glasses connected" else "Run ${t.id}",
+                    Btn.OUTLINED, if (can) R.drawable.ic_play else R.drawable.ic_bluetooth, full = false) { start(t.id) }
+                    .apply { isEnabled = running == null && can })
+            }
             col.addView(c, LinearLayout.LayoutParams(Ui.MATCH, Ui.WRAP).apply { topMargin = ui.dp(8) })
         }
         return ui.screen("Hardware tests", col, back = { a.showDiagnostics() })
@@ -86,6 +105,7 @@ class HardwareTestsScreen(private val a: MainActivity) : Screen {
 
     override fun onHidden() {
         visible = false
+        a.glasses.removeListener(glassesListener)
         a.glasses.hwWatcher = null
         eventsView = null
     }
@@ -101,7 +121,8 @@ class HardwareTestsScreen(private val a: MainActivity) : Screen {
     private fun start(id: String) {
         if (running != null) return
         val g = a.glasses
-        if (id != "T13" && g.state != XkGlasses.State.READY) { a.snack("Connect the glasses first."); return }
+        if (!canRun(id, connected())) { a.snack("Connect the glasses over Bluetooth first (Glasses tab)."); return }
+        if (id in NEEDS_GLASSES && g.state != XkGlasses.State.READY) { a.snack("The glasses are busy. Try again in a moment."); return }
         running = id
         a.refresh()
         when (id) {
@@ -241,5 +262,17 @@ class HardwareTestsScreen(private val a: MainActivity) : Screen {
             val ev = g.hardwareEvents().drop(evBefore.coerceAtMost(g.hardwareEvents().size)).filter { it.contains("5760") || it.contains("1F") }
             done("T7", "5760 pushes and mic audio: ${ev.size} (${ev.joinToString("; ").ifEmpty { "none" }}); unsolicited mic frames: ${g.unsolicitedMicFrames - before}")
         }, 15_000)
+    }
+
+    companion object {
+        /** 4.1.1: the Run tests that talk to the glasses now (T13 only arms a read for the next sign-in). */
+        val NEEDS_GLASSES = setOf("T1", "T2", "T4", "T5", "T7")
+
+        /** Whether test [id]'s Run button may run with the glasses [bluetoothConnected] or not. */
+        fun canRun(id: String, bluetoothConnected: Boolean): Boolean = bluetoothConnected || id !in NEEDS_GLASSES
+
+        fun notConnectedText(): String =
+            "The glasses aren't connected over Bluetooth, so the tests that need them (" + NEEDS_GLASSES.joinToString(", ") +
+                ") won't run. Connect on the Glasses tab; the steps below can still be read, and T13 can be armed."
     }
 }

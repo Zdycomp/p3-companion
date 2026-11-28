@@ -135,4 +135,19 @@ class WifiMathTest {
         assertEquals("x | y", PortProbe.snippet("x\r\n\r\ny\r\n".toByteArray()))
         assertEquals("", PortProbe.snippet(ByteArray(0)))
     }
+
+    /** 4.1.1: the glasses have no Wi-Fi; the device mark says so, and Wake needs Bluetooth. */
+    @Test fun theDeviceMarkSaysTheGlassesHaveNoWifiAndWakeNeedsBluetooth() {
+        assertTrue(WifiText.NO_GLASSES_WIFI.startsWith("Your glasses have no Wi-Fi"))
+        assertTrue(WifiText.NO_GLASSES_WIFI.contains("8 scans"))
+        assertTrue(WifiText.MARK_TITLE.startsWith("Advanced"))
+        assertTrue(WifiText.MARK_NOTE.contains("never for your home router"))
+        assertTrue(WifiText.MARKED_TAG.contains("not the glasses"))
+        assertTrue(WifiText.markedWarning("Home-5G").contains("\"Home-5G\""))
+        assertTrue(WifiText.markedWarning("Home-5G").contains("turn the mark off"))
+        assertEquals("Connect the glasses first", WifiText.wakeLabel(bluetoothConnected = false, waking = false))
+        assertEquals("Connect the glasses first", WifiText.wakeLabel(bluetoothConnected = false, waking = true))
+        assertEquals("Wake the glasses' Wi-Fi", WifiText.wakeLabel(bluetoothConnected = true, waking = false))
+        assertEquals("Waking…", WifiText.wakeLabel(bluetoothConnected = true, waking = true))
+    }
 }

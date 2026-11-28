@@ -2,18 +2,24 @@ package com.zdycomp.p3companion
 
 /** What's new in this version, shown once after an update and on the About screen. */
 object WhatsNew {
-    const val VERSION = "4.1.0"
+    const val VERSION = "4.1.1"
 
     val headlines = listOf(
+        "Sharper live view: it opens with the glasses' highest-detail setting and steps down by itself only if that one sends no picture",
+        "The Wi-Fi screen says plainly that the glasses have no Wi-Fi; Wake and the hardware tests ask you to connect the glasses first",
         "Hands-free voice chat through the glasses: their own mic stays open the whole conversation, answers in Gemini's voice, and you can talk over a reply to interrupt it",
         "Tap the glasses to send, interrupt or cancel; double tap starts or ends voice chat; every button, touch and media key can be set in Settings",
         "The mic adapts by itself: glasses stream, call audio or phone mic depending on the link, live view, battery and noise, with the one in use shown",
-        "Cleaner mic on every route: high-pass, noise suppression, auto level and a limiter, and a speech detector that ignores hum, hiss and clicks",
         "Burst photo and Sharp snapshot: several pictures aligned to a hundredth of a pixel and combined, for real extra detail (originals kept)",
-        "Diagnostics › Hardware tests: the app learns your glasses' touch codes and checks what each part of the hardware really does",
     )
 
     val details = listOf(
+        "4.1.1" to listOf(
+            "Live view now asks the glasses for their most detailed picture ([01 03]: more data a picture at the same 320×240, so less blur). If they refuse it, or no picture comes in 3 seconds, it tries the next setting down, and remembers the one that worked. Try higher quality also updates it.",
+            "The glasses' own mic is loud (peaks at full scale). The voice chain already turns it down to a steady level with no clipping; a test now checks that.",
+            "Wi-Fi: the glasses have no Wi-Fi of their own (8 scans and probes found none). Marking a network as a device's is now under an Advanced note; a marked network warns you in case it's your router. Wake says \"Connect the glasses first\" when they aren't on Bluetooth.",
+            "Hardware tests: when the glasses aren't connected over Bluetooth, the screen says so at the top and the tests that need them don't run.",
+        ),
         "Voice chat" to listOf(
             "Start it with the Hands-free voice chat button on the Assistant tab, by saying \"start voice chat\", or with a double tap on the glasses. Say \"stop voice chat\" (or double tap) to end it; it also ends after a minute with no question.",
             "On the glasses' data-link mic the stream is started once and kept open, so there's no call mode: answers play in Gemini's voice on media audio. Each turn goes to Gemini as the glasses' own Opus sound (about 2 KB a second); if Gemini won't take that, the app sends a WAV instead and remembers which works.",

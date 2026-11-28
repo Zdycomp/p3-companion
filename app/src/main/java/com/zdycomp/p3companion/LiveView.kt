@@ -890,7 +890,10 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         renderMode()
         a.glasses.openPreview { msg ->
             if (!active || mode != Mode.VIDEO) return@openPreview
+            // 4.1.1: the open may have stepped down the detail settings; the 6 s wait starts now.
+            openedAt = SystemClock.elapsedRealtime()
             if (msg != null) showStatus(msg, spinning = false)
+            else renderPicture()
         }
     }
 
@@ -1014,6 +1017,11 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
                 setPadding(0, ui.dp(8), 0, 0)
             })
         }
+        // 4.1.1: the detail (bitrate) setting the live view opens with.
+        val detail = p.liveDetailData ?: VideoQuality.LADDER.first()
+        card.addView(ui.text("Detail: [${VideoQuality.hex(detail)}] ${VideoQuality.detailName(detail) ?: ""}" +
+            (if (p.liveDetailData == null) ", tried first; steps down by itself if no picture comes" else ", the most that worked") +
+            ". Live view opens with the most detail that works.", Type.BODY_SMALL, s.onSurfaceVariant).apply { setPadding(0, ui.dp(4), 0, 0) })
         p.liveQualityReport?.let { card.addView(ui.text("Last try: $it", Type.BODY_SMALL, s.onSurfaceVariant).apply { setPadding(0, ui.dp(4), 0, 0) }) }
         card.addView(ui.button("Try higher quality", Btn.TEXT, R.drawable.ic_auto_awesome, full = false) { askTryQuality() })
         card.addView(ui.choiceRow("Shape", listOf("Fit", "Fill"), if (p.liveFill) 1 else 0) { i ->
@@ -1235,7 +1243,8 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         a.ui.dialog(
             "Try higher quality?",
             "Live view closes for under a minute while 6 settings are tried, 3 seconds each, each closed again before the next. " +
-                "Then the standard picture comes back. Nothing changes unless a bigger picture is found and you pick High.",
+                "Then the picture comes back. The most detailed setting that sends video is kept for live view; " +
+                "a bigger picture is only used if one is found and you pick High.",
             icon = R.drawable.ic_videocam, confirm = "Try it", dismiss = "Cancel",
         ) { runQuality(); true }
     }
@@ -1460,7 +1469,7 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
             if (!linkDown) statusBox?.visibility = View.GONE
             if (!videoSeen) { videoSeen = true; if (mode == Mode.VIDEO) renderMode() }
         } else if (mode == Mode.VIDEO && openedAt != 0L && !autoProbed && !linkDown && SystemClock.elapsedRealtime() - openedAt > AUTO_PROBE_MS &&
-            g.preview != XkGlasses.Preview.BUSY && g.state == XkGlasses.State.READY) {
+            !g.liveOpening && g.preview != XkGlasses.Preview.BUSY && g.state == XkGlasses.State.READY) {
             autoProbed = true
             runProbe(auto = true)
         }

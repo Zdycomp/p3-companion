@@ -215,4 +215,52 @@ class VoiceChainTest {
         assertTrue(d.detector.heardSpeech)
         assertEquals(320, d.lost().size)
     }
+
+    /**
+     * 4.1.1: the owner's glasses-data-link.wav (16 kHz mono, 8 s): the glasses' Opus mic carries speech at
+     * about −8 dBFS RMS with peaks at 0 dBFS and a few clipped samples. The chain must cut the gain:
+     * speech comes out near −20 dBFS RMS and no sample goes over −1 dBFS.
+     */
+    @Test fun hotGlassesMicIsTurnedDownAndNeverOverMinus1Dbfs() {
+        val speech = SynthVoice.speech(7.5, -20.0, seed = 21)
+        // The glasses saturate: turn it up through a soft knee until it measures −8 dBFS RMS, with the
+        // loudest samples just past full scale and clipped at 0 dBFS, like the recording.
+        fun clip(g: Double) = speech.map { (1.02 * kotlin.math.tanh(it * g)).coerceIn(-1.0, 1.0) }.toDoubleArray()
+        var lo = 1.0; var hi = 100.0
+        repeat(40) { val m = (lo + hi) / 2; if (SynthVoice.rmsDb(clip(m)) < -8.0) lo = m else hi = m }
+        val clipped = clip(lo)
+        val peakIn = speech.maxOf { abs(it) } * lo
+        val x = SynthVoice.mix(SynthVoice.concat(SynthVoice.white(0.5, -60.0, 22), clipped), SynthVoice.white(8.0, -60.0, 23))
+        val inRms = SynthVoice.rmsDb(x, 8_000, x.size)
+        assertEquals("input RMS $inRms", -8.0, inRms, 1.0)
+        assertTrue("input peaks reach 0 dBFS (was ${20 * log10(peakIn)} before the clip)", x.maxOf { abs(it) } >= 0.999)
+        val clippedCount = clipped.count { abs(it) >= 0.999 }
+        assertTrue("$clippedCount of ${clipped.size} samples clipped", clippedCount in 1..(clipped.size / 20))
+
+        val d = MicDsp()
+        val pcm = SynthVoice.shorts(x)
+        val out = ShortArray(pcm.size)
+        val speechFrame = BooleanArray(pcm.size / 320)
+        var frame = 0
+        d.onFrame = { o -> if (frame < speechFrame.size) speechFrame[frame] = o.speech; frame++ }
+        var i = 0; var o = 0
+        while (i < pcm.size) { // Opus frames are 20 ms: 320 samples at a time, as the glasses send them
+            val n = minOf(320, pcm.size - i)
+            val y = d.process(pcm.copyOfRange(i, i + n))
+            y.copyInto(out, o); o += y.size; i += n
+        }
+        // No sample over −1 dBFS anywhere, the first frames (gain not yet cut) included.
+        val peakOut = out.maxOf { abs(it.toInt()) } / 32768.0
+        assertTrue("output peak ${20 * log10(peakOut)} dBFS", 20 * log10(peakOut) <= -1.0)
+        // Speech frames from 2 s on (the AGC has settled), with the chain's 352-sample delay.
+        var s = 0.0; var n = 0
+        for (f in 100 until speechFrame.size) if (speechFrame[f - 1]) for (k in 0 until 320) {
+            val idx = f * 320 + k + 352
+            if (idx < o) { val v = out[idx] / 32768.0; s += v * v; n++ }
+        }
+        assertTrue("speech frames found: $n", n > 32_000)
+        val outRms = 10 * log10(s / n)
+        assertEquals("output speech RMS $outRms dBFS", -20.0, outRms, 2.5)
+        assertTrue("AGC gain ${d.chain.agcGainDb} dB is a cut", d.chain.agcGainDb < -8.0)
+    }
 }

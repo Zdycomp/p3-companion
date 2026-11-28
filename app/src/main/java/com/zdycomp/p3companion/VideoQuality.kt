@@ -83,6 +83,87 @@ object VideoQuality {
             .maxWithOrNull(compareBy<Result>({ it.pixels }, { it.fps }))
     }
 
+    // ---------------- 4.1.1: the detail (bitrate) ladder ----------------
+
+    /**
+     * 4.1.1: open data by detail, most first. The owner's 4.1.0 quality test on the E13C-5 (fw 1.0.0):
+     * `[01]` 320×240 10.7 fps 162 kbps, `[01 01]` 14.0 fps 180 kbps, `[01 02]` 15.7 fps 199 kbps,
+     * `[01 03]` 15.3 fps 203 kbps; `[02]` and `[03]` accepted with no video. The second byte reads as a
+     * bitrate level: more bits for each picture at the same size, so less blur from compression.
+     */
+    val LADDER: List<ByteArray> = listOf(byteArrayOf(1, 3), byteArrayOf(1, 2), byteArrayOf(1, 1), STANDARD)
+
+    /** How long an accepted open may go without a picture before the next setting down is tried. */
+    const val NO_VIDEO_MS = 3_000L
+
+    /** A short plain name for a ladder setting ("most detail"), or null for other data. */
+    fun detailName(data: ByteArray?): String? = when (data?.let { d -> LADDER.indexOfFirst { it.contentEquals(d) } }) {
+        0 -> "most detail"
+        1 -> "high detail"
+        2 -> "medium detail"
+        3 -> "basic"
+        else -> null
+    }
+
+    /** What one open with one setting came to. */
+    enum class Outcome {
+        /** Pictures arrived: this setting is used and remembered. */
+        VIDEO,
+        /** The glasses refused the data (any status but busy): try the next setting down. */
+        REFUSED,
+        /** Accepted, but no picture within [NO_VIDEO_MS]: close `[00]` and try the next setting down. */
+        NO_VIDEO,
+        /** The glasses are busy (mic or call): not about the setting, so stop and remember nothing. */
+        BUSY,
+        /** The person left or the link dropped: stop. */
+        STOPPED,
+    }
+
+    /**
+     * 4.1.1: the order the live view tries open data in, and what to remember. [high] (Quality set to
+     * High, a bigger picture the probe found) goes first; then the ladder from [remembered] down (the
+     * whole ladder from `[01 03]` when nothing is remembered or the remembered data isn't on it).
+     * Pure state, so the JVM tests run exactly what the app runs.
+     */
+    class OpenLadder(high: ByteArray?, remembered: ByteArray?) {
+        val order: List<ByteArray>
+        var index = 0; private set
+        /** The ladder setting that gave pictures, to save; null when none did (or it was the High data). */
+        var remember: ByteArray? = null; private set
+
+        init {
+            val start = remembered?.let { r -> LADDER.indexOfFirst { it.contentEquals(r) } }?.takeIf { it >= 0 } ?: 0
+            val rest = LADDER.drop(start)
+            order = (listOfNotNull(high) + rest).fold(mutableListOf()) { acc, d -> if (acc.none { it.contentEquals(d) }) acc += d; acc }
+        }
+
+        val current: ByteArray get() = order[index]
+        val isLast: Boolean get() = index >= order.size - 1
+
+        /** After [current] came to [o]: the next data to open with, or null to stay with what's open (or stop). */
+        fun next(o: Outcome): ByteArray? = when (o) {
+            Outcome.VIDEO -> { if (LADDER.any { it.contentEquals(current) }) remember = current; null }
+            Outcome.REFUSED, Outcome.NO_VIDEO -> if (isLast) null else { index++; current }
+            Outcome.BUSY, Outcome.STOPPED -> null
+        }
+    }
+
+    /**
+     * 4.1.1: what "Try higher quality" teaches the live view: the most-detail ladder setting that was
+     * accepted and sent pictures, or null when none did (the remembered setting is then left alone).
+     */
+    fun detailFromProbe(standard: Result?, results: List<Result>): ByteArray? {
+        val worked = (listOfNotNull(standard) + results).filter { it.accepted && it.pictures > 0 }
+        return LADDER.firstOrNull { d -> worked.any { it.data.contentEquals(d) } }
+    }
+
+    /** One sentence for the report: which setting the live view now opens with. */
+    fun detailSentence(standard: Result?, results: List<Result>): String {
+        val d = detailFromProbe(standard, results) ?: return "No setting sent pictures, so the live view keeps its setting."
+        val r = (listOfNotNull(standard) + results).first { it.data.contentEquals(d) }
+        return "Live view opens with [${hex(d)}] (${detailName(d)}, %.0f kbps).".format(Locale.US, r.kbps)
+    }
+
     fun hex(b: ByteArray): String = b.joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
 
     /** "01 02" back to bytes; null for anything that isn't 1 to 4 hex bytes. */

@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.1.1 (versionCode 16)
+
+Goal: the owner's 4.1.0 quality test on the E13C-5 (fw 1.0.0, moto g 2025, Android 16): `5720/3 [01]` 320×240 10.7 fps
+162 kbps, `[01 01]` 14.0 fps 180 kbps, `[01 02]` 15.7 fps 199 kbps, `[01 03]` 15.3 fps 203 kbps, `[02]`/`[03]` accepted
+with no video. The second data byte reads as a bitrate level: more bits a picture at the same size, less blur.
+Everything else is unchanged (all earlier tests pass).
+
+**Live view opens with the most detail that works** (`VideoQuality.LADDER`, `VideoQuality.OpenLadder`, `XkGlasses.openLadder`)
+- The open now sends `[01 03]` by default. A refused setting goes straight to `[01 02]`, then `[01 01]`, then `[01]`;
+  an accepted one with no picture in 3 s is closed with `[00]` and, 1.5 s later, the next one is opened. Busy
+  (5710 = 02, the mic or a call) never steps down.
+- The setting that gave pictures is remembered (`Prefs.liveDetailData`, key `live_quality_open`, not backed up) and
+  tried first next time. The log says which setting was used and why it stepped down.
+- Quality › High (a bigger picture the probe found) still goes first when chosen, then the ladder. "Try higher
+  quality" now also sets the remembered setting to the most-detail one that sent pictures, and says so in its report.
+- The close `[00]`, the media acks, the ack picker, 30 fps decoding, the 5710 reopen and the live view test are
+  unchanged; the 6 s automatic live view test waits until the open has finished trying settings.
+- The Picture card shows the detail setting in use; the rate line shows it with the size.
+
+**Glasses mic is hot; the chain turns it down** (`VoiceChainTest.hotGlassesMicIsTurnedDownAndNeverOverMinus1Dbfs`)
+- glasses-data-link.wav showed speech at about −8 dBFS RMS with 0 dBFS peaks. Checked on a synthetic −8 dBFS signal
+  with clipped 0 dBFS peaks: the AGC cuts about 12 dB, speech comes out at −20 dBFS RMS and no sample passes −1 dBFS
+  (the limiter catches the first frames). No code change was needed.
+
+**Wi-Fi screen** (`WifiText`, `WifiScreen`)
+- The glasses have no Wi-Fi (8 scans and Bluetooth probes never found a network or Wi-Fi Direct device), and the
+  screen now says so. "This is a device's network" moved under an "Advanced: another device's own network" note
+  that says it's not for the glasses or a home router; a marked network shows a warning with Unmark. Nothing removed.
+- With the glasses not connected over Bluetooth, the Wake button says "Connect the glasses first" and doesn't scan.
+
+**Hardware tests** (`HardwareTestsScreen`)
+- Without the glasses on Bluetooth, a warning at the top says so, and T1, T2, T4, T5 and T7 show "Needs the glasses
+  connected" instead of running. T13 can still be armed.
+
 ## 4.1.0 (versionCode 15)
 
 Goal: the owner's ask: *use every part of the glasses' hardware dynamically, especially the voice chat and the

@@ -142,4 +142,14 @@ class HardwarePolicyTest {
         assertTrue(Spectrum.shareAbove(narrow, 16_000, 4_000.0) < 0.003)
         assertTrue(Spectrum.verdict(0.0001).contains("narrowband"))
     }
+
+    /** 4.1.1: without the glasses on Bluetooth, the tests that need them don't run (T13 only arms a read). */
+    @Test fun hardwareTestsThatNeedTheGlassesWaitForBluetooth() {
+        for (id in listOf("T1", "T2", "T4", "T5", "T7")) {
+            assertFalse(id, HardwareTestsScreen.canRun(id, bluetoothConnected = false))
+            assertTrue(id, HardwareTestsScreen.canRun(id, bluetoothConnected = true))
+        }
+        assertTrue(HardwareTestsScreen.canRun("T13", bluetoothConnected = false))
+        assertTrue(HardwareTestsScreen.notConnectedText().startsWith("The glasses aren't connected over Bluetooth"))
+    }
 }

@@ -1789,14 +1789,29 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     @Volatile private var openToken = 0
 
     /**
-     * 3.6: the data the 5720 open sends: `[01]`, or with Quality set to High the data "Try higher quality"
-     * found ([VideoQuality]). The close is always `[00]`.
+     * 3.6: the data the 5720 open sends. 4.1.1: the data the last open actually used (the detail
+     * ladder, [VideoQuality.OpenLadder]), else High's data, else the remembered detail setting, else
+     * `[01 03]`. The close is always `[00]`.
      */
-    private fun openData(): ByteArray = (if (prefs.liveQualityHigh) prefs.liveQualityData else null) ?: VideoQuality.STANDARD
+    private fun openData(): ByteArray = openUsed
+        ?: (if (prefs.liveQualityHigh) prefs.liveQualityData else null)
+        ?: prefs.liveDetailData ?: VideoQuality.LADDER.first()
 
-    /** 3.6: what the live view opens with, for the screen ("Standard" or "High 640×480"). */
-    val qualityLabel: String get() =
-        if (prefs.liveQualityHigh) "High " + (prefs.liveQualitySize?.let { "${it.first}×${it.second}" } ?: VideoQuality.hex(openData())) else "Standard"
+    /** 4.1.1: the open data the live view is running with now (null before the first open). */
+    @Volatile private var openUsed: ByteArray? = null
+
+    /** 4.1.1: true while an open is still trying settings, so the screen doesn't start its own test. */
+    @Volatile var liveOpening = false; private set
+
+    /** 4.1.1: true while the open closes one setting itself before trying the next one down. */
+    @Volatile private var ladderClosing = false
+
+    /** 3.6: what the live view opens with, for the screen ("Standard · [01 03] most detail" or "High 640×480"). */
+    val qualityLabel: String get() {
+        val d = openData()
+        if (prefs.liveQualityHigh && d.contentEquals(prefs.liveQualityData)) return "High " + (prefs.liveQualitySize?.let { "${it.first}×${it.second}" } ?: VideoQuality.hex(d))
+        return "Standard · [${VideoQuality.hex(d)}]" + (VideoQuality.detailName(d)?.let { " $it" } ?: "")
+    }
 
     private fun openPreviewNow(): String? {
         if (link == null) return "Connect the glasses first."
@@ -1813,20 +1828,100 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         addLog("Live view: acks for live video fragments: ${ackPicker.current.label}" +
             if (ackPicker.locked) " (saved)" else " (testing; switches if under 2 fps for 5 s)")
         val q5710 = expectPush("5710")
+        liveOpening = true
         try {
-            val msg = openPreviewInner()
-            if (preview == Preview.ON) afterOpen(q5710)
-            return msg
+            return openLadder(q5710)
         } finally {
+            liveOpening = false
             pushWaiters.remove("5710", q5710)
+        }
+    }
+
+    /**
+     * 4.1.1: opens with the most detail that works. Tries [VideoQuality.OpenLadder]'s order (High's
+     * data first when chosen, then `[01 03]`, `[01 02]`, `[01 01]`, `[01]` from the remembered one down):
+     * a refused setting goes straight to the next; an accepted one with no picture in
+     * [VideoQuality.NO_VIDEO_MS] is closed with `[00]` and, [LIVE_DEBOUNCE_MS] later, the next is opened.
+     * The setting that gave pictures is remembered ([Prefs.liveDetailData]). Busy is never a reason to
+     * step down. A command the live view test learned (not 5720) opens as before, with no ladder.
+     */
+    private fun openLadder(q5710: LinkedBlockingQueue<Xk.Frame>): String? {
+        val high = if (prefs.liveQualityHigh) prefs.liveQualityData else null
+        val ladder = VideoQuality.OpenLadder(high, prefs.liveDetailData)
+        var data = ladder.current
+        while (true) {
+            val name = VideoQuality.detailName(data)?.let { " ($it)" } ?: if (high != null && data.contentEquals(high)) " (High)" else ""
+            addLog("Live view: opening 5720/${prefs.previewAction} with [${VideoQuality.hex(data)}]$name" +
+                if (ladder.index == 0 && prefs.liveDetailData != null && data.contentEquals(prefs.liveDetailData)) ", the setting that worked last time" else "")
+            openUsed = data
+            val pictures0 = jpegFrames
+            val msg = openPreviewInner(data)
+            if (openedWith != null) {
+                if (preview == Preview.ON) afterOpen(q5710, data)
+                return msg
+            }
+            val outcome = when (preview) {
+                Preview.ON -> {
+                    val acceptedAt = SystemClock.elapsedRealtime()
+                    if (afterOpen(q5710, data)) VideoQuality.Outcome.BUSY
+                    else waitForPicture(acceptedAt, pictures0)
+                }
+                Preview.BUSY -> VideoQuality.Outcome.BUSY
+                else -> VideoQuality.Outcome.REFUSED
+            }
+            val next = ladder.next(outcome)
+            when (outcome) {
+                VideoQuality.Outcome.VIDEO -> {
+                    ladder.remember?.let { r ->
+                        if (!r.contentEquals(prefs.liveDetailData)) prefs.liveDetailData = r
+                        addLog("Live view: using [${VideoQuality.hex(r)}] (${VideoQuality.detailName(r)}); remembered for next time")
+                    } ?: addLog("Live view: using [${VideoQuality.hex(data)}]$name")
+                }
+                VideoQuality.Outcome.REFUSED -> if (next != null) addLog("Live view: [${VideoQuality.hex(data)}] refused; trying [${VideoQuality.hex(next)}]")
+                VideoQuality.Outcome.NO_VIDEO -> if (next != null) {
+                    addLog("Live view: no picture from [${VideoQuality.hex(data)}] in ${VideoQuality.NO_VIDEO_MS / 1000} s; " +
+                        "closing [00] and trying [${VideoQuality.hex(next)}]")
+                    ladderClosing = true
+                    try {
+                        runCatching { request("5720", prefs.previewAction, VideoQuality.CLOSE, 2_000) }
+                        preview = Preview.OPENING
+                        liveDebounce.closedNow(SystemClock.elapsedRealtime())
+                        changed()
+                        Thread.sleep(LIVE_DEBOUNCE_MS)
+                    } finally {
+                        ladderClosing = false
+                    }
+                    if (!keepPreview || link == null) return null
+                    q5710.clear()
+                    link?.live?.reset()
+                    ackPicker.restart()
+                    videoFrames = 0
+                } else addLog("Live view: no picture yet from [${VideoQuality.hex(data)}], the last setting; leaving it open")
+                VideoQuality.Outcome.BUSY, VideoQuality.Outcome.STOPPED -> {}
+            }
+            if (next == null) return msg
+            data = next
+        }
+    }
+
+    /** 4.1.1: waits until [VideoQuality.NO_VIDEO_MS] after [acceptedAt] for the first picture of this open. */
+    private fun waitForPicture(acceptedAt: Long, jpeg0: Long): VideoQuality.Outcome {
+        val end = acceptedAt + VideoQuality.NO_VIDEO_MS
+        while (true) {
+            if (videoFrames > 0 || jpegFrames > jpeg0) return VideoQuality.Outcome.VIDEO
+            if (!keepPreview || link == null) return VideoQuality.Outcome.STOPPED
+            if (SystemClock.elapsedRealtime() >= end) return VideoQuality.Outcome.NO_VIDEO
+            Thread.sleep(50)
         }
     }
 
     /**
      * After an accepted open: the glasses push 5710 (01 on, 02 busy). Busy right after a touch means
      * the mic had them: wait up to 4 s for 00/01 and open once more. A pull the test found useful is sent.
+     * 4.1.1: [data] is the open data in use; true when the glasses stayed busy.
      */
-    private fun afterOpen(q: LinkedBlockingQueue<Xk.Frame>) {
+    private fun afterOpen(q: LinkedBlockingQueue<Xk.Frame>, data: ByteArray): Boolean {
+        var stillBusy = false
         val st = awaitPush("5710", q, 2_000)?.data?.firstOrNull()?.toInt()
         if (st == 2) {
             addLog("Live view: the glasses are busy (5710 = 02); waiting for them")
@@ -1839,9 +1934,9 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                 addLog("Live view: 5710 = %02X, opening once more".format(v))
                 val via = openedWith
                 val r = if (via != null) request(probeNode(via), probeAction(via), byteArrayOf(1), 4_000)
-                else request("5720", prefs.previewAction, openData(), 4_000)
+                else request("5720", prefs.previewAction, data, 4_000)
                 if ((r?.errCode ?: 0) == 0) preview = Preview.ON
-            }
+            } else stillBusy = true
         }
         prefs.livePull?.let { name ->
             PULL_TRIES.firstOrNull { pullName(it) == name }?.let { t ->
@@ -1849,19 +1944,20 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
             }
         }
         changed()
+        return stillBusy
     }
 
-    private fun openPreviewInner(): String? {
+    private fun openPreviewInner(data: ByteArray): String? {
         // 3.1: a command the live view probe found working on these glasses goes first.
         val learned = prefs.livePath
         if (learned != null && learned in PROBE_PATHS && !learned.startsWith("5720/")) return openVia(learned)
         openedWith = null
         var action = prefs.previewAction
-        var r = request("5720", action, openData(), 4_000)
+        var r = request("5720", action, data, 4_000)
         if (r?.errCode in setOf(3, 4, 6)) {
             action = if (action == Xk.ACTION_EXECUTE) Xk.ACTION_WRITE else Xk.ACTION_EXECUTE
             addLog("Live view: trying action $action")
-            r = request("5720", action, openData(), 4_000)
+            r = request("5720", action, data, 4_000)
         }
         val code = r?.errCode
         preview = when (code) {
@@ -1900,6 +1996,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     private fun closePreviewNow() {
         if (!probing && !micStreaming) stopSniff()
         ackPicker.restart()
+        openUsed = null
         if (preview == Preview.OFF) return
         liveDebounce.closedNow(SystemClock.elapsedRealtime())
         preview = Preview.OFF
@@ -2033,13 +2130,18 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                 setReady()
             }
             val best = if (complete) VideoQuality.best(standard, results) else null
-            val summary = if (complete) VideoQuality.summary(standard, results)
+            // 4.1.1: the most-detail setting that sent pictures becomes the one the live view opens with.
+            val summary = if (complete) VideoQuality.summary(standard, results) + " " + VideoQuality.detailSentence(standard, results)
                 else "The test didn't finish, so nothing was changed. The live view is closed; open it again."
             say(summary)
             if (complete) {
                 prefs.liveQualityData = best?.data
                 prefs.liveQualitySize = best?.size
                 if (best == null) prefs.liveQualityHigh = false
+                VideoQuality.detailFromProbe(standard, results)?.let { d ->
+                    prefs.liveDetailData = d
+                    addLog("Quality: live view will open with [${VideoQuality.hex(d)}] (${VideoQuality.detailName(d)})")
+                }
                 prefs.liveQualityReport = summary
                 prefs.liveQualityAt = System.currentTimeMillis()
             }
@@ -2528,6 +2630,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                     preview = Preview.ON
                     keepPreview = true
                     openedWith = if (f.startsWith("5720/")) null else f
+                    if (openedWith == null) openUsed = VideoQuality.STANDARD // the live test opens with [01]
                     addLog("Live test: video found with $f; kept open for the Live view screen")
                 } else {
                     preview = Preview.OFF
@@ -2564,7 +2667,10 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
 
     private fun onPreviewState(v: Int) {
         when (v) {
-            0 -> if (preview == Preview.ON && mayReopen()) {
+            // 4.1.1: the open is stepping down the detail ladder and closed one setting itself.
+            0 -> if (ladderClosing) {
+                addLog("Live view: 5710 = 00 while trying settings (the app's own close)")
+            } else if (preview == Preview.ON && mayReopen()) {
                 // 3.4: the glasses closed the preview by themselves while Live view is on screen.
                 reopenedAt = SystemClock.elapsedRealtime()
                 preview = Preview.OPENING

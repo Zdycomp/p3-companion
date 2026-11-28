@@ -145,4 +145,100 @@ class VideoQualityTest {
         assertTrue(SettingsBackup.isSecret("live_quality_data"))
         assertTrue(SettingsBackup.isSecret("live_hq"))
     }
+
+    // ---------------- 4.1.1: the detail (bitrate) ladder ----------------
+
+    private fun hexes(l: List<ByteArray>) = l.map { VideoQuality.hex(it) }
+
+    @Test fun ladderStartsAtMostDetailAndStepsDownToTheStandardOpen() {
+        assertEquals(listOf("01 03", "01 02", "01 01", "01"), hexes(VideoQuality.LADDER))
+        assertArrayEquals(VideoQuality.STANDARD, VideoQuality.LADDER.last())
+        assertTrue(VideoQuality.LADDER.none { it.contentEquals(VideoQuality.CLOSE) })
+        assertEquals(3_000L, VideoQuality.NO_VIDEO_MS)
+        val l = VideoQuality.OpenLadder(high = null, remembered = null)
+        assertEquals(listOf("01 03", "01 02", "01 01", "01"), hexes(l.order))
+        assertArrayEquals(byteArrayOf(1, 3), l.current)
+    }
+
+    @Test fun refusedAndNoVideoFallBackInOrderAndTheWorkingOneIsRemembered() {
+        val l = VideoQuality.OpenLadder(null, null)
+        assertArrayEquals(byteArrayOf(1, 2), l.next(VideoQuality.Outcome.REFUSED))
+        assertArrayEquals(byteArrayOf(1, 1), l.next(VideoQuality.Outcome.NO_VIDEO))
+        assertArrayEquals(byteArrayOf(1), l.next(VideoQuality.Outcome.REFUSED))
+        assertTrue(l.isLast)
+        assertNull(l.next(VideoQuality.Outcome.VIDEO))
+        assertArrayEquals(byteArrayOf(1), l.remember)
+        // The last setting with no video: nothing more to try, nothing remembered.
+        val m = VideoQuality.OpenLadder(null, byteArrayOf(1))
+        assertEquals(listOf("01"), hexes(m.order))
+        assertNull(m.next(VideoQuality.Outcome.NO_VIDEO))
+        assertNull(m.remember)
+    }
+
+    @Test fun theOwnersGlassesOpenWithMostDetailAtOnce() {
+        val l = VideoQuality.OpenLadder(null, null)
+        assertNull(l.next(VideoQuality.Outcome.VIDEO))
+        assertArrayEquals(byteArrayOf(1, 3), l.remember)
+        assertEquals("most detail", VideoQuality.detailName(byteArrayOf(1, 3)))
+        assertEquals("basic", VideoQuality.detailName(byteArrayOf(1)))
+        assertNull(VideoQuality.detailName(byteArrayOf(2)))
+    }
+
+    @Test fun theRememberedSettingGoesFirstThenTheOnesBelowIt() {
+        assertEquals(listOf("01 02", "01 01", "01"), hexes(VideoQuality.OpenLadder(null, byteArrayOf(1, 2)).order))
+        assertEquals(listOf("01 01", "01"), hexes(VideoQuality.OpenLadder(null, byteArrayOf(1, 1)).order))
+        // Data that isn't on the ladder is ignored: the whole ladder from the top.
+        assertEquals(listOf("01 03", "01 02", "01 01", "01"), hexes(VideoQuality.OpenLadder(null, byteArrayOf(2)).order))
+    }
+
+    @Test fun highGoesFirstAndIsNeverRememberedAsTheDetailSetting() {
+        val l = VideoQuality.OpenLadder(high = byteArrayOf(3), remembered = byteArrayOf(1, 2))
+        assertEquals(listOf("03", "01 02", "01 01", "01"), hexes(l.order))
+        assertNull(l.next(VideoQuality.Outcome.VIDEO))
+        assertNull("High's data is kept as High, not as the detail setting", l.remember)
+        // High data that is itself on the ladder isn't tried twice.
+        assertEquals(listOf("01 03", "01 02", "01 01", "01"), hexes(VideoQuality.OpenLadder(byteArrayOf(1, 3), null).order))
+        val h = VideoQuality.OpenLadder(byteArrayOf(3), null)
+        assertArrayEquals(byteArrayOf(1, 3), h.next(VideoQuality.Outcome.REFUSED))
+    }
+
+    @Test fun busyOrLeavingNeverStepsDownOrRemembers() {
+        for (o in listOf(VideoQuality.Outcome.BUSY, VideoQuality.Outcome.STOPPED)) {
+            val l = VideoQuality.OpenLadder(null, null)
+            assertNull(l.next(o))
+            assertEquals(0, l.index)
+            assertNull(l.remember)
+        }
+    }
+
+    @Test fun theProbeFeedsTheRememberedSetting() {
+        // The owner's 4.1.0 quality test.
+        fun r(d: ByteArray, fps: Double, kbps: Double, code: Int? = null) =
+            VideoQuality.Result(d, code, true, if (fps > 0) 320 else null, if (fps > 0) 240 else null,
+                (fps * 3).toLong(), (kbps * 3_000 / 8).toLong(), 3_000)
+        val std = r(byteArrayOf(1), 10.7, 162.0)
+        val results = listOf(r(byteArrayOf(1, 1), 14.0, 180.0), r(byteArrayOf(1, 2), 15.7, 199.0), r(byteArrayOf(1, 3), 15.3, 203.0),
+            r(byteArrayOf(2), 0.0, 0.0), r(byteArrayOf(3), 0.0, 0.0))
+        assertArrayEquals(byteArrayOf(1, 3), VideoQuality.detailFromProbe(std, results))
+        assertEquals("Live view opens with [01 03] (most detail, 203 kbps).", VideoQuality.detailSentence(std, results))
+        assertNull("no bigger picture, so High stays off", VideoQuality.best(std, results))
+        // [01 03] refused and [01 02] silent: the most detail that sent pictures is [01 01].
+        val worse = listOf(r(byteArrayOf(1, 1), 14.0, 180.0), r(byteArrayOf(1, 2), 0.0, 0.0), r(byteArrayOf(1, 3), 0.0, 0.0, code = 3))
+        assertArrayEquals(byteArrayOf(1, 1), VideoQuality.detailFromProbe(std, worse))
+        // Nothing sent pictures: the remembered setting is left alone.
+        assertNull(VideoQuality.detailFromProbe(r(byteArrayOf(1), 0.0, 0.0), listOf(r(byteArrayOf(1, 3), 0.0, 0.0))))
+        assertEquals("No setting sent pictures, so the live view keeps its setting.",
+            VideoQuality.detailSentence(null, listOf(r(byteArrayOf(1, 3), 0.0, 0.0))))
+    }
+
+    @Test fun theDetailSettingIsSavedPerDeviceAndNotBackedUp() {
+        val p = Prefs(FakeSharedPreferences())
+        assertNull(p.liveDetailData)
+        p.liveDetailData = byteArrayOf(1, 2)
+        assertArrayEquals(byteArrayOf(1, 2), p.liveDetailData)
+        assertEquals(listOf("01 02", "01 01", "01"), hexes(VideoQuality.OpenLadder(null, p.liveDetailData).order))
+        p.liveDetailData = null
+        assertNull(p.liveDetailData)
+        assertTrue(SettingsBackup.isSecret("live_quality_open"))
+    }
 }

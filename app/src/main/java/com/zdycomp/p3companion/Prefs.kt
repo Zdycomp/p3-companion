@@ -187,6 +187,14 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
         get() = VideoQuality.parseSize(sp.getString("live_quality_size", null))
         set(v) = sp.edit().putString("live_quality_size", VideoQuality.formatSize(v)).apply()
 
+    /**
+     * 4.1.1: the detail (bitrate) setting the live view last opened with and got pictures from
+     * ([VideoQuality.LADDER]), tried first next time; null until one worked (the ladder starts at `[01 03]`).
+     */
+    var liveDetailData: ByteArray?
+        get() = VideoQuality.parseHex(sp.getString("live_quality_open", null))
+        set(v) = sp.edit().putString("live_quality_open", v?.let { VideoQuality.hex(it) }).apply()
+
     /** The last "Try higher quality" result in one sentence, and when it ran. */
     var liveQualityReport: String?
         get() = sp.getString("live_quality_report", null)
