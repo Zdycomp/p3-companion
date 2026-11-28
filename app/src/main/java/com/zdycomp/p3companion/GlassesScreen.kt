@@ -33,6 +33,7 @@ class GlassesScreen(private val a: MainActivity) : Screen {
 
     private val listener = XkGlasses.Listener { if (visible && countdown == 0) a.refresh() }
     private val recorderListener: () -> Unit = { if (visible) a.refresh() }
+    private val torchListener: () -> Unit = { if (visible) a.refresh() }
     private var visible = false
     private val main = Handler(Looper.getMainLooper())
 
@@ -73,6 +74,8 @@ class GlassesScreen(private val a: MainActivity) : Screen {
         g.addListener(listener)
         a.recorder.removeListener(recorderListener)
         a.recorder.addListener(recorderListener)
+        TorchController.get(a).removeListener(torchListener)
+        TorchController.get(a).addListener(torchListener)
 
         val col = ui.page()
         val hasKey = a.prefs.userKey != null
@@ -116,6 +119,7 @@ class GlassesScreen(private val a: MainActivity) : Screen {
         if (connected) col.addView(captureCard())
         else if (g.state == XkGlasses.State.IDLE) col.addView(connectCard(hasKey))
 
+        col.addView(torchCard())
         col.addView(recorderCard())
 
         // Pick the glasses from paired devices, or pair new ones
@@ -583,6 +587,48 @@ class GlassesScreen(private val a: MainActivity) : Screen {
 
     // ---------------- voice recorder ----------------
 
+    /**
+     * 4.0: the phone's flashlight: a big toggle that stays on until it's turned off (here, the Quick
+     * Settings tile, the notification or "flashlight off"). It's the phone's torch only; the glasses'
+     * camera is never used for it.
+     */
+    private fun torchCard(): LinearLayout {
+        val ui = a.ui
+        val t = TorchController.get(a)
+        val on = t.on
+        val card = ui.card()
+        card.addView(ui.heading("Flashlight", R.drawable.ic_flashlight))
+        if (!t.available) {
+            card.addView(ui.body("This phone has no flashlight.", muted = true, sizeSp = 13f))
+            return card
+        }
+        val big = ui.button(if (on) "Turn the flashlight off" else "Turn the flashlight on", if (on) Btn.FILLED else Btn.TONAL, R.drawable.ic_flashlight) {
+            ui.haptic(card, if (on) Haptic.TOGGLE_OFF else Haptic.TOGGLE_ON)
+            val said = t.toggle()
+            if (t.logic.problem != null) a.toast(said)
+        }.apply { minHeight = ui.dp(64); stateDescription = if (on) "On" else "Off" }
+        card.addView(big)
+        val autoOff = a.prefs.torchAutoOffMin
+        val chipRow = ui.row().apply { setPadding(0, ui.dp(8), 0, 0) }
+        chipRow.addView(ui.chip(if (on) "Flashlight on" else "Flashlight off", on, R.drawable.ic_flashlight) { t.toggle() },
+            LinearLayout.LayoutParams(Ui.WRAP, Ui.WRAP).apply { marginEnd = ui.dp(8) })
+        chipRow.addView(ui.chip(if (autoOff == 0) "Auto-off: never" else "Auto-off: $autoOff min", autoOff > 0, R.drawable.ic_timer) {
+            val steps = TorchLogic.AUTO_OFF_MIN
+            a.prefs.torchAutoOffMin = steps[(steps.indexOf(autoOff) + 1) % steps.size]
+            a.refresh()
+        })
+        card.addView(chipRow)
+        card.addView(ui.body(
+            when {
+                t.logic.state == TorchLogic.State.BUSY -> "Another app is using the camera, so the flashlight can't turn on right now."
+                on -> "Stays on until you turn it off" + (if (autoOff > 0) " (or after $autoOff min)" else "") + ". There's a Turn off button in the notification, and a Flashlight tile for Quick Settings."
+                else -> "The phone's own torch, not the glasses. Say \"flashlight on\" or add the Flashlight tile to Quick Settings."
+            },
+            muted = true, sizeSp = 13f,
+        ).apply { setPadding(0, ui.dp(8), 0, 0) })
+        return card
+    }
+
     private fun recorderCard(): LinearLayout {
         val ui = a.ui
         val s = ui.s
@@ -832,6 +878,7 @@ class GlassesScreen(private val a: MainActivity) : Screen {
         visible = false
         a.glasses.removeListener(listener)
         a.recorder.removeListener(recorderListener)
+        TorchController.get(a).removeListener(torchListener)
         main.removeCallbacks(tick)
         // A refresh rebuilds the screen right away; only leaving the tab stops the self-timer.
         main.post {

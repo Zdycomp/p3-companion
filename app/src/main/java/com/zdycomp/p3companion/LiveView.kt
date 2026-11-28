@@ -598,6 +598,53 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         }
     }
 
+    // 4.0: live sharpening on the GPU (a 3×3 kernel at the video's own pixel size), kept only while the
+    // phone still shows at least 25 pictures a second with it.
+    @Volatile private var texFrames = 0L
+    private val texSamples = ArrayDeque<LongArray>()
+    private var sharpenOn = false
+    private var sharpenSince = 0L
+    private var sharpenStep = 1f
+
+    private fun applyLiveSharpen() {
+        val tv = texture ?: return
+        if (android.os.Build.VERSION.SDK_INT < 33) return
+        if (!a.prefs.liveSharpenLive || mode == Mode.SNAPSHOT) {
+            if (sharpenOn) { tv.setRenderEffect(null); sharpenOn = false }
+            return
+        }
+        runCatching {
+            val shader = android.graphics.RuntimeShader(SHARPEN_AGSL)
+            shader.setFloatUniform("stepPx", sharpenStep, sharpenStep)
+            shader.setFloatUniform("amount", 0.45f)
+            tv.setRenderEffect(android.graphics.RenderEffect.createRuntimeShaderEffect(shader, "content"))
+            if (!sharpenOn) { sharpenSince = SystemClock.elapsedRealtime(); texSamples.clear() }
+            sharpenOn = true
+        }.onFailure {
+            sharpenOn = false
+            a.glasses.addLog("Live view: live sharpening isn't available on this phone (${it.javaClass.simpleName})")
+        }
+    }
+
+    /** Pictures the screen really showed per second over the last 3 s; turns live sharpening off below 25 when it's the cause. */
+    private fun checkSharpenRate(decodedFps: Double) {
+        val now = SystemClock.elapsedRealtime()
+        texSamples.addLast(longArrayOf(now, texFrames))
+        while (texSamples.size > 1 && now - texSamples.first()[0] > 3_000) texSamples.removeFirst()
+        if (!sharpenOn || now - sharpenSince < 3_500) return
+        val first = texSamples.first()
+        val span = now - first[0]
+        if (span < 2_500) return
+        val shownFps = (texFrames - first[1]) * 1000.0 / span
+        if (shownFps < 25.0 && shownFps < decodedFps - 2.0) {
+            a.prefs.liveSharpenLive = false
+            applyLiveSharpen()
+            val msg = String.format(Locale.US, "Live sharpening turned off: the phone showed only %.0f of %.0f pictures a second with it (it needs 25).", shownFps, decodedFps)
+            a.glasses.addLog("Live view: $msg")
+            a.toast(msg)
+        }
+    }
+
     override fun build(): View {
         val ui = a.ui
         val s = ui.s
@@ -748,7 +795,7 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
             override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) { p.setSurface(Surface(st)); applyTransform() }
             override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) { applyTransform() }
             override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean { p.setSurface(null); return true }
-            override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
+            override fun onSurfaceTextureUpdated(st: SurfaceTexture) { texFrames++ }
         }
         g.videoSink = { p.offer(it) }
         g.liveGapSink = { p.resync() }
@@ -809,7 +856,7 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
                 if (bmp == null) return@runOnUiThread
                 if (!active || mode == Mode.SNAPSHOT) { bmp.recycle(); return@runOnUiThread }
                 val old = snapBitmap
-                snapImage?.setImageBitmap(bmp)
+                snapImage?.setImageBitmap(bmp); (snapImage?.drawable as? android.graphics.drawable.BitmapDrawable)?.isFilterBitmap = true
                 snapImage?.visibility = View.VISIBLE
                 snapBitmap = bmp
                 old?.recycle()
@@ -980,6 +1027,13 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
             p.liveSharpen, R.drawable.ic_contrast) { p.liveSharpen = it })
         card.addView(ui.switchRow("Snapshots at 2× size", "Smoothly upscaled, for example 640×480 from 320×240",
             p.liveUpscale, R.drawable.ic_photo) { p.liveUpscale = it })
+        // 4.0: the full enhancement for snapshots, and sharpening of the live picture itself.
+        card.addView(ui.switchRow("Enhance snapshots", "Denoised, Lanczos ${p.enhanceScale}× upscaled and sharpened (Settings › Pictures); replaces the two above",
+            p.enhancePhotos, R.drawable.ic_auto_awesome) { p.enhancePhotos = it })
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            card.addView(ui.switchRow("Sharpen the live picture", "A light 3×3 sharpening on the phone; turns itself off if it drops below 25 pictures a second",
+                p.liveSharpenLive, R.drawable.ic_contrast) { on -> p.liveSharpenLive = on; applyLiveSharpen() })
+        }
         card.addView(ui.switchRow("Record with the phone's mic", "Adds sound from the phone to recordings (the glasses can't send sound while streaming)",
             p.liveRecordAudio, R.drawable.ic_mic) { on -> if (on) a.withMic { p.liveRecordAudio = true } else p.liveRecordAudio = false })
         box.addView(card)
@@ -1025,6 +1079,9 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
             if (t.zoom != 1f) m.postScale(t.zoom, t.zoom, cx, cy)
             m.postTranslate(t.dx, t.dy)
             tv.setTransform(m)
+            // 4.0: one step of the live sharpening kernel is one video pixel on screen (bilinear filtering does the rest).
+            val step = maxOf(1f, (tv.width * t.scaleX + tv.height * t.scaleY) * t.zoom / (vw + vh))
+            if (step != sharpenStep || (a.prefs.liveSharpenLive != sharpenOn)) { sharpenStep = step; applyLiveSharpen() }
         }
         val img = snapImage ?: return
         val bmp = snapBitmap?.takeIf { !it.isRecycled } ?: return
@@ -1315,7 +1372,7 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
                 if (!active) { bmp?.recycle(); if (!a.prefs.keepSnapshots && uri !in snapKept) deleteSnapshot(uri); return@runOnUiThread }
                 if (bmp != null) {
                     val old = snapBitmap
-                    snapImage?.setImageBitmap(bmp)
+                    snapImage?.setImageBitmap(bmp); (snapImage?.drawable as? android.graphics.drawable.BitmapDrawable)?.isFilterBitmap = true
                     snapBitmap = bmp
                     old?.recycle()
                     statusBox?.visibility = View.GONE
@@ -1368,6 +1425,7 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         val fps = if (span > 0) (shownNow - first[1]) * 1000.0 / span else 0.0
         val kbps = if (span > 0) (p.receivedBytes - first[2]) * 8.0 / span else 0.0
         val fpsText = if (fps >= 10 || fps == 0.0) "%.0f".format(Locale.US, fps) else "%.1f".format(Locale.US, fps)
+        checkSharpenRate(fps)
         // 3.6: "Live" while pictures render, with the time from the last fragment to the screen.
         val live = p.lastRenderAt != 0L && now - p.lastRenderAt < 1_500
         val lat = p.latencyMs.takeIf { it >= 0 }?.let { " · ~${it.toInt()} ms" } ?: ""
@@ -1457,6 +1515,10 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         val rotation = p.liveRotation
         val upscale = p.liveUpscale
         val sharpen = p.liveSharpen
+        // 4.0: "Enhance photos" runs the full pipeline on snapshots too (denoise, Lanczos-3 2× or 3×, adaptive sharpen).
+        val enhance = p.enhancePhotos
+        val enhanceScale = p.enhanceScale
+        val strength = p.enhanceStrength
         val resolver = a.contentResolver
         Thread {
             val result = runCatching {
@@ -1465,8 +1527,17 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
                     val m = Matrix().apply { postRotate(rotation.toFloat()) }
                     bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true).also { if (it !== bmp) bmp.recycle() }
                 }
-                if (upscale) bmp = Bitmap.createScaledBitmap(bmp, bmp.width * 2, bmp.height * 2, true).also { if (it !== bmp) bmp.recycle() }
-                if (sharpen) {
+                var note: String? = null
+                if (enhance) {
+                    val sw = bmp.width
+                    val sh = bmp.height
+                    val out = PhotoEnhancer.enhance(bmp, enhanceScale, strength)
+                    bmp.recycle()
+                    bmp = out
+                    note = PhotoEnhancer.note(bmp.width, bmp.height, sw, sh, strength)
+                }
+                if (upscale && !enhance) bmp = Bitmap.createScaledBitmap(bmp, bmp.width * 2, bmp.height * 2, true).also { if (it !== bmp) bmp.recycle() }
+                if (sharpen && !enhance) {
                     val w = bmp.width
                     val h = bmp.height
                     val px = IntArray(w * h)
@@ -1476,8 +1547,8 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
                     bmp.recycle()
                     bmp = out
                 }
-                saveSnapshot(resolver, bmp, album)
-                val size = "${bmp.width}×${bmp.height}"
+                saveSnapshot(resolver, bmp, album, note)
+                val size = "${bmp.width}×${bmp.height}" + if (note != null) ", enhanced" else ""
                 bmp.recycle()
                 size
             }
@@ -1485,7 +1556,8 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         }.start()
     }
 
-    private fun saveSnapshot(resolver: android.content.ContentResolver, bmp: Bitmap, album: String) {
+
+    private fun saveSnapshot(resolver: android.content.ContentResolver, bmp: Bitmap, album: String, note: String? = null) {
         val name = "P3_SNAP_" + SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date()) + ".jpg"
         val v = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
@@ -1496,7 +1568,7 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         val u = resolver.insert(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), v)
             ?: throw IllegalStateException("no row")
         try {
-            resolver.openOutputStream(u, "w")!!.use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+            resolver.openOutputStream(u, "w")!!.use { it.write(PhotoEnhancer.jpeg(bmp, note)) }
             resolver.update(u, ContentValues().apply {
                 put(MediaStore.MediaColumns.IS_PENDING, 0)
                 put(MediaStore.MediaColumns.WIDTH, bmp.width)
@@ -1561,5 +1633,18 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         const val AUTO_PROBE_MS = 6_000L
         /** Full-screen controls hide this long after the last touch. */
         const val CONTROLS_HIDE_MS = 3_000L
+        /** The live sharpening kernel: centre 1 + 4a, the four neighbours one video pixel away -a (as [ImageEnhance.sharpen3x3]). */
+        const val SHARPEN_AGSL = """
+            uniform shader content;
+            uniform float2 stepPx;
+            uniform float amount;
+            half4 main(float2 p) {
+                half4 c = content.eval(p);
+                half4 n = content.eval(p + float2(0.0, -stepPx.y)) + content.eval(p + float2(0.0, stepPx.y)) +
+                          content.eval(p + float2(-stepPx.x, 0.0)) + content.eval(p + float2(stepPx.x, 0.0));
+                half3 o = c.rgb * half(1.0 + 4.0 * amount) - n.rgb * half(amount);
+                return half4(clamp(o, half3(0.0), half3(1.0)), c.a);
+            }
+        """
     }
 }

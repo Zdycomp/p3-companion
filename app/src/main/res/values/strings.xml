@@ -2,6 +2,7 @@
 <resources>
     <string name="app_name">P3 Companion</string>
     <string name="tile_photo">Glasses photo</string>
+    <string name="tile_flashlight">Flashlight</string>
     <string name="sc_photo_short">Take photo</string>
     <string name="sc_photo_long">Take a photo with the glasses</string>
     <string name="sc_live_short">Live view</string>

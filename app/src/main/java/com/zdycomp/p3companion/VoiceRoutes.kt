@@ -49,20 +49,21 @@ object VoiceChoice {
     fun scoreAfter(old: Int, worked: Boolean): Int = if (worked) 1 else max(SKIP_AT, min(old, 0) - 1)
 
     /**
-     * The mics to try for one voice question, best first. Glasses routes that worked come first (3.7:
-     * call audio before the data-link stream, which takes about 4 s to start), then call audio when not known, then the phone's mic, which
-     * is always the last resort. The data-link stream is only tried once Test voice or a question
-     * proved it works, because waiting for it costs about 3 s when it doesn't.
+     * The mics to try for one voice question, best first. 4.0: only glasses routes that passed Test voice
+     * (or worked for a real question) are tried, call audio first (3.7: it opens in under a second; the
+     * data-link stream takes about 4 s to start); otherwise the phone's mic, which is always the last
+     * resort. 3.5-3.9 also tried call audio that was never proven before the phone's mic, which cost a
+     * second or more of probing on every question when it didn't carry sound.
      */
     fun routeOrder(scores: Map<MicRoute, Int>, headset: Boolean, linked: Boolean, useGlasses: Boolean): List<MicRoute> {
         val out = ArrayList<MicRoute>(3)
         val spp = scores[MicRoute.GLASSES_SPP] ?: 0
         val sco = scores[MicRoute.GLASSES_SCO] ?: 0
         if (useGlasses) {
-            // 3.7: proven call audio first (it opens in under a second; the data link takes about 4 s to start).
+            // Test voice sets 1 (worked) or -2 (failed), so -1 means "proven, then failed once": still tried, after the data link.
             if (headset && sco > 0) out += MicRoute.GLASSES_SCO
             if (linked && spp > 0) out += MicRoute.GLASSES_SPP
-            if (headset && sco in (SKIP_AT + 1)..0) out += MicRoute.GLASSES_SCO
+            if (headset && sco == -1) out += MicRoute.GLASSES_SCO
         }
         out += MicRoute.PHONE
         return out
@@ -171,7 +172,9 @@ object VoiceChoice {
      * The pipe when it isn't known to be broken (Android 13+), else Gemini when there's a Gemini key.
      * Claude doesn't take audio, so a Claude key alone gives [SppMode.NONE].
      */
-    fun sppMode(pipe: PipeState, sdk: Int, geminiKey: Boolean): SppMode = when {
+    fun sppMode(pipe: PipeState, sdk: Int, geminiKey: Boolean, preferGemini: Boolean = false): SppMode = when {
+        // 4.0: with a Gemini key Gemini writes it down first (more accurate than the phone's recognizer).
+        preferGemini && geminiKey -> SppMode.GEMINI
         sdk >= 33 && pipe != PipeState.UNUSABLE -> SppMode.PIPE
         geminiKey -> SppMode.GEMINI
         else -> SppMode.NONE
@@ -244,6 +247,10 @@ class Vad(
     var floorDb = 0.0; private set
     var peakDb = -120.0; private set
     var totalMs = 0.0; private set
+    /** 4.0: where the speech began (ms from the start), or -1 before any speech. */
+    var speechStartMs = -1.0; private set
+    /** 4.0: where the last loud piece ended (ms from the start), or -1. */
+    var speechEndMs = -1.0; private set
     private var hasFloor = false
     private var loudRun = 0.0
     private var quietRun = 0.0
@@ -253,6 +260,26 @@ class Vad(
 
         /** 3.7: for a clip we record ourselves (Gemini): ends 800 ms after the speech, at most 15 s. */
         fun clip() = Vad(endSilenceMs = 800, noSpeechMs = 8_000, maxMs = 15_000)
+
+        /** 4.0: Gemini speech-to-text: starts on speech, ends after 900 ms of quiet, gives up after 8 s of nothing, at most 20 s. */
+        fun gemini() = Vad(endSilenceMs = GEMINI_END_MS, noSpeechMs = 8_000, maxMs = GEMINI_MAX_MS)
+
+        /** 4.0: hold to talk: only the release (or 20 s) ends it, never a pause. */
+        fun hold() = Vad(endSilenceMs = Int.MAX_VALUE / 2, noSpeechMs = GEMINI_MAX_MS, maxMs = GEMINI_MAX_MS)
+
+        const val GEMINI_END_MS = 900
+        const val GEMINI_MAX_MS = 20_000
+
+        /**
+         * 4.0: the part of a clip worth sending: from [preRollMs] before the speech began to [tailMs] after it
+         * ended (the whole clip when no speech start is known). Less to upload, same words.
+         */
+        fun trim(clip: ShortArray, rate: Int, speechStartMs: Double, speechEndMs: Double, preRollMs: Int = 300, tailMs: Int = 400): ShortArray {
+            if (clip.isEmpty() || speechStartMs < 0) return clip
+            val from = ((speechStartMs - preRollMs) * rate / 1000).toInt().coerceIn(0, clip.size)
+            val to = if (speechEndMs < 0) clip.size else ((speechEndMs + tailMs) * rate / 1000).toInt().coerceIn(from, clip.size)
+            return if (from == 0 && to == clip.size) clip else clip.copyOfRange(from, to)
+        }
     }
 
     val ended: Boolean get() = state == State.ENDED_AFTER_SPEECH || state == State.ENDED_NO_SPEECH || state == State.ENDED_MAX
@@ -269,9 +296,9 @@ class Vad(
         val loud = db > minSpeechDb && db > floorDb + overFloorDb
         // The floor follows quiet sound down at once and up slowly, so speech doesn't raise it.
         floorDb = if (db < floorDb) db else floorDb + min(db - floorDb, 0.02 * ms)
-        if (loud) { loudRun += ms; quietRun = 0.0 } else { quietRun += ms; loudRun = 0.0 }
+        if (loud) { loudRun += ms; quietRun = 0.0; if (heardSpeech || loudRun >= minSpeechMs) speechEndMs = totalMs } else { quietRun += ms; loudRun = 0.0 }
         when (state) {
-            State.WAITING -> if (loudRun >= minSpeechMs) { state = State.SPEECH; heardSpeech = true }
+            State.WAITING -> if (loudRun >= minSpeechMs) { state = State.SPEECH; heardSpeech = true; speechStartMs = maxOf(0.0, totalMs - loudRun) }
                 else if (totalMs >= noSpeechMs) state = State.ENDED_NO_SPEECH
             State.SPEECH -> if (quietRun >= endSilenceMs) state = State.ENDED_AFTER_SPEECH
             else -> {}

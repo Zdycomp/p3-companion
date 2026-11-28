@@ -501,6 +501,9 @@ class MainActivity : Activity() {
     /** Rebuild the visible screen in place, for example after a setting changes. */
     fun refresh() { if (current >= 0) show(current, animate = false) }
 
+    /** 4.0: a new picture (an enhanced copy) appeared: rebuild the gallery if it's what's on screen. */
+    fun refreshGalleryIfShown() { if (current == TAB_GALLERY) refresh() }
+
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putInt("tab", if (current >= TAB_COUNT) returnTab else current)

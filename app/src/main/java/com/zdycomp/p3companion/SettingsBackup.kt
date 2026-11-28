@@ -38,6 +38,10 @@ object SettingsBackup {
         "speak_through" to Kind.STRING, "voice_commands" to Kind.BOOL, "keep_snapshots" to Kind.BOOL,
         "convo_two_way" to Kind.BOOL, "convo_auto" to Kind.BOOL, "convo_speak" to Kind.BOOL, "convo_original" to Kind.BOOL,
         "convo_background" to Kind.BOOL,
+        // 4.0
+        "gemini_voice_on" to Kind.BOOL, "gemini_voice" to Kind.STRING, "gemini_stt" to Kind.BOOL, "hold_to_talk" to Kind.BOOL,
+        "gemini_tts_model" to Kind.STRING, "enhance_photos" to Kind.BOOL, "enhance_strength" to Kind.FLOAT, "enhance_scale" to Kind.INT,
+        "live_sharpen_live" to Kind.BOOL, "torch_auto_off" to Kind.INT,
         // SupRevolt (never the token or the server address)
         "sr_scans" to Kind.STRING,
         // Privacy

@@ -54,6 +54,7 @@ object AiSetup {
                 if (typed.isNotBlank() && p.aiKey(provider) == null) {
                     p.setAiKey(provider, typed)
                     a.toast("Key saved.")
+                    keySaved(a, provider)
                     a.refresh()
                 }
             }
@@ -62,7 +63,7 @@ object AiSetup {
             card.addView(ui.button("Save key", Btn.FILLED, R.drawable.ic_save) {
                 val typed = field.text.toString()
                 if (typed.isBlank()) a.toast("Paste your key first.")
-                else { p.setAiKey(provider, typed); a.toast("Key saved."); a.refresh() }
+                else { p.setAiKey(provider, typed); a.toast("Key saved."); keySaved(a, provider); a.refresh() }
             })
             card.addView(ui.button(if (provider == AiProvider.GEMINI) "Get a free Gemini key" else "Get a Claude key", Btn.TEXT, R.drawable.ic_open_in_new, full = false) {
                 runCatching {
@@ -71,14 +72,33 @@ object AiSetup {
             })
         }
 
-        // Model
+        // Model. 4.0: for Gemini the app picks the newest Flash model from Google's own list unless one is typed here.
         card.addView(ui.text("Model", Type.TITLE_SMALL).apply { setPadding(0, ui.dp(16), 0, ui.dp(6)) })
-        card.addView(ui.input(p.aiModel(provider), provider.defaultModel) { typed ->
-            p.setAiModel(provider, typed.ifBlank { provider.defaultModel })
+        val auto = if (provider == AiProvider.GEMINI) p.geminiTextAuto else null
+        val typed = p.aiModelTyped(provider)
+        card.addView(ui.input(typed ?: "", auto?.let { "Automatic: $it" } ?: provider.defaultModel) { t ->
+            if (t.isBlank()) p.clearAiModel(provider) else p.setAiModel(provider, t)
+            a.refresh()
         })
-        if (p.aiModel(provider) != provider.defaultModel) {
-            card.addView(ui.button("Use the default model (${provider.defaultModel})", Btn.TEXT, R.drawable.ic_restart, full = false) {
-                p.setAiModel(provider, provider.defaultModel)
+        if (provider == AiProvider.GEMINI) {
+            card.addView(ui.body(
+                (if (typed != null) "Using $typed (typed here). Clear it to let the app pick." else "Using ${p.aiModel(provider)}: " +
+                    (if (auto != null) "the newest Flash model your key can use." else "the built-in default until the model list has been read.")) +
+                    "\nVoice: ${p.geminiTtsModel}" + (p.geminiModelsReport?.let { "\nLast check: $it" } ?: ""),
+                muted = true, sizeSp = 13f,
+            ))
+            if (key != null) card.addView(ui.button("Find the newest models", Btn.TEXT, R.drawable.ic_refresh, full = false) {
+                a.toast("Checking Google's model list…")
+                Thread {
+                    val line = runCatching { AiClient.refreshGeminiModels(p, force = true) }.getOrNull()
+                    a.runOnUiThread { a.toast(line ?: p.geminiModelsReport ?: "Couldn't read the model list."); a.refresh() }
+                }.start()
+            })
+        }
+        if (typed != null) {
+            card.addView(ui.button(if (provider == AiProvider.GEMINI) "Let the app pick the model" else "Use the default model (${provider.defaultModel})",
+                Btn.TEXT, R.drawable.ic_restart, full = false) {
+                p.clearAiModel(provider)
                 a.refresh()
             })
         }
@@ -139,7 +159,39 @@ object AiSetup {
                 addView(ui.slider(16, step, onStep = { show(it) }) { set(0.5f + it / 10f) })
             })
         }
-        g.addView(ui.listRow("Voice", "Speed and pitch of spoken answers", R.drawable.ic_volume_up,
+        // 4.0: listening and talking with Gemini.
+        val gem = p.aiKey(AiProvider.GEMINI) != null
+        g.addView(ui.switchRow(
+            "Gemini writes down what you say",
+            if (gem) "Much more accurate than the phone's recognizer. The app records the mic (noise suppression on), Gemini turns it into words; the phone's recognizer is the fallback offline"
+            else "Needs a Gemini key (AI setup). Until then the phone's speech recognizer listens",
+            p.geminiStt, R.drawable.ic_mic, enabled = gem,
+        ) { p.geminiStt = it })
+        g.addView(ui.switchRow(
+            "Hold to talk",
+            "Hold the mic button while you speak and let go when you're done (otherwise a pause of about a second ends it)",
+            p.holdToTalk, R.drawable.ic_mic,
+        ) { p.holdToTalk = it; a.refresh() })
+        g.addView(ui.switchRow(
+            "Gemini's voice for replies",
+            if (gem) "Every spoken answer in Gemini's natural voice, on the glasses when they're connected. The phone's Google voice is the fallback"
+            else "Needs a Gemini key (AI setup). Until then the phone's Google voice reads answers",
+            p.geminiVoiceOn, R.drawable.ic_volume_up, enabled = gem,
+        ) { p.geminiVoiceOn = it; a.refresh() })
+        if (gem && p.geminiVoiceOn) {
+            g.addView(ui.listRow("Gemini voice", "${p.geminiVoice} · tap to choose from ${GeminiVoice.VOICES.size}", R.drawable.ic_volume_up,
+                ui.button("Preview", Btn.TEXT, R.drawable.ic_play, full = false) { previewVoice(a, p.geminiVoice) }) {
+                a.ui.sheet("Gemini voice", GeminiVoice.VOICES.map { v ->
+                    SheetItem(v, selected = v == p.geminiVoice) { p.geminiVoice = v; a.refresh(); previewVoice(a, v) }
+                })
+            })
+            g.addView(ui.text("Speech model", Type.BODY_MEDIUM, ui.s.onSurfaceVariant).apply { setPadding(ui.dp(56), ui.dp(4), ui.dp(16), 0) })
+            g.addView(ui.input(p.geminiTtsTyped ?: "", "Automatic: ${p.geminiTtsAuto ?: GeminiVoice.TTS_FALLBACK_MODEL}") { t ->
+                p.geminiTtsTyped = t
+                a.refresh()
+            }.apply { (layoutParams as? LinearLayout.LayoutParams)?.let { it.marginStart = ui.dp(56); it.marginEnd = ui.dp(16) } })
+        }
+        g.addView(ui.listRow("Voice", "Speed and pitch of spoken answers" + (a.assistant.speech.lastVoice?.let { " · last: $it" } ?: ""), R.drawable.ic_volume_up,
             ui.button("Play sample", Btn.TEXT, R.drawable.ic_play, full = false) {
                 a.assistant.readAloud("Hello! This is how the assistant's answers will sound.")
             }))
@@ -158,10 +210,34 @@ object AiSetup {
         return g
     }
 
+    /** 4.0: a new Gemini key: read Google's model list for it at once (newest Flash for chat, the speech model). */
+    private fun keySaved(a: MainActivity, provider: AiProvider) {
+        if (provider != AiProvider.GEMINI) return
+        val p = a.prefs
+        Thread {
+            val line = runCatching { AiClient.refreshGeminiModels(p, force = true) }.getOrNull()
+            line?.let { a.runOnUiThread { a.glasses.addLog("Gemini models: $it"); a.refresh() } }
+        }.start()
+    }
+
+    /** 4.0: one sentence in [voice] with Gemini's voice, in the reply language. */
+    private fun previewVoice(a: MainActivity, voice: String) {
+        a.assistant.speech.previewGemini(voice, Languages.byName(a.prefs.replyLanguage).tag) { err -> err?.let { a.toast(it) } }
+    }
+
     /** The full list of voice commands, grouped. */
     fun showCommands(a: MainActivity) {
         val ui = a.ui
         val body = ui.column()
+        // 4.0: the 12 simple commands first; everything else can be said in your own words.
+        body.addView(ui.text("Simple commands", Type.TITLE_SMALL, ui.s.primary).apply { setPadding(0, ui.dp(4), 0, ui.dp(4)) })
+        body.addView(ui.text(VoiceCommands.core.joinToString("\n") { "• $it" }, Type.BODY_MEDIUM, ui.s.onSurface))
+        body.addView(ui.text(
+            "Or just ask in your own words: with a Gemini key the AI works the app for you (\"I need some light\", \"film this\", " +
+                "\"how much room is left on the glasses\"). The phrases below still work offline too.",
+            Type.BODY_SMALL, ui.s.onSurfaceVariant,
+        ).apply { setPadding(0, ui.dp(8), 0, ui.dp(4)) })
+        body.addView(ui.text("Also works", Type.TITLE_SMALL, ui.s.primary).apply { setPadding(0, ui.dp(12), 0, 0) })
         VoiceCommands.rules.groupBy { it.group }.forEach { (group, list) ->
             body.addView(ui.text(group, Type.TITLE_SMALL, ui.s.primary).apply { setPadding(0, ui.dp(12), 0, ui.dp(4)) })
             body.addView(ui.text(list.joinToString("\n") { "• \"${it.helpLabel}\"" + if (it.needsConfirm) " (asks first)" else "" },
@@ -258,7 +334,7 @@ object AiSetup {
         ui.dialog("${provider.label} key", icon = R.drawable.ic_lock, view = input, confirm = "Save", dismiss = "Cancel") {
             val k = input.text.toString().trim()
             if (k.isEmpty()) { input.error = "Nothing to save."; false }
-            else { a.prefs.setAiKey(provider, k); a.toast("Key saved."); a.refresh(); true }
+            else { a.prefs.setAiKey(provider, k); a.toast("Key saved."); keySaved(a, provider); a.refresh(); true }
         }
     }
 

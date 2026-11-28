@@ -3,8 +3,6 @@ package com.zdycomp.p3companion
 import android.content.ActivityNotFoundException
 import android.content.ContentUris
 import android.content.Intent
-import android.hardware.camera2.CameraCharacteristics
-import android.hardware.camera2.CameraManager
 import android.media.AudioManager
 import android.net.Uri
 import android.os.BatteryManager
@@ -34,17 +32,6 @@ class CommandRunner(private val a: MainActivity) {
     private val glasses get() = a.glasses
     private val assistant get() = a.assistant
     private var timerPhoto: Runnable? = null
-    private var torchOn = false
-    private val torchCallback = object : CameraManager.TorchCallback() {
-        override fun onTorchModeChanged(cameraId: String, enabled: Boolean) { if (cameraId == torchId) torchOn = enabled }
-    }
-    private val torchId: String? by lazy {
-        val cm = a.getSystemService(CameraManager::class.java) ?: return@lazy null
-        runCatching {
-            val ids = cm.cameraIdList.filter { cm.getCameraCharacteristics(it).get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true }
-            ids.firstOrNull { cm.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK } ?: ids.firstOrNull()
-        }.getOrNull()?.also { runCatching { cm.registerTorchCallback(torchCallback, main) } }
-    }
 
     fun state() = CommandState(
         memoRecording = a.recorder.recording,
@@ -60,7 +47,6 @@ class CommandRunner(private val a: MainActivity) {
 
     fun release() {
         cancelPending()
-        runCatching { a.getSystemService(CameraManager::class.java)?.unregisterTorchCallback(torchCallback) }
     }
 
     /** The spoken question before a command that needs a yes. */
@@ -127,7 +113,9 @@ class CommandRunner(private val a: MainActivity) {
         "gallery.last_photo" -> lastPhoto()?.let { uri -> Reply("Opening your last photo.", after = { a.openMedia(uri, "image/jpeg") }) }
             ?: Reply("No photos yet.")
         "gallery.describe_last" -> lastPhoto()?.let { uri ->
-            Reply("Looking at your last photo.", after = { assistant.askPhoto(uri, AiWire.photoPreset(0, prefs.replyLanguage), voice = true) })
+            // 4.0: "what was in that picture" may carry the person's own question (from Gemini function calling).
+            val q = m.slots["question"] ?: AiWire.photoPreset(0, prefs.replyLanguage)
+            Reply("Looking at your last photo.", after = { assistant.askPhoto(uri, q, voice = true) })
         } ?: Reply("No photos yet.")
         "gallery.count" -> Reply(galleryCount())
         "gallery.delete_last" -> lastPhoto()?.let { uri ->
@@ -145,6 +133,8 @@ class CommandRunner(private val a: MainActivity) {
         // ---- assistant ----
         "ai.look" -> photoQuestion("Looking.", AiWire.photoPreset(0, prefs.replyLanguage))
         "ai.read_text" -> photoQuestion("Reading.", AiWire.photoPreset(3, prefs.replyLanguage))
+        // 4.0: a photo and the person's own question about it ("is this mushroom safe to eat").
+        FnCalls.ASK_VIEW -> m.slots["question"]?.let { photoQuestion("Looking.", it) } ?: Reply("What would you like to know about it?")
         "ai.identify" -> photoQuestion("Checking.", AiWire.photoPreset(1, prefs.replyLanguage))
         "ai.translate_view" -> {
             val lang = m.slots["lang"] ?: prefs.replyLanguage
@@ -210,11 +200,19 @@ class CommandRunner(private val a: MainActivity) {
             val bm = a.getSystemService(BatteryManager::class.java)
             val level = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
             val charging = bm?.isCharging == true
-            Reply(if (level in 0..100) "Phone at $level percent" + (if (charging) ", charging." else ".") else "I can't read the phone's battery.")
+            val phone = if (level in 0..100) "phone at $level percent" + (if (charging) ", charging" else "") else null
+            // 4.0: a bare "battery" on camera glasses names both when the glasses are connected.
+            val g = glasses.battery?.takeIf { connected() }
+            Reply(when {
+                g != null && phone != null -> "Glasses at $g percent" + (if (glasses.charging == true) ", charging" else "") + ", $phone."
+                phone != null -> phone.replaceFirstChar { it.uppercase() } + "."
+                else -> "I can't read the phone's battery."
+            })
         }
         "util.timer" -> setTimer((n(m, "dur") ?: 60).coerceIn(1, 24 * 3600))
         "util.alarm" -> setAlarm(n(m, "h") ?: 7, n(m, "m") ?: 0, m.slots["ampm"] == "1")
-        "util.torch" -> torch(m.slots["onoff"])
+        // 4.0: only the phone's torch, kept on until turned off; never the glasses' camera.
+        "util.torch" -> Reply(TorchController.get(a).set(m.slots["onoff"]))
         "util.volume" -> volume(m.slots["dir"] == "up")
 
         // ---- navigation ----
@@ -291,8 +289,8 @@ class CommandRunner(private val a: MainActivity) {
 
         // ---- help ----
         "sys.help" -> {
-            assistant.note("Voice commands you can say:\n" + VoiceCommands.helpText())
-            Reply("Try: " + VoiceCommands.sampler.dropLast(1).joinToString(", ") + ", or say stop. The full list is on screen.")
+            assistant.note(VoiceCommands.coreHelpText())
+            Reply(VoiceCommands.HELP_SPEECH)
         }
         else -> Reply("I don't know how to do that yet.")
     }
@@ -417,18 +415,6 @@ class CommandRunner(private val a: MainActivity) {
             Reply("No clock app can take alarms.")
         } catch (e: SecurityException) {
             Reply("The clock app didn't let me set an alarm.")
-        }
-    }
-
-    private fun torch(onoff: String?): Reply {
-        val id = torchId ?: return Reply("This phone has no flashlight.")
-        val on = when (onoff) { "true" -> true; "false" -> false; else -> !torchOn }
-        return try {
-            a.getSystemService(CameraManager::class.java)!!.setTorchMode(id, on)
-            torchOn = on
-            Reply(if (on) "Flashlight on." else "Flashlight off.")
-        } catch (e: Exception) {
-            Reply("The flashlight is busy.")
         }
     }
 

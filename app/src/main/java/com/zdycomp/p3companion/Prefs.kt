@@ -299,8 +299,100 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
     fun setAiKey(provider: AiProvider, key: String?) =
         sp.edit().putString("ai_key_" + provider.name, key?.trim()?.takeIf { it.isNotEmpty() }).apply()
 
-    fun aiModel(provider: AiProvider = aiProvider): String =
-        sp.getString("ai_model_" + provider.name, null)?.takeIf { it.isNotBlank() } ?: provider.defaultModel
+    /**
+     * The model to ask. 4.0: for Gemini, a model typed in AI setup wins; otherwise the newest Flash model
+     * found in Google's model list ([geminiTextAuto]); otherwise the built-in default.
+     */
+    fun aiModel(provider: AiProvider = aiProvider): String {
+        val typed = aiModelTyped(provider)
+        if (typed != null) return typed
+        if (provider == AiProvider.GEMINI) geminiTextAuto?.let { return it }
+        return provider.defaultModel
+    }
+
+    /** The model typed in AI setup, or null when it's left to the app. */
+    fun aiModelTyped(provider: AiProvider): String? =
+        sp.getString("ai_model_" + provider.name, null)?.takeIf { it.isNotBlank() }
+
+    /** 4.0: back to the automatic model (the newest Flash for Gemini). */
+    fun clearAiModel(provider: AiProvider) = sp.edit().remove("ai_model_" + provider.name).apply()
+
+    // ---------- 4.0: Gemini models, voice and speech-to-text ----------
+
+    /** The newest Flash text model Google's model list offered this key, or null before the list was read. */
+    var geminiTextAuto: String?
+        get() = sp.getString("gemini_text_auto", null)?.takeIf { it.isNotBlank() }
+        set(v) = sp.edit().putString("gemini_text_auto", v?.let { AiWire.cleanModel(it, AiProvider.GEMINI) }).apply()
+
+    /** The speech (TTS) model found in the model list, or null before it was read. */
+    var geminiTtsAuto: String?
+        get() = sp.getString("gemini_tts_auto", null)?.takeIf { it.isNotBlank() }
+        set(v) = sp.edit().putString("gemini_tts_auto", v?.let { AiWire.cleanModel(it, AiProvider.GEMINI) }).apply()
+
+    /** A speech model typed in Settings (wins over the automatic one), or null. */
+    var geminiTtsTyped: String?
+        get() = sp.getString("gemini_tts_model", null)?.takeIf { it.isNotBlank() }
+        set(v) = sp.edit().putString("gemini_tts_model", v?.trim()?.takeIf { it.isNotEmpty() }?.let { AiWire.cleanModel(it, AiProvider.GEMINI) }).apply()
+
+    /** The speech model to use. */
+    val geminiTtsModel: String get() = geminiTtsTyped ?: geminiTtsAuto ?: GeminiVoice.TTS_FALLBACK_MODEL
+
+    /** When the model list was last read (wall clock), 0 = never. */
+    var geminiModelsAt: Long
+        get() = sp.getLong("gemini_models_at", 0L)
+        set(v) = sp.edit().putLong("gemini_models_at", v).apply()
+
+    /** The last model-list result in one line, for Settings and diagnostics. */
+    var geminiModelsReport: String?
+        get() = sp.getString("gemini_models_report", null)
+        set(v) = sp.edit().putString("gemini_models_report", v).apply()
+
+    /** Speak every reply with Gemini's voice when a Gemini key is set (the phone's voice only as the fallback). */
+    var geminiVoiceOn: Boolean
+        get() = sp.getBoolean("gemini_voice_on", true)
+        set(v) = sp.edit().putBoolean("gemini_voice_on", v).apply()
+
+    /** Gemini's voice ([GeminiVoice.VOICES]), default Kore. */
+    var geminiVoice: String
+        get() = GeminiVoice.voiceName(sp.getString("gemini_voice", null))
+        set(v) = sp.edit().putString("gemini_voice", GeminiVoice.voiceName(v)).apply()
+
+    /** Gemini writes down what you say (better than the phone's recognizer) when a Gemini key is set. */
+    var geminiStt: Boolean
+        get() = sp.getBoolean("gemini_stt", true)
+        set(v) = sp.edit().putBoolean("gemini_stt", v).apply()
+
+    /** Hold the mic button while you talk, instead of tap to talk and stop on a pause. */
+    var holdToTalk: Boolean
+        get() = sp.getBoolean("hold_to_talk", false)
+        set(v) = sp.edit().putBoolean("hold_to_talk", v).apply()
+
+    // ---------- 4.0: sharper pictures and the flashlight ----------
+
+    /** Save an enhanced copy (denoised, 2× upscaled, sharpened) next to every Bluetooth photo; the original is kept. */
+    var enhancePhotos: Boolean
+        get() = sp.getBoolean("enhance_photos", true)
+        set(v) = sp.edit().putBoolean("enhance_photos", v).apply()
+
+    /** How strong the enhancement is, 0..1 (0.6 = natural). */
+    var enhanceStrength: Float
+        get() = sp.getFloat("enhance_strength", ImageEnhance.DEFAULT_STRENGTH).coerceIn(0f, 1f)
+        set(v) = sp.edit().putFloat("enhance_strength", v.coerceIn(0f, 1f)).apply()
+
+    /** Upscale 2× (1280×960) or 3× (1920×1440). */
+    var enhanceScale: Int
+        get() = sp.getInt("enhance_scale", 2).let { if (it == 3) 3 else 2 }
+        set(v) = sp.edit().putInt("enhance_scale", if (v == 3) 3 else 2).apply()
+
+    /** Sharpen the live picture on the phone (a light 3×3 kernel); turns itself off below 25 fps. */
+    var liveSharpenLive: Boolean
+        get() = sp.getBoolean("live_sharpen_live", false)
+        set(v) = sp.edit().putBoolean("live_sharpen_live", v).apply()
+
+    /** Minutes before the flashlight turns itself off, 0 = stays on until turned off (the default). */
+    var torchAutoOffMin: Int
+        get() = sp.getInt("torch_auto_off", 0).let { if (it in TorchLogic.AUTO_OFF_MIN) it else 0 }
+        set(v) = sp.edit().putInt("torch_auto_off", if (v in TorchLogic.AUTO_OFF_MIN) v else 0).apply()
 
     fun setAiModel(provider: AiProvider, model: String) =
         sp.edit().putString("ai_model_" + provider.name, AiWire.cleanModel(model, provider)).apply()

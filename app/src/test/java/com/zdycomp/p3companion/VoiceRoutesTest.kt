@@ -22,8 +22,8 @@ class VoiceRoutesTest {
     // ---------------- mic routes ----------------
 
     @Test fun routeOrderWithoutATest() {
-        // Nothing known yet: the glasses' call audio first, then the phone. The data-link stream waits for proof.
-        assertEquals(listOf(sco, phone), VoiceChoice.routeOrder(emptyMap(), headset = true, linked = true, useGlasses = true))
+        // 4.0: nothing proven yet: the phone's mic. Glasses mics wait for Test voice (or a question) to prove them.
+        assertEquals(listOf(phone), VoiceChoice.routeOrder(emptyMap(), headset = true, linked = true, useGlasses = true))
         assertEquals(listOf(phone), VoiceChoice.routeOrder(emptyMap(), headset = false, linked = true, useGlasses = true))
         assertEquals(listOf(phone), VoiceChoice.routeOrder(emptyMap(), headset = true, linked = true, useGlasses = false))
     }
@@ -35,9 +35,11 @@ class VoiceRoutesTest {
         assertEquals(listOf(phone), VoiceChoice.routeOrder(tested, headset = true, linked = false, useGlasses = true))
         // 3.7: both proven: call audio first (it opens in under a second, the data link takes about 4 s).
         assertEquals(listOf(sco, spp, phone), VoiceChoice.routeOrder(mapOf(spp to 1, sco to 1), true, true, true))
-        // A proven call-audio mic before an unproven stream; one failure still tries it.
+        // A proven call-audio mic before an unproven stream; one failure after it worked still tries it.
         assertEquals(listOf(sco, phone), VoiceChoice.routeOrder(mapOf(sco to 1, spp to 0), true, true, true))
         assertEquals(listOf(sco, phone), VoiceChoice.routeOrder(mapOf(sco to -1), true, true, true))
+        // 4.0: never proven (0) is not tried before the phone's mic.
+        assertEquals(listOf(phone), VoiceChoice.routeOrder(mapOf(sco to 0), true, true, true))
         // The phone's mic is always the last resort, even when the test found it failing.
         assertEquals(listOf(phone), VoiceChoice.routeOrder(mapOf(phone to VoiceChoice.SKIP_AT, sco to VoiceChoice.SKIP_AT), true, true, true))
     }

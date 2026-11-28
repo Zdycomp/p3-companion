@@ -35,6 +35,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <!-- Keeps the glasses connected in the background so button photos are still saved -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- 4.0: keeps the phone's flashlight on with the app in the background (Android turns the torch off
+         when the app that turned it on goes away), with a "Flashlight on · Turn off" notification -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -59,6 +62,8 @@
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
         </intent>
+        <!-- 4.0: Google's speech engine, used for the phone's voice instead of the phone default -->
+        <package android:name="com.google.android.tts" />
         <!-- The system speech dialog, used when no recognition service answers -->
         <intent>
             <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
@@ -127,6 +132,31 @@
             <meta-data
                 android:name="android.service.quicksettings.ACTIVE_TILE"
                 android:value="true" />
+        </service>
+
+        <!-- 4.0: Quick Settings tile: the phone's flashlight on or off -->
+        <service
+            android:name=".FlashlightTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_flashlight"
+            android:label="@string/tile_flashlight"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.quicksettings.ACTIVE_TILE"
+                android:value="true" />
+        </service>
+
+        <!-- 4.0: keeps the flashlight on until it's turned off, with Turn off in its notification -->
+        <service
+            android:name=".TorchService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the phone's flashlight on, as the user asked, until they turn it off from the notification, the app or Quick Settings." />
         </service>
 
         <service

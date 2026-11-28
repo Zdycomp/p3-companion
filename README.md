@@ -9,11 +9,25 @@ which talks only to the AI service you choose, with your own key.
 | Tab | What you get |
 |---|---|
 | **Import** | Plug the glasses into the phone with their magnetic USB cable. The app copies new photos, videos and voice recordings into your gallery (album "P3 Glasses"), skips ones it already has, and can start by itself when the glasses are plugged in. Optional: delete from the glasses after each verified copy. 3.8: every file's pixel size and file size, a byte-for-byte check of each photo, and one line comparing cable photos with Bluetooth photos. |
-| **Gallery** | Everything imported, newest first, filter by photos, videos or audio. Tap to open, press and hold to share or delete. **Details** (3.8) shows a photo's real pixel size and file size. |
+| **Gallery** | Everything imported, newest first, filter by photos, videos or audio. Tap to open, press and hold to share or delete. **Details** (3.8) shows a photo's real pixel size and file size, and (4.0) when a copy was enhanced on the phone. |
 | **Glasses** | **Pair new glasses** in the app (Classic Bluetooth search, low-energy duplicates hidden), then connect (even before the key is added: the app shows what the glasses answer and walks you through finishing setup) and sign in with your own key. Battery and charging, **Take photo** (saved straight to the gallery), photos from the glasses' own button saved automatically, even with the app closed (a notification keeps the link up and it reconnects by itself when the glasses come back). **Live view and record to phone**: the glasses' camera streamed live, recorded as MP4 to Movies › album (optionally with the phone's mic), with native-size snapshots; fit/fill, rotate, pinch zoom, full screen, a live latency readout, automatic reopen after a Bluetooth drop, and an opt-in "Try higher quality" test. **Voice recorder** using the glasses' microphone when they're your phone's headset. Record on the glasses for models that store video. **Diagnostics** checks every step and makes a shareable report (key and address hidden); **Find full-size photos** (3.8) measures a Bluetooth photo and asks the glasses, safely, whether they hold a larger copy. **Wi-Fi** (3.8, network controller in 3.9): the phone's Wi-Fi state and connection details (link speed, IP, gateway, DNS, a 60 s signal trace), every network and Wi-Fi Direct device nearby, **Join on this phone** for ordinary networks (Android's own Add networks dialog), **For this app only** for the glasses, **Wake the glasses' Wi-Fi**, and a look at what answers on the glasses' network. |
 | **Assistant** | AI with Google Gemini (free key from Google AI Studio) or Anthropic Claude. **Voice chat**: tap, ask, hear the answer through the glasses (or tap the glasses' touch pad). **Live translation** between two languages with a swap button. **Conversation translate** (3.6) keeps listening, translates every phrase (one-way, auto-detect or two-way), shows and saves a timed log you can read, hear again, share or delete, and can keep going in the background. **Ask about a photo**: pick one, use the glasses' last photo, or take a new one with the glasses; presets for describing a scene, identifying plants and animals, food and calories, and reading and translating text. Answers always come in your chosen reply language. |
 | **SupRevolt** (3.2) | Send a glasses photo, any document or typed text to **your own SupRevolt server**, which runs every scan you've built (fine-print traps, Jargonary, photo text, Gradle fixes, code fixes, Ever, Accord, DNA) in a fixed order and answers with a verdict and a 0 to 256 confidence per scan. Say **"scan this"** and the glasses take the photo and the verdict is read back. Open it from Settings, the Glasses or Assistant tab, or the Gallery (Send to SupRevolt). |
 | **Settings** | Grouped into Appearance, Glasses, Capture, Import, Assistant, Privacy, Storage, Backup and About. Every change saves instantly. |
+
+## New in 4.0
+
+- **Microphone:** with a Gemini key, the app records the mic itself (noise suppression, auto gain, echo cancelling)
+  and Gemini writes down what you said, with a live level meter and an optional hold to talk. The phone's
+  recognizer is the offline fallback.
+- **Gemini's voice** speaks every reply (30 voices, Kore by default, preview in Settings); the phone's Google voice
+  in your reply language is the fallback.
+- **Simple commands:** 12 easy offline commands, and anything else in your own words through Gemini function
+  calling ([docs/SIMPLE-COMMANDS.md](docs/SIMPLE-COMMANDS.md)). Every old phrase still works.
+- **Flashlight** that stays on until you turn it off: Glasses tab toggle, Quick Settings tile, Turn off in the
+  notification, optional auto-off.
+- **Sharper pictures:** an enhanced 1280×960 copy of each 640×480 Bluetooth photo (the original is kept) and
+  optional live sharpening. The glasses send no bigger size over Bluetooth, and they have no Wi-Fi.
 
 ## New in 3.2: SupRevolt
 

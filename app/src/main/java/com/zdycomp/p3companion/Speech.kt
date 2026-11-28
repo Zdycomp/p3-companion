@@ -446,12 +446,25 @@ class Speech(context: Context, private val prefs: Prefs) {
     private var currentRate = -1f
     private var currentPitch = -1f
 
+    /** 4.0: where voice lines go (the connection log). */
+    var log: ((String) -> Unit)? = null
+    /** 4.0: which voice spoke the last answer, in plain words, for the screen and diagnostics. */
+    var lastVoice: String? = null; private set
+    /** 4.0: the phone's speech engine in use (Google's when installed). */
+    var engineName: String? = null; private set
+    /** 4.0: when Gemini's voice last failed (elapsedRealtime); the phone's voice is used for a minute after. */
+    private var geminiFailedAt = Long.MIN_VALUE / 2
+
     /** One answer being spoken, possibly while it's still arriving. */
     private inner class Session(
         val token: Int,
         val onFirstAudio: (() -> Unit)?,
         val onDone: (String?) -> Unit,
     ) {
+        /** 4.0: Gemini's voice speaks this answer (null: the phone's voice). */
+        var gem: GeminiTtsSession? = null
+        var tag = "en-US"
+        var throughCall = false
         var queued = 0
         var done = 0
         var ended = false
@@ -479,7 +492,14 @@ class Speech(context: Context, private val prefs: Prefs) {
             else -> {
                 ttsWaiting += then
                 if (tts == null) {
-                    tts = TextToSpeech(app) { status ->
+                    // 4.0: Google's speech engine when it's installed, not whatever the phone defaults to.
+                    val installed = runCatching {
+                        app.packageManager.queryIntentServices(Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE), 0).mapNotNull { it.serviceInfo?.packageName }
+                    }.getOrDefault(emptyList())
+                    val def = runCatching { android.provider.Settings.Secure.getString(app.contentResolver, android.provider.Settings.Secure.TTS_DEFAULT_SYNTH) }.getOrNull()
+                    val pkg = TtsPick.engine(installed, def)
+                    engineName = pkg ?: "phone default"
+                    val listener = TextToSpeech.OnInitListener { status ->
                         main.post {
                             ttsState = if (status == TextToSpeech.SUCCESS) 1 else -1
                             if (ttsState == 1) tts?.setOnUtteranceProgressListener(progress)
@@ -489,6 +509,8 @@ class Speech(context: Context, private val prefs: Prefs) {
                             list.forEach { it(ttsState == 1) }
                         }
                     }
+                    tts = if (pkg != null) TextToSpeech(app, listener, pkg) else TextToSpeech(app, listener)
+                    log?.invoke("Voice: phone speech engine ${engineName} (installed: ${installed.joinToString().ifEmpty { "none found" }}; phone default: ${def ?: "unknown"})")
                 }
             }
         }
@@ -544,7 +566,23 @@ class Speech(context: Context, private val prefs: Prefs) {
                     "You can add one in Settings › Text-to-speech."
             }
             currentLocale = locale
-        }
+            // 4.0: a voice in this language from the engine (never a Chinese voice for an English answer).
+            val voices = runCatching { engine.voices }.getOrNull().orEmpty()
+            val pick = TtsPick.choose(voices.map {
+                TtsPick.Voice(it.name, it.locale.toLanguageTag(), it.quality, it.isNetworkConnectionRequired,
+                    it.features?.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED) == true)
+            }, languageTag)
+            if (pick != null) voices.firstOrNull { it.name == pick.name }?.let { v -> runCatching { engine.voice = v } }
+            val used = runCatching { engine.voice }.getOrNull()
+            val usedTag = used?.locale?.toLanguageTag()
+            lastVoice = "phone voice: ${engineName ?: "?"}, ${used?.name ?: "default"} (${usedTag ?: languageTag})"
+            log?.invoke("Voice: $lastVoice for $languageTag")
+            if (TtsPick.wrongLanguage(usedTag, languageTag)) {
+                currentLocale = null
+                return "This phone's voice would speak ${Locale.forLanguageTag(usedTag!!).getDisplayLanguage(Locale.ENGLISH)}, not " +
+                    "${locale.getDisplayLanguage(Locale.ENGLISH)}. Add a ${locale.getDisplayLanguage(Locale.ENGLISH)} voice in Settings › Text-to-speech, or use Gemini's voice."
+            }
+        } else lastVoice = "phone voice: ${engineName ?: "?"}, ${runCatching { engine.voice?.name }.getOrNull() ?: "default"}"
         if (rate != currentRate) { engine.setSpeechRate(rate); currentRate = rate }
         if (pitch != currentPitch) { engine.setPitch(pitch); currentPitch = pitch }
         val usage = if (throughCall) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_ASSISTANT
@@ -568,10 +606,73 @@ class Speech(context: Context, private val prefs: Prefs) {
         onFirstAudio: (() -> Unit)? = null,
         onDone: (String?) -> Unit,
     ) {
-        session?.let { old -> session = null; old.finished = true }
+        session?.let { old -> session = null; old.finished = true; old.gem?.cancel() }
         val s = Session(++speakToken, onFirstAudio, onDone)
         s.leadInMs = leadInMs
+        s.tag = languageTag
+        s.throughCall = throughCall
         session = s
+        // 4.0: Gemini's voice when there's a Gemini key (and the internet); the phone's voice otherwise.
+        val key = geminiVoiceKey()
+        if (key != null) {
+            val voice = prefs.geminiVoice
+            val g = GeminiTtsSession(
+                app, key, prefs.geminiTtsModel, voice, languageTag, throughCall, rate, pitch, leadInMs,
+                onFirstAudio = { if (session === s && !s.started) { s.started = true; s.onFirstAudio?.invoke() } },
+                onDone = { if (session === s) finish(s, null) },
+                onFail = { why, rest ->
+                    if (session === s && !s.finished) {
+                        geminiFailedAt = SystemClock.elapsedRealtime()
+                        s.gem = null
+                        if (s.started) s.leadInMs = 0
+                        s.waiting.addAll(0, rest)
+                        lastVoice = "phone voice (Gemini's voice failed: $why)"
+                        startAndroid(s)
+                    }
+                },
+                log = { line -> log?.invoke("Voice: $line") },
+            )
+            s.gem = g
+            lastVoice = "Gemini $voice (${prefs.geminiTtsModel})"
+            g.start()
+            return
+        }
+        startAndroid(s)
+    }
+
+    /** 4.0: Settings' preview button: one sentence in [voice], with Gemini's voice only (says why if it can't). */
+    fun previewGemini(voice: String, languageTag: String, onDone: (String?) -> Unit) {
+        stopSpeaking()
+        val key = prefs.aiKey(AiProvider.GEMINI) ?: run { onDone("Add a Gemini key in AI setup first."); return }
+        val s = Session(++speakToken, null, onDone)
+        s.tag = languageTag
+        session = s
+        val g = GeminiTtsSession(
+            app, key, prefs.geminiTtsModel, voice, languageTag, false, rate, pitch, 0,
+            onFirstAudio = {},
+            onDone = { if (session === s) finish(s, null) },
+            onFail = { why, _ -> if (session === s) finish(s, "Gemini's voice didn't work: $why") },
+            log = { line -> log?.invoke("Voice preview: $line") },
+        )
+        s.gem = g
+        g.start()
+        g.add(GeminiVoice.previewLine(voice))
+        g.end()
+    }
+
+    /** 4.0: the Gemini key when replies should use Gemini's voice right now, else null. */
+    private fun geminiVoiceKey(): String? {
+        if (!prefs.geminiVoiceOn) return null
+        val key = prefs.aiKey(AiProvider.GEMINI) ?: return null
+        if (SystemClock.elapsedRealtime() - geminiFailedAt < GEMINI_RETRY_MS) return null
+        if (!Net.online(app)) return null
+        return key
+    }
+
+    /** The phone's own voice for [s] (and anything already waiting in it). */
+    private fun startAndroid(s: Session) {
+        val throughCall = s.throughCall
+        val languageTag = s.tag
         withTts { ok ->
             if (session !== s || s.finished) return@withTts
             val engine = tts
@@ -593,6 +694,7 @@ class Speech(context: Context, private val prefs: Prefs) {
     fun streamSentence(text: String) {
         val s = session ?: return
         if (s.finished) return
+        s.gem?.let { it.add(text); return }
         val engine = tts
         if (!s.ready || engine == null) { s.waiting += text; return }
         enqueue(s, engine, text)
@@ -615,6 +717,7 @@ class Speech(context: Context, private val prefs: Prefs) {
     fun endStream() {
         val s = session ?: return
         s.ended = true
+        s.gem?.let { it.end(); return }
         if (s.ready && s.done >= s.queued) finish(s, null)
     }
 
@@ -632,6 +735,7 @@ class Speech(context: Context, private val prefs: Prefs) {
     /** Stop talking without calling the pending done callback. */
     fun stopSpeaking() {
         speakToken++
+        session?.gem?.cancel()
         session?.finished = true
         session = null
         runCatching { tts?.stop() }
@@ -652,6 +756,8 @@ class Speech(context: Context, private val prefs: Prefs) {
         const val ON_DEVICE = VoiceChoice.ON_DEVICE
         /** 3.7: the wait between destroying one recognizer and making the next. */
         const val COOLDOWN_MS = 300L
+        /** 4.0: after Gemini's voice fails, the phone's voice speaks for this long before Gemini is tried again. */
+        const val GEMINI_RETRY_MS = 60_000L
         const val DEFAULT = VoiceChoice.DEFAULT
 
         fun errorName(code: Int): String = when (code) {

@@ -34,6 +34,8 @@ class Rule(
     val group: String,
     val needsConfirm: Boolean = false,
     val needsNet: Boolean = false,
+    /** 4.0: one of the simple core commands people are taught (docs/SIMPLE-COMMANDS.md §1). */
+    val core: Boolean = false,
     val slots: (MatchResult, String) -> Map<String, String>? = { _, _ -> emptyMap() },
 )
 
@@ -196,10 +198,10 @@ object VoiceCommands {
     val rules: List<Rule> = listOf(
         // P0 control
         Rule("ai.stop", P0, r("(?:stop|cancel|never mind|nevermind|be quiet|shut up|quiet|stop talking|enough|silence|hush|stop it)"),
-            "stop", "Assistant"),
+            "stop", "Assistant", core = true),
         Rule("sys.help", P0, r("help", "what can i say", "what can you do", "(?:list|show|tell me)(?: me)?(?: the| all| your)?(?: voice)? commands",
             "voice commands", "what are (?:the|your)(?: voice)? commands", "what commands (?:are there|can i use|do you know)"),
-            "what can I say", "Help"),
+            "what can I say", "Help", core = true),
         Rule("ai.repeat", P0, r("(?:say|repeat) (?:that|it) again", "repeat(?: that| it)?", "what did you(?: just)? say", "come again", "pardon(?: me)?"),
             "say that again", "Assistant"),
 
@@ -215,20 +217,20 @@ object VoiceCommands {
         },
         Rule("glasses.photo", P2, r(
             "(?:take|snap|capture|shoot|grab) (?:a |an |the |me a |another )?$PHOTO(?: with (?:the |my )?glasses)?",
-            "capture", "(?:say )?cheese", "photo", "picture",
-        ), "take a picture", "Camera"),
+            "capture", "(?:say )?cheese", "photo", "picture", "snap (?:1|one|it|that)",
+        ), "take a picture", "Camera", core = true),
         Rule("glasses.video_start", P2, r(
             "(?:start|begin) recording (?:a |the )?video(?: on (?:the |my )?glasses)?",
             "(?:start|begin) (?:a |the )?video(?: recording)?(?: on (?:the |my )?glasses)?",
             "record (?:a )?video(?: on (?:the |my )?glasses)?", "film (?:this|a video)",
-        ), "start recording video", "Camera"),
+        ), "start recording video", "Camera", core = true),
         Rule("glasses.video_stop", P2, r(
             "(?:stop|end|finish) (?:the )?(?:video|video recording|recording (?:the )?video|filming)",
-        ), "stop video", "Camera"),
+        ), "stop video", "Camera", core = true),
         Rule("glasses.live_open", P2, r(
             "(?:open|start|show|turn on|go to) (?:the )?live ?view", "live ?view", "show me what (?:the |my )?glasses (?:see|can see)",
-        ), "open live view", "Camera"),
-        Rule("glasses.live_close", P2, r("(?:close|exit|stop|end|turn off|leave|quit) (?:the )?live ?view"), "close live view", "Camera"),
+        ), "open live view", "Camera", core = true),
+        Rule("glasses.live_close", P2, r("(?:close|exit|stop|end|turn off|leave|quit) (?:the )?live ?view"), "close live view", "Camera", core = true),
         Rule("glasses.live_snapshot", P2, r(
             "(?:save|take|grab) (?:a |the )?(?:snapshot|frame|screenshot|screen shot)", "screenshot (?:the )?live ?view", "grab (?:a )?frame",
         ), "save a snapshot", "Camera"),
@@ -285,7 +287,7 @@ object VoiceCommands {
         ), "answer in Spanish", "Translation") { m, _ -> mapOf("lang" to (language(g(m, "lang")) ?: return@Rule null)) },
         Rule("tr.start", P2, r(
             "translate", "translation(?: mode)?", "(?:start|open|begin) (?:the )?translat(?:or|ion)(?: mode)?", "interpreter(?: mode)?",
-        ), "translate", "Translation"),
+        ), "translate", "Translation", core = true),
         // 3.6: Conversation translate, a continuous loop that logs every phrase.
         Rule("tr.conversation", P2, r(
             "(?:start |keep )?translating", "(?:start |keep )?translating (?:the |this |our |a )?conversation",
@@ -319,15 +321,21 @@ object VoiceCommands {
             if (am && h == 12) h = 0
             mapOf("h" to h.toString(), "m" to min.toString(), "ampm" to if (ap != null) "1" else "0")
         },
+        // 4.0: the phone's flashlight, nothing else: no flashlight phrase ever fires the glasses' camera or a photo flash.
         Rule("util.torch", P2, r(
             "(?:turn |switch )?(?:the )?(?:flashlight|torch|flash light)(?: (?<o>on|off))?",
             "(?:turn|switch) (?<o2>on|off) (?:the )?(?:flashlight|torch|flash light)",
             "(?<o3>enable|disable) (?:the )?(?:flashlight|torch|flash light)",
-        ), "flashlight on", "Phone") { m, _ -> mapOf("onoff" to onOff(g(m, "o") ?: g(m, "o2") ?: g(m, "o3"))) },
+            "(?:turn |switch )?(?:the )?lights? (?<o4>on|off)", "(?:turn|switch) (?<o5>on|off) (?:the )?lights?",
+            "(?:turn |switch )?(?:the )?flash (?<o6>on|off)", "(?:turn|switch) (?<o7>on|off) (?:the )?flash",
+            "toggle (?:the )?(?:flashlight|torch|flash light|flash|light)", "(?:flashlight|torch) toggle",
+        ), "flashlight on", "Phone", core = true) { m, _ ->
+            mapOf("onoff" to onOff(listOf("o", "o2", "o3", "o4", "o5", "o6", "o7").firstNotNullOfOrNull { g(m, it) }))
+        },
         Rule("util.volume", P2, r(
             "(?:volume up|louder|turn it up|turn up the volume|turn the volume up|increase (?:the )?volume|raise (?:the )?volume|speak up|more volume)",
             "(?:volume down|quieter|softer|turn it down|turn down the volume|turn the volume down|lower (?:the )?volume|decrease (?:the )?volume|less volume)",
-        ), "volume up", "Phone") { m, _ -> mapOf("dir" to if (VOLUME_UP.matches(m.value)) "up" else "down") },
+        ), "volume up", "Phone", core = true) { m, _ -> mapOf("dir" to if (VOLUME_UP.matches(m.value)) "up" else "down") },
 
         // P2 navigation
         Rule("nav.diagnostics", P2, r(
@@ -397,11 +405,12 @@ object VoiceCommands {
             "(?:the |my )?glasses battery(?: level)?", "battery (?:level )?(?:on|of|for|in) (?:the |my )?glasses",
             "how much battery (?:do|does) (?:the |my )?glasses have(?: left)?", "how (?:is|are) (?:the |my )?glasses(?: battery| doing on battery)",
             "what is (?:the |my )?glasses battery(?: level| at)?", "how charged are (?:the |my )?glasses",
-        ), "glasses battery", "Glasses"),
+        ), "glasses battery", "Glasses", core = true),
         Rule("util.phone_battery", P3, r(
             "battery", "(?:the |my )?phone battery(?: level)?", "how much battery do i have(?: left)?", "how much battery (?:does|is left on) (?:the |my )?phone(?: have)?(?: left)?",
             "battery (?:level )?(?:on|of) (?:the |my )?phone", "what is my battery(?: at| level)?", "battery level",
-        ), "battery", "Phone"),
+            "how is (?:the |my )battery",
+        ), "battery", "Phone", core = true),
         Rule("glasses.status", P3, r(
             "are (?:the |my )?glasses connected", "(?:glasses|connection) status", "is (?:the )?(?:glasses|connection) (?:connected|working|on)",
             "status", "are (?:the |my )?glasses (?:on|working)",
@@ -423,11 +432,11 @@ object VoiceCommands {
         Rule("ai.look", P4, r(
             "what am i looking at", "what do you see", "look at this", "describe (?:this|that|what i see|what i am looking at|the scene|my surroundings)",
             "what is (?:this|that|in front of me)",
-        ), "what am I looking at", "Ask about what you see", needsNet = true),
+        ), "what am I looking at", "Ask about what you see", needsNet = true, core = true),
         Rule("ai.read_text", P4, r(
             "read (?:this|that|it|the sign|the text|the label|the menu|this sign|this page|this out loud|it to me|this to me)",
             "what does (?:this|that|the sign|it) say", "read the text",
-        ), "read this", "Ask about what you see", needsNet = true),
+        ), "read this", "Ask about what you see", needsNet = true, core = true),
         Rule("ai.identify", P4, r(
             "what (?:plant|animal|bird|flower|tree|insect|bug|dog|cat|breed|mushroom|car) is (?:this|that|it)",
             "identify (?:this|that|it)(?: plant| animal| bird| flower)?",
@@ -435,7 +444,7 @@ object VoiceCommands {
         ), "what plant is this", "Ask about what you see", needsNet = true),
         Rule("ai.translate_view", P4, r(
             "translate (?:this|that|the sign|this sign|the menu|this menu|what i am looking at|what i see|the text|this text|this page)(?: (?:to|into) (?<lang>$LANG))?",
-        ), "translate this sign", "Ask about what you see", needsNet = true) { m, _ ->
+        ), "translate this sign", "Ask about what you see", needsNet = true, core = true) { m, _ ->
             buildMap { language(g(m, "lang"))?.let { put("lang", it) } }
         },
         Rule("gallery.describe_last", P4, r(
@@ -447,7 +456,7 @@ object VoiceCommands {
         Rule("suprevolt.scan", P4, r(
             "scan (?:this|that|it)", "run a scan", "(?:sup|super) ?revolt scan(?: this| that)?",
             "scan (?:this|that|it) with (?:sup|super) ?revolt", "(?:sup|super) ?revolt this",
-        ), "scan this", "SupRevolt", needsNet = true),
+        ), "scan this", "SupRevolt", needsNet = true, core = true),
         Rule("tr.say_in", P4, r(
             "how (?:do|would|can) (?:you|i) say (?<phrase>.+?) in (?<lang>$LANG)", "say (?<phrase>.+?) in (?<lang>$LANG)",
             "translate (?<phrase>.+?) (?:to|into) (?<lang>$LANG)", "what is (?<phrase>.+?) in (?<lang>$LANG)",
@@ -525,7 +534,24 @@ object VoiceCommands {
     }
 
     /** Six things to try, spoken by "what can I say". */
-    val sampler = listOf("take a picture", "what am I looking at", "read this", "set a timer for 5 minutes", "flashlight on", "stop")
+    val sampler = listOf("take a picture", "what am I looking at", "read this", "translate", "flashlight on", "stop")
+
+    /** 4.0: the 12 simple commands people are taught (docs/SIMPLE-COMMANDS.md §1); everything else can be said in your own words. */
+    val core: List<String> = listOf(
+        "take a picture", "start or stop video", "what am I looking at", "read this", "translate", "flashlight on or off",
+        "volume up or down", "battery", "live view", "stop", "help", "scan this",
+    )
+
+    /** 4.0: what "what can I say" speaks. */
+    const val HELP_SPEECH = "Try: take a picture, what am I looking at, read this, translate, flashlight on, or say stop. Or just ask me in your own words."
+
+    /** 4.0: the short list for the screen: the 12 core commands, then the others under "Also works". */
+    fun coreHelpText(): String = buildString {
+        append("Say any of these:\n")
+        core.forEach { append("• ").append(it).append('\n') }
+        append("\nOr just ask in your own words (with a Gemini key, the AI works the app for you).\n\nAlso works:\n")
+        append(rules.filter { !it.core }.joinToString(", ") { "\"${it.helpLabel}\"" })
+    }.trim()
 
     /** The full list for the screen, grouped. */
     fun helpText(): String = buildString {

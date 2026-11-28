@@ -240,6 +240,41 @@ class SettingsScreen(private val a: MainActivity) : Screen {
         g.addView(ui.switchRow("Keep screen on in live view", null, p.liveKeepScreenOn, R.drawable.ic_videocam) { p.liveKeepScreenOn = it })
         g.addView(note("Live view and its recordings come in the size the glasses send (often 320×240). There's no command to change it, so the live view header shows what arrives."))
         col.addView(g)
+
+        // 4.0: sharper pictures, as far as the glasses allow, and the flashlight.
+        col.addView(ui.sectionLabel("Pictures"))
+        val pg = ui.group()
+        pg.addView(ui.switchRow(
+            "Enhance photos",
+            "Saves a sharper \"-enhanced\" copy of every Bluetooth photo and snapshot: denoised, Lanczos upscaled and sharpened on the phone. The original is always kept",
+            p.enhancePhotos, R.drawable.ic_auto_awesome,
+        ) { p.enhancePhotos = it; a.refresh() })
+        if (p.enhancePhotos) {
+            pg.addView(pad(ui.choiceRow("Size", listOf("2× (1280×960)", "3× (1920×1440)"), if (p.enhanceScale == 3) 1 else 0) {
+                p.enhanceScale = if (it == 1) 3 else 2
+            }))
+            val label = ui.text("", Type.BODY_MEDIUM, ui.s.onSurfaceVariant)
+            fun show(step: Int) { label.text = "Strength: ${step * 10}%" + when { step <= 3 -> " (gentle)"; step <= 7 -> " (natural)"; else -> " (strong)" } }
+            val step = (p.enhanceStrength * 10).toInt().coerceIn(0, 10)
+            show(step)
+            pg.addView(ui.column().apply {
+                setPadding(ui.dp(56), ui.dp(8), ui.dp(16), 0)
+                addView(label)
+                addView(ui.slider(11, step, onStep = { show(it) }) { p.enhanceStrength = it / 10f })
+            })
+        }
+        pg.addView(note("Over Bluetooth the glasses only ever send 640×480 photos and a 320×240 live picture; there is no bigger size and the glasses have no Wi-Fi. " +
+            "Enhancing makes the most of that on the phone (and the Gallery's Details say \"Enhanced 1280×960 from 640×480\"), but it can't add detail the camera never sent."))
+        col.addView(pg)
+
+        col.addView(ui.sectionLabel("Flashlight"))
+        val fg = ui.group()
+        val offSteps = TorchLogic.AUTO_OFF_MIN
+        fg.addView(pad(ui.choiceRow("Turn off by itself", offSteps.map { if (it == 0) "Never" else "$it min" }, offSteps.indexOf(p.torchAutoOffMin).coerceAtLeast(0)) {
+            p.torchAutoOffMin = offSteps[it]
+        }))
+        fg.addView(note("The phone's flashlight stays on until you turn it off: on the Glasses tab, with the Flashlight tile in Quick Settings, the notification's Turn off, or by saying \"flashlight off\". It never uses the glasses' camera."))
+        col.addView(fg)
     }
 
     // ---------------- Import ----------------

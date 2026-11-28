@@ -1,5 +1,82 @@
 # Changelog
 
+## 4.0.0 (versionCode 14)
+
+Goal: the owner's ask: a microphone that works as well as it should, the best picture the hardware allows, a
+flashlight that really runs, simpler AI-style commands, and Gemini's voice instead of the "Chinese voice". Hardware
+limits stay as measured: Bluetooth photos are 640×480 JPEG (~60-75 KB), live view 320×240 H.264 at 30 fps, and the
+glasses have no Wi-Fi. Connect and bind, reply matching, live view, photos, translation, SupRevolt, the Wi-Fi screen
+and drop recovery are unchanged.
+
+**Microphone: Gemini speech-to-text first** (`VoiceClipRecorder`, `Vad.gemini()`, `Assistant.listenGeminiMic`)
+- With a Gemini key (Settings › Assistant › "Gemini writes down what you say", on by default) the app records the
+  mic with `AudioRecord`: `VOICE_RECOGNITION` on the built-in mic, or `VOICE_COMMUNICATION` with the glasses' SCO
+  input as the preferred device; the data-link mic (5750 Opus) is decoded as before. `NoiseSuppressor`,
+  `AutomaticGainControl` and `AcousticEchoCanceler` are switched on when available.
+- Our own detector starts on speech, ends after 900 ms of quiet, gives up after 8 s of nothing, at most 20 s; the
+  clip is trimmed to 300 ms before the speech and 400 ms after, sent as 16 kHz mono WAV with a strict "transcribe
+  exactly, never answer or translate" prompt to the newest Flash model.
+- The Android recognizer stays: offline, with no Gemini key, if our recording can't open, or if Gemini fails (then
+  it listens again on the same mic; a network failure keeps Gemini off for a minute).
+- Live level meter on the Assistant screen; hold to talk as an option (records until release, 20 s max).
+- Log: route and routed device, effects, length, peak and floor level, how it ended, Gemini's model and latency.
+- Default mic: the glasses' call audio when it passed Test voice (or worked; one later failure is still tried),
+  otherwise the phone's mic. A never-proven call-audio route is no longer probed before every question.
+
+**Gemini models** (`GeminiVoice.pickText` / `pickTts`, `AiClient.refreshGeminiModels`)
+- With a key, `GET v1beta/models` (key in the `x-goog-api-key` header, never the URL or the log), at most weekly,
+  on key save, and from AI setup's "Find the newest models". Chat and speech-to-text use the newest stable Flash
+  text model that supports `generateContent` (stable before preview, Flash before Flash-Lite, never image, live,
+  TTS or embedding models). Voice: `gemini-3.8-flash-tts`, then `gemini-3.8-flash-lite-tts`, then any `*-tts`.
+- A model typed in AI setup (or the new speech-model field) wins. A picked model that returns 404 triggers a new
+  list read and one retry.
+
+**Gemini's voice for every spoken reply** (`GeminiTtsSession`, `Speech.beginStream`)
+- `models/{tts}:streamGenerateContent?alt=sse` with only `contents` and `generationConfig { responseModalities:
+  ["AUDIO"], speechConfig { voiceConfig.prebuiltVoiceConfig.voiceName, languageCode } }`: no systemInstruction,
+  temperature, topP, topK or candidateCount. Streamed 16-bit LE PCM at 24 kHz (or a WAV from a plain request,
+  read chunk by chunk) plays through `AudioTrack` from the first chunk, on the call link when it's up, otherwise
+  media audio (the glasses when connected). Long answers are split by sentence; the next piece is fetched while
+  one plays. Speed and pitch apply through `PlaybackParams`.
+- 30 voices, default Kore, with a preview button in Settings.
+- Fallback (offline, no key, any error, and for a minute after one): Android TTS on Google's engine
+  (`com.google.android.tts`) when installed, with a voice in the reply language; a voice in another language
+  (the Chinese default) is refused with a message instead of being used. The engine and voice are logged.
+
+**Flashlight** (`TorchLogic`, `TorchController`, `TorchService`, `FlashlightTileService`)
+- `CameraManager.setTorchMode` on the back camera; stays on until turned off. A big toggle and chips on the
+  Glasses tab, a Flashlight Quick Settings tile, a persistent "Flashlight on" notification with Turn off (a
+  special-use foreground service keeps the app, and so the torch, alive), and an optional auto-off timer
+  (Settings › Flashlight, off by default). Camera in use and no flashlight are handled and said.
+- Voice: "flashlight on/off/toggle", "lights off", "turn on the flash"… only ever reach `util.torch`; a test checks
+  no flashlight phrase matches a glasses or camera rule.
+
+**Sharper pictures** (`ImageEnhance`, `PhotoEnhancer`, `JpegCom`)
+- Pure Kotlin on ARGB `IntArray`: 3×3 bilateral denoise, separable Lanczos-3 upscale (2× → 1280×960, or 3×), an
+  adaptive unsharp mask (noise threshold, clamped to the 3×3 range so no halos), mild contrast and saturation.
+- "Enhance photos" (on by default) saves a separate `-enhanced` copy of each Bluetooth photo off the main thread;
+  the original is kept. Strength slider and 2×/3× in Settings › Pictures. Live-view snapshots use the same pipeline.
+- A JPEG comment records it, and Gallery › Details says "Enhanced 1280×960 from 640×480 … The glasses themselves
+  sent the smaller size".
+- Live view: the picture keeps its shape with bilinear filtering; "Sharpen the live picture" (Android 13+) runs a
+  3×3 kernel on the GPU at the video's own pixel size and turns itself off if the screen drops below 25 fps.
+
+**Simple commands** (docs/SIMPLE-COMMANDS.md, `FnCalls`)
+- 12 core commands offline first (new phrases: "snap one", "lights on/off", "how's the battery"); "what can I say"
+  speaks them. Everything else in a Gemini voice-chat turn goes with the 15 function declarations (`AUTO`); a
+  `functionCall` becomes the same `Match` as the offline matcher and runs through `CommandRunner` (at most three,
+  in order, the chain stops at a command that needs a spoken yes). Missing values get one short question back.
+- New `ai.ask_view{question}`, an optional question on `gallery.describe_last`, and a bare "battery" names both
+  devices. All old phrases still match offline.
+
+**Tests** (348, was 307)
+- `GeminiVoiceTest`: TTS JSON (no forbidden fields), stream and unary URLs, PCM and WAV parsing, streamed events,
+  sentence pieces, model selection from a canned models list, the phone-voice picker, the transcription prompt.
+- `ImageEnhanceTest`: sizes, Lanczos weights, flat pictures unchanged, edge clamping, sharpening without halos,
+  denoise, tone, the JPEG comment. `TorchAndVadTest`: the torch state machine, flashlight phrases, the Gemini VAD
+  (900 ms, 20 s, hold), trimming, data-link mode. `SimpleCommandsTest`: the 40-row table and the extra checks.
+- `VoiceRoutesTest`: the new default mic order.
+
 ## 3.9.1 (versionCode 13)
 
 Goal: reconnect cleanly when the glasses drop their whole Bluetooth connection. The owner's 3.9.0 log: after

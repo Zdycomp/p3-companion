@@ -36,6 +36,11 @@ class AssistantScreen(private val a: MainActivity) : Screen {
 
     private val listener = Assistant.Listener { if (visible) render() }
 
+    // 4.0: the mic level meter (updated without rebuilding the screen) and hold to talk.
+    private var levelBar: android.widget.ProgressBar? = null
+    private var holdActive = false
+    private var holdStatus: android.widget.TextView? = null
+
     override fun build(): View {
         val ui = a.ui
         val p = a.prefs
@@ -235,7 +240,17 @@ class AssistantScreen(private val a: MainActivity) : Screen {
                 tone).apply { (layoutParams as LinearLayout.LayoutParams).bottomMargin = ui.dp(8) })
         }
         val box = liveBox ?: return
+        // 4.0: while the mic button is held, the button must stay where the finger is: only the words change.
+        if (holdActive) {
+            holdStatus?.text = when (asst.phase) {
+                Assistant.Phase.LISTENING -> "Listening… let go when you're done"
+                Assistant.Phase.IDLE -> "Hold to talk"
+                else -> "Let go"
+            }
+            return
+        }
         box.removeAllViews()
+        levelBar = null
         when (section) {
             SECTION_VOICE -> renderVoice(box, Assistant.Mode.CHAT)
             SECTION_TRANSLATE -> renderVoice(box, Assistant.Mode.TRANSLATE)
@@ -249,9 +264,12 @@ class AssistantScreen(private val a: MainActivity) : Screen {
         val asst = a.assistant
         val mine = asst.mode == mode
         val idle = asst.phase == Assistant.Phase.IDLE || !mine
+        val hold = a.prefs.holdToTalk
         val status = when {
             asst.phase == Assistant.Phase.IDLE ->
-                if (mode == Assistant.Mode.CHAT) "Tap to talk" else "Tap and speak ${a.prefs.translateFrom}"
+                if (mode == Assistant.Mode.CHAT) (if (hold) "Hold to talk" else "Tap to talk")
+                else (if (hold) "Hold and speak ${a.prefs.translateFrom}" else "Tap and speak ${a.prefs.translateFrom}")
+            hold && mine && asst.phase == Assistant.Phase.LISTENING -> "Listening… let go when you're done"
             !mine -> "Tap to stop"
             asst.phase == Assistant.Phase.LISTENING -> "Listening… tap when you're done"
             asst.phase == Assistant.Phase.THINKING -> "Thinking… tap to cancel"
@@ -282,10 +300,48 @@ class AssistantScreen(private val a: MainActivity) : Screen {
         }
         ptt.addView(mic, FrameLayout.LayoutParams(ui.dp(72), ui.dp(72), Gravity.CENTER))
         box.addView(ptt, LinearLayout.LayoutParams(Ui.MATCH, ui.dp(120)))
-        box.addView(ui.text(status, Type.LABEL_LARGE, s.onSurfaceVariant).apply {
+        val statusView = ui.text(status, Type.LABEL_LARGE, s.onSurfaceVariant).apply {
             gravity = Gravity.CENTER
             accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
-        })
+        }
+        box.addView(statusView)
+        // 4.0: hold to talk: press starts listening, letting go ends it (a tap while busy still stops).
+        if (hold && idle) {
+            @Suppress("ClickableViewAccessibility")
+            mic.setOnTouchListener { v, e ->
+                when (e.actionMasked) {
+                    android.view.MotionEvent.ACTION_DOWN -> {
+                        v.isPressed = true
+                        holdActive = true
+                        holdStatus = statusView
+                        statusView.text = "Listening… let go when you're done"
+                        // The level meter shows at once (the screen isn't rebuilt while the button is held).
+                        val bar = ui.progress().apply {
+                            contentDescription = "Microphone level"
+                            (layoutParams as LinearLayout.LayoutParams).apply { marginStart = ui.dp(48); marginEnd = ui.dp(48) }
+                        }
+                        box.addView(bar, box.indexOfChild(statusView) + 1)
+                        levelBar = bar
+                        asst.levelListener = { db -> levelBar?.progress = levelPercent(db) }
+                        a.ui.haptic(v, Haptic.START)
+                        a.withMic { if (holdActive) { if (mode == Assistant.Mode.CHAT) asst.voiceChat(hold = true) else asst.translate(hold = true) } }
+                        true
+                    }
+                    android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                        v.isPressed = false
+                        if (holdActive) {
+                            holdActive = false
+                            holdStatus = null
+                            a.ui.haptic(v, Haptic.END)
+                            asst.releaseHold()
+                            render()
+                        }
+                        true
+                    }
+                    else -> true
+                }
+            }
+        }
         if (mine && asst.phase != Assistant.Phase.IDLE) {
             val micLine = asst.micInUse?.let { "Mic: the $it" } ?: if (asst.phase == Assistant.Phase.LISTENING) "Choosing the mic…" else null
             val through = if (asst.throughGlasses) "Through the glasses" else null
@@ -295,6 +351,15 @@ class AssistantScreen(private val a: MainActivity) : Screen {
         }
 
         if (listening) {
+            // 4.0: a live level meter, so it's plain whether the mic hears you.
+            val bar = ui.progress().apply {
+                progress = levelPercent(asst.micLevelDb)
+                contentDescription = "Microphone level"
+                (layoutParams as LinearLayout.LayoutParams).apply { marginStart = ui.dp(48); marginEnd = ui.dp(48) }
+            }
+            levelBar = bar
+            box.addView(bar)
+            asst.levelListener = { db -> levelBar?.progress = levelPercent(db) }
             box.addView(ui.text(asst.partial ?: "Go ahead, I'm listening…", Type.BODY_LARGE, s.onSurfaceVariant).apply {
                 setTypeface(typeface, Typeface.ITALIC)
                 gravity = Gravity.CENTER
@@ -307,6 +372,7 @@ class AssistantScreen(private val a: MainActivity) : Screen {
         val details = listOfNotNull(
             asst.micInUse?.let { "Last mic: the $it" },
             sp.lastService?.let { "Speech service: $it" },
+            sp.lastVoice?.let { "Voice: $it" },
             asst.lastVoiceError?.let { "Last problem: $it" },
             asst.lastTiming?.let { "Last timing: $it" },
         )
@@ -379,6 +445,9 @@ class AssistantScreen(private val a: MainActivity) : Screen {
         }
         return wrap
     }
+
+    /** -60 dBFS (quiet room) to 0 dBFS as 0..100. */
+    private fun levelPercent(db: Double): Int = ((db + 60.0) / 60.0 * 100).toInt().coerceIn(0, 100)
 
     private fun voiceTap(mode: Assistant.Mode) {
         val asst = a.assistant
@@ -465,6 +534,9 @@ class AssistantScreen(private val a: MainActivity) : Screen {
     override fun onHidden() {
         visible = false
         a.assistant.removeListener(listener)
+        a.assistant.levelListener = null
+        levelBar = null
+        if (holdActive) { holdActive = false; holdStatus = null; a.assistant.releaseHold() }
         audioBox = null
         liveBox = null
     }

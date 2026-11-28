@@ -21,7 +21,7 @@ data class AiTurn(val fromUser: Boolean, val text: String)
 data class AiHttpRequest(val url: String, val headers: List<Pair<String, String>>, val body: String)
 
 /** Thrown with a message that can be shown to the user as is. */
-class AiException(message: String) : Exception(message)
+class AiException(message: String, val httpCode: Int = 0) : Exception(message)
 
 /** A spoken or written language: name for people, BCP 47 tag for speech engines. */
 data class Language(val name: String, val tag: String)
@@ -202,6 +202,7 @@ object AiWire {
         system: String,
         turns: List<AiTurn>,
         imageJpeg: ByteArray? = null,
+        tools: Boolean = false,
     ): AiHttpRequest {
         val key = apiKey.trim()
         if (key.isEmpty()) throw AiException("Add your ${provider.label} key first.")
@@ -210,7 +211,7 @@ object AiWire {
             AiProvider.GEMINI -> AiHttpRequest(
                 GEMINI_BASE + m + ":generateContent",
                 listOf("x-goog-api-key" to key, "Content-Type" to "application/json"),
-                geminiBody(system, turns, imageJpeg),
+                geminiBody(system, turns, imageJpeg, tools),
             )
             AiProvider.CLAUDE -> AiHttpRequest(
                 CLAUDE_URL,
@@ -232,12 +233,14 @@ object AiWire {
     /** What Gemini says when the clip has no speech in it. */
     const val NO_SPEECH = "(no speech)"
 
-    fun transcribeInstruction(languageName: String): String =
-        "Transcribe exactly what is said in this audio recording. It is most likely in $languageName. " +
-            "Reply with the text only: no quotes, labels, timestamps or comments. If nobody speaks, reply with exactly $NO_SPEECH"
+    /** 4.0: the strict prompt ([GeminiVoice.transcribePrompt]). */
+    fun transcribeInstruction(languageName: String): String = GeminiVoice.transcribePrompt(languageName)
+
+    /** 4.0: the function calls in a Gemini answer (docs/SIMPLE-COMMANDS.md §3). */
+    fun parseGeminiCalls(body: String): List<FnCall> = FnCalls.parse(body)
 
     /** A Gemini request with a WAV clip inline (audio/wav, base64) and the transcribe instruction. */
-    fun geminiTranscribe(apiKey: String, wav: ByteArray, languageName: String): AiHttpRequest {
+    fun geminiTranscribe(apiKey: String, wav: ByteArray, languageName: String, model: String = TRANSCRIBE_MODEL, mime: String = "audio/wav"): AiHttpRequest {
         val key = apiKey.trim()
         if (key.isEmpty()) throw AiException("Add your ${AiProvider.GEMINI.label} key first.")
         val body = Json.write(
@@ -246,8 +249,8 @@ object AiWire {
                     mapOf(
                         "role" to "user",
                         "parts" to listOf(
-                            mapOf("inline_data" to mapOf("mime_type" to "audio/wav", "data" to b64(wav))),
-                            mapOf("text" to transcribeInstruction(languageName)),
+                            mapOf("inline_data" to mapOf("mime_type" to mime, "data" to b64(wav))),
+                            mapOf("text" to GeminiVoice.transcribePrompt(languageName)),
                         ),
                     )
                 ),
@@ -255,7 +258,7 @@ object AiWire {
             )
         )
         return AiHttpRequest(
-            GEMINI_BASE + TRANSCRIBE_MODEL + ":generateContent",
+            GEMINI_BASE + cleanModel(model, AiProvider.GEMINI) + ":generateContent",
             listOf("x-goog-api-key" to key, "Content-Type" to "application/json"),
             body,
         )
@@ -278,7 +281,7 @@ object AiWire {
         return clean
     }
 
-    fun geminiBody(system: String, turns: List<AiTurn>, imageJpeg: ByteArray?): String {
+    fun geminiBody(system: String, turns: List<AiTurn>, imageJpeg: ByteArray?, tools: Boolean = false): String {
         val conv = normalize(turns)
         val contents = conv.mapIndexed { i, t ->
             val parts = mutableListOf<Any?>()
@@ -288,12 +291,16 @@ object AiWire {
             parts += mapOf("text" to t.text)
             mapOf("role" to (if (t.fromUser) "user" else "model"), "parts" to parts)
         }
-        return Json.write(
-            mapOf(
-                "system_instruction" to mapOf("parts" to listOf(mapOf("text" to system))),
-                "contents" to contents,
-            )
+        val body = linkedMapOf<String, Any?>(
+            "system_instruction" to mapOf("parts" to listOf(mapOf("text" to system))),
+            "contents" to contents,
         )
+        // 4.0 simple commands: the app's functions, AUTO (the model calls one or answers in words, never forced).
+        if (tools) {
+            body["tools"] = listOf(mapOf("functionDeclarations" to FnCalls.FUNCTIONS))
+            body["toolConfig"] = mapOf("functionCallingConfig" to mapOf("mode" to "AUTO"))
+        }
+        return Json.write(body)
     }
 
     fun claudeBody(model: String, system: String, turns: List<AiTurn>, imageJpeg: ByteArray?, stream: Boolean = false): String {
@@ -327,8 +334,8 @@ object AiWire {
      * The same question as [build], asked as a stream so the first sentence can be spoken while the
      * rest is still being written: Gemini streamGenerateContent with alt=sse, Claude with stream=true.
      */
-    fun buildStream(provider: AiProvider, apiKey: String, model: String, system: String, turns: List<AiTurn>): AiHttpRequest {
-        val base = build(provider, apiKey, model, system, turns, null)
+    fun buildStream(provider: AiProvider, apiKey: String, model: String, system: String, turns: List<AiTurn>, tools: Boolean = false): AiHttpRequest {
+        val base = build(provider, apiKey, model, system, turns, null, tools && provider == AiProvider.GEMINI)
         val m = cleanModel(model, provider)
         val headers = base.headers + ("Accept" to "text/event-stream")
         return when (provider) {
@@ -342,6 +349,8 @@ object AiWire {
         data class Text(val text: String) : StreamEvent()
         data class Stop(val reason: String?) : StreamEvent()
         data class Failed(val message: String) : StreamEvent()
+        /** 4.0: the model chose one of the app's functions (it arrives whole, in one chunk). */
+        data class Call(val call: FnCall) : StreamEvent()
     }
 
     /** Reads one server-sent event's data (a JSON object) from Gemini or Claude. */
@@ -368,6 +377,7 @@ object AiWire {
                     if (m["thought"] == true) null else m["text"] as? String
                 }.joinToString("")
                 if (text.isNotEmpty()) out += StreamEvent.Text(text)
+                FnCalls.callsIn(root).forEach { out += StreamEvent.Call(it) }
                 (first["finishReason"] as? String)?.let { out += StreamEvent.Stop(it) }
             }
             AiProvider.CLAUDE -> when (root["type"]) {

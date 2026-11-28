@@ -309,6 +309,7 @@ class GalleryScreen(private val a: MainActivity) : Screen {
         loader.execute {
             var info: JpegInfo.Info? = null
             var pictures: Int? = null
+            var enhanced: String? = null
             var w = 0
             var h = 0
             if (item.kind == MediaKind.PHOTO) {
@@ -318,6 +319,7 @@ class GalleryScreen(private val a: MainActivity) : Screen {
                         var len = 0
                         while (len < head.size) { val n = input.read(head, len, head.size - len); if (n < 0) break; len += n }
                         info = JpegInfo.parse(head, len)
+                        enhanced = JpegCom.read(head, len)
                         if (info != null && item.size in 1..len.toLong()) pictures = JpegInfo.soiCount(head, len)
                         if (info == null) {
                             val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -343,6 +345,8 @@ class GalleryScreen(private val a: MainActivity) : Screen {
                     w > 0 && h > 0 -> add("Pixel size: ${w}x$h")
                     item.kind != MediaKind.AUDIO -> add("Pixel size: unknown")
                 }
+                // 4.0: say plainly when a picture was enlarged on the phone, and from what.
+                enhanced?.let { add(it + ". The glasses themselves sent the smaller size; the original is kept.") }
                 add("File size: " + JpegInfo.kb(item.size) + if (item.size >= 1_048_576) String.format(java.util.Locale.US, " (%.1f MB)", item.size / 1_048_576.0) else "")
                 if (item.durationMs > 0) add("Length: " + duration(item.durationMs))
                 add("Date: " + java.text.DateFormat.getDateTimeInstance().format(java.util.Date(item.date)))

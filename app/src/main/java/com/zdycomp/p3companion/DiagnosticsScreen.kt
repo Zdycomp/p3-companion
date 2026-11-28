@@ -583,6 +583,20 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
             a.glasses.state == XkGlasses.State.READY && MicCapture.supported(), p.useGlassesAudio).joinToString(" → ") { it.label })
         p.voiceTestSummary?.let { line("INFO  last voice test: $it") } ?: line("WARN  voice test not run yet: tap Test voice to find the mic that works")
         a.assistant.lastTiming?.let { line("INFO  last voice timing: $it") }
+        // 4.0: Gemini listening and voice, models, pictures and the flashlight.
+        val gem = p.aiKey(AiProvider.GEMINI) != null
+        line("${if (gem) "PASS" else "INFO"}  Gemini speech-to-text: " + when {
+            !gem -> "no Gemini key (the phone's recognizer listens)"
+            !p.geminiStt -> "off in Settings"
+            else -> "on (" + (if (a.assistant.geminiSttWanted()) "ready" else "offline right now: the phone's recognizer listens") + ")"
+        } + if (p.holdToTalk) ", hold to talk" else "")
+        line("INFO  replies are spoken by: " + if (gem && p.geminiVoiceOn) "Gemini's voice ${p.geminiVoice} (${p.geminiTtsModel}), phone voice as fallback" else "the phone's voice (${a.assistant.speech.engineName ?: "engine not started yet"})")
+        a.assistant.speech.lastVoice?.let { line("INFO  last answer's voice: $it") }
+        line("INFO  Gemini chat model: ${p.aiModel(AiProvider.GEMINI)}" + (p.aiModelTyped(AiProvider.GEMINI)?.let { " (typed)" } ?: if (p.geminiTextAuto != null) " (newest Flash found)" else " (built-in default)"))
+        p.geminiModelsReport?.let { line("INFO  Gemini model list: $it") }
+        line("INFO  enhance photos: " + if (p.enhancePhotos) "on, ${p.enhanceScale}×, strength ${(p.enhanceStrength * 100).toInt()}%" else "off")
+        val torch = TorchController.get(a)
+        line("INFO  flashlight: " + if (!torch.available) "none on this phone" else "${torch.logic.state.name.lowercase()}" + if (p.torchAutoOffMin > 0) ", auto-off ${p.torchAutoOffMin} min" else ", stays on until turned off")
         line("Done.")
     }
 

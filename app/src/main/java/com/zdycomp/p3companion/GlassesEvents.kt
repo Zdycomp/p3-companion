@@ -54,6 +54,8 @@ object GlassesEvents {
             createChannels()
             g.onShutter = { if (prefs.shutterSound) shutterSound() }
             g.onPhotoSaved = { uri, fromButton -> onPhoto(uri, fromButton) }
+            // 4.0: flashlight changes go to the connection log too.
+            TorchController.get(app).log = { g.addLog(it) }
             g.addListener { onChanged() }
             main.postDelayed(batteryRead, BATTERY_READ_MS)
             installed = true
@@ -78,6 +80,11 @@ object GlassesEvents {
 
     private fun onPhoto(uri: Uri, fromButton: Boolean) {
         if (prefs.vibrateOnPhoto) vibrate()
+        // 4.0: a sharper "-enhanced" copy next to the photo (the original stays as the glasses sent it).
+        if (prefs.enhancePhotos) PhotoEnhancer.enhanceCopy(app, uri) { _, line ->
+            g.addLog(line)
+            activity()?.refreshGalleryIfShown()
+        }
         val a = activity()
         if (a != null) a.onPhotoSaved(uri, fromButton)
         else if (prefs.photoNote != Prefs.PhotoNote.OFF) photoNotification(uri)
