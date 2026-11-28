@@ -67,6 +67,17 @@ class CommandRunner(private val a: MainActivity) {
             if (secs > 0) photoIn(secs) else Reply("Taking a photo.", after = { a.whenConnected("take the photo") { glasses.takePhoto() } })
         }
         "glasses.photo_timer" -> photoIn((n(m, "n") ?: 5).coerceIn(1, 30))
+        // 4.1
+        "ai.voice_chat_start" -> if (assistant.voiceChatOn) Reply("Voice chat is already on.")
+            else Reply("Voice chat on. Just talk.", after = { a.withMic { assistant.startVoiceChat() } })
+        "ai.voice_chat_stop" -> if (!assistant.voiceChatOn) Reply("Voice chat isn't on.")
+            else Reply(null, after = { assistant.endVoiceChat("you said stop voice chat") })
+        "glasses.burst_photo" -> Reply("Burst photo: hold still for about ${prefs.burstCount * 6} seconds.", after = { a.whenConnected("take a burst photo") { a.burstPhoto() } })
+        "glasses.sharp_snapshot" -> {
+            val lv = a.liveView()
+            if (a.currentScreen != MainActivity.SCREEN_LIVE || lv == null) Reply("Open live view first; a sharp snapshot uses its last pictures.")
+            else Reply("Sharp snapshot.", after = { lv.sharpSnapshot() })
+        }
         "glasses.video_start" -> if (glasses.recording) Reply("The glasses are already recording.")
             else Reply("Recording video on the glasses.", after = { a.whenConnected("record video") { glasses.setRecording(true) } })
         "glasses.video_stop" -> if (!glasses.recording) Reply("The glasses aren't recording video.")

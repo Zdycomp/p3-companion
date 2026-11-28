@@ -275,12 +275,43 @@ class GlassesMicStream(private val glasses: XkGlasses, private val firstAudioMs:
 
     fun addListener(l: (ShortArray) -> Unit) { listeners += l }
 
+    /** 4.1: the glasses' own 40-byte Opus packets as they arrive (reader thread; must not block), for Ogg upload. */
+    private val packetListeners = CopyOnWriteArrayList<(ByteArray) -> Unit>()
+    fun addPacketListener(l: (ByteArray) -> Unit) { packetListeners += l }
+    fun removePacketListener(l: (ByteArray) -> Unit) { packetListeners -= l }
+    @Volatile var adopted = false; private set
+
+    private fun onPacket(packet: ByteArray) {
+        if (stopped) return
+        decoder.offer(packet)
+        packetListeners.forEach { runCatching { it(packet) } }
+    }
+
+    /**
+     * 4.1: listens to a mic stream the glasses started by themselves (no 5750 sent; [XkGlasses.adoptMicStream]).
+     * [done] like [start].
+     */
+    fun adopt(done: (String?) -> Unit) {
+        startedAt = android.os.SystemClock.elapsedRealtime()
+        checkFirst = {
+            if (!reported) {
+                reported = true
+                glasses.addLog("Glasses mic stream (adopted): sound after ${android.os.SystemClock.elapsedRealtime() - startedAt} ms (${decoder.outFormat} decoded)")
+                done(null)
+            }
+        }
+        if (!decoder.start()) { finish(done, "this phone has no Opus decoder"); return }
+        if (!glasses.adoptMicStream { packet -> onPacket(packet) }) { finish(done, "the glasses' own mic stream had already stopped"); return }
+        adopted = true
+        main.postDelayed({ if (!reported) finish(done, "no mic sound arrived within ${firstAudioMs / 1000.0} s (" + glasses.micStreamReport() + ")") }, firstAudioMs)
+    }
+
     /**
      * 3.7: records one utterance from the stream with our own end-of-speech detector ([Vad.clip]: 800 ms
      * of quiet after speech, at most 15 s). [done] (main thread) gets the audio and how it ended; a
      * stream that goes quiet altogether ends it after the limit too.
      */
-    fun captureClip(vad: Vad = Vad.clip(), limitMs: Long = 16_000, done: (ShortArray, Vad.State) -> Unit): () -> Unit {
+    fun captureClip(vad: SpeechDetector = Vad.clip(), limitMs: Long = 16_000, dsp: MicDsp? = null, done: (ShortArray, Vad.State) -> Unit): () -> Unit {
         val got = ArrayList<ShortArray>()
         var finished = false
         lateinit var l: (ShortArray) -> Unit
@@ -295,7 +326,9 @@ class GlassesMicStream(private val glasses: XkGlasses, private val firstAudioMs:
         }
         l = { pcm ->
             val st = synchronized(got) {
-                if (finished) null else { got += pcm; vad.feed(pcm); vad.state }
+                if (finished) null
+                else if (dsp != null) { got += dsp.process(pcm); dsp.detector.state } // 4.1: the voice chain, its own detector
+                else { got += pcm; vad.feed(pcm); vad.state }
             }
             if (st != null && (st == Vad.State.ENDED_AFTER_SPEECH || st == Vad.State.ENDED_NO_SPEECH || st == Vad.State.ENDED_MAX)) end(st)
         }
@@ -326,7 +359,7 @@ class GlassesMicStream(private val glasses: XkGlasses, private val firstAudioMs:
             }
         }
         if (!decoder.start()) { finish(done, "this phone has no Opus decoder"); return }
-        glasses.startMicStream({ packet -> if (!stopped) decoder.offer(packet) }) { err ->
+        glasses.startMicStream({ packet -> onPacket(packet) }) { err ->
             if (err != null) { finish(done, err); return@startMicStream }
             main.postDelayed({
                 if (!reported) finish(done, "no mic sound arrived within ${firstAudioMs / 1000.0} s (" + glasses.micStreamReport() + ")")
@@ -353,10 +386,14 @@ class GlassesMicStream(private val glasses: XkGlasses, private val firstAudioMs:
     fun report(): String = glasses.micStreamReport() + "; decoded %.1f s".format(java.util.Locale.US, decoder.samplesOut / MicCapture.RATE.toDouble()) +
         (if (decoder.errors > 0) ", ${decoder.errors} decode error(s)" else "")
 
+    /** True once [stop] ran (or the start failed). */
+    val isStopped: Boolean get() = stopped
+
     fun stop() {
         if (stopped) return
         stopped = true
         listeners.clear()
+        packetListeners.clear()
         glasses.stopMicStream()
         decoder.stop()
     }

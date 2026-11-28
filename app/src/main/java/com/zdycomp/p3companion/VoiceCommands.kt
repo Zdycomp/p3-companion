@@ -205,6 +205,25 @@ object VoiceCommands {
         Rule("ai.repeat", P0, r("(?:say|repeat) (?:that|it) again", "repeat(?: that| it)?", "what did you(?: just)? say", "come again", "pardon(?: me)?"),
             "say that again", "Assistant"),
 
+        // 4.1: hands-free voice chat, burst photos and the live burst (before the plain photo and snapshot rules).
+        Rule("ai.voice_chat_start", P2, r(
+            "(?:start|begin|open|turn on|switch on) (?:a |the )?(?:hands ?free )?voice chat(?: mode)?", "(?:hands ?free )?voice chat(?: on| mode)?",
+            "hands ?free(?: mode| chat)?(?: on)?", "(?:start|begin) (?:a |the )?hands ?free (?:mode|chat)",
+        ), "start voice chat", "Assistant"),
+        Rule("ai.voice_chat_stop", P2, r(
+            "(?:stop|end|close|turn off|switch off|quit|exit|leave) (?:the )?(?:hands ?free )?voice chat(?: mode)?", "voice chat off",
+            "(?:stop|end|turn off) (?:the )?hands ?free(?: mode| chat)?", "hands ?free off",
+        ), "stop voice chat", "Assistant"),
+        Rule("glasses.burst_photo", P2, r(
+            "(?:take|snap|shoot|grab|capture) (?:a |an |the |me a )?burst(?: $PHOTO| mode)?", "burst(?: $PHOTO| mode)?",
+            "(?:take|snap|shoot) (?:a |the )?(?:sharpest|super ?sharp|extra sharp|high detail|detailed) $PHOTO",
+            "(?:sharpest|super ?sharp|extra sharp) $PHOTO",
+        ), "burst photo", "Camera"),
+        Rule("glasses.sharp_snapshot", P2, r(
+            "(?:take|save|grab|make) (?:a |the )?(?:sharp|sharper|super ?sharp) (?:snapshot|frame|screenshot)", "(?:sharp|sharper|super ?sharp) (?:snapshot|frame|screenshot)",
+            "sharpen (?:the )?live ?view", "(?:sharp|sharper) live ?view (?:snapshot|picture|frame)",
+        ), "sharp snapshot", "Camera"),
+
         // P2 camera and glasses (timer before plain photo)
         Rule("glasses.photo_timer", P2, r(
             "(?:take|snap|capture|shoot) (?:a |an |the |me a )?$PHOTO in (?<n>\\d{1,2})$SECS",

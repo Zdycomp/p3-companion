@@ -248,10 +248,13 @@ class VoiceClipRecorder(
     private val app: Context,
     private val callAudio: Boolean,
     private val device: AudioDeviceInfo?,
-    private val vad: Vad,
+    private val vad: SpeechDetector,
     private val onLevel: (Double) -> Unit,
+    /** 4.1: the voice chain ([MicDsp], high-pass, AGC and limiter; its own detector replaces [vad]). */
+    private val dsp: MicDsp? = null,
     private val done: (Result) -> Unit,
 ) {
+    private val det: SpeechDetector get() = dsp?.detector ?: vad
     class Result(val samples: ShortArray, val state: Vad.State, val report: String, val speechStartMs: Double, val speechEndMs: Double, val peakDb: Double)
 
     private val main = Handler(Looper.getMainLooper())
@@ -295,15 +298,16 @@ class VoiceClipRecorder(
             var routed: String? = null
             val t0 = SystemClock.elapsedRealtime()
             try {
-                while (!stopNow && !cancelled && !vad.ended) {
+                while (!stopNow && !cancelled && !det.ended) {
                     val got = r.read(chunk, 0, chunk.size)
                     if (got < 0) break
                     if (got == 0) continue
                     if (routed == null) routed = r.routedDevice?.let { "${it.productName} (type ${it.type})" }
-                    if (n + got > buf.size) buf = buf.copyOf(buf.size * 2)
-                    System.arraycopy(chunk, 0, buf, n, got)
-                    n += got
-                    vad.feed(chunk, got)
+                    val keep = dsp?.process(chunk, got) ?: chunk.copyOf(got)
+                    if (n + keep.size > buf.size) buf = buf.copyOf(maxOf(buf.size * 2, n + keep.size))
+                    System.arraycopy(keep, 0, buf, n, keep.size)
+                    n += keep.size
+                    if (dsp == null) vad.feed(chunk, got)
                     val now = SystemClock.elapsedRealtime()
                     if (now - lastLevel >= 66) {
                         lastLevel = now
@@ -319,20 +323,21 @@ class VoiceClipRecorder(
             if (cancelled) return@Thread
             val samples = buf.copyOf(n)
             val state = when {
-                vad.ended -> vad.state
-                vad.heardSpeech -> Vad.State.ENDED_AFTER_SPEECH
+                det.ended -> det.state
+                det.heardSpeech -> Vad.State.ENDED_AFTER_SPEECH
                 else -> Vad.State.ENDED_NO_SPEECH
             }
             val report = (if (callAudio) "glasses call audio (VOICE_COMMUNICATION)" else "phone mic (VOICE_RECOGNITION)") +
                 ", routed to ${routed ?: "unknown"}, " + fx.joinToString(", ") +
-                String.format(Locale.US, ", %.1f s, peak %.0f dBFS, floor %.0f dBFS", n / rate.toDouble(), vad.peakDb, vad.floorDb) +
+                (if (dsp != null) ", voice chain (high-pass, AGC, limiter, speech detector 4.1)" else "") +
+                String.format(Locale.US, ", %.1f s, peak %.0f dBFS, floor %.0f dBFS", n / rate.toDouble(), det.peakDb, det.floorDb) +
                 ", ended: " + when (state) {
                     Vad.State.ENDED_AFTER_SPEECH -> if (stopNow) "released / tapped" else "${Vad.GEMINI_END_MS} ms of quiet"
                     Vad.State.ENDED_NO_SPEECH -> "no speech"
                     Vad.State.ENDED_MAX -> "the ${Vad.GEMINI_MAX_MS / 1000} s limit"
                     else -> "stopped"
                 } + " after ${SystemClock.elapsedRealtime() - t0} ms"
-            val res = Result(samples, state, report, vad.speechStartMs, vad.speechEndMs, vad.peakDb)
+            val res = Result(samples, state, report, det.speechStartMs, det.speechEndMs, det.peakDb)
             main.post { if (!cancelled) done(res) }
         }, "p3-voice-clip")
         t.isDaemon = true

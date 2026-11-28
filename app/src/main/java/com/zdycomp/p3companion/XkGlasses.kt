@@ -752,8 +752,18 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
             flags7110 = hex(it.data.take(16).toByteArray())
             addLog("7110 flags: $flags7110")
         }
+        // 4.1 hardware test T13 (only when asked for, once): the capability mask 7100 (a read) and the
+        // whole 1001 JSON. The normal setup order above and below is unchanged.
+        val rawOnce = rawSetupLog
+        if (rawOnce) request("7100", Xk.ACTION_READ, ByteArray(0), 1_200).let {
+            addLog("T13 7100 capabilities: " + (it?.let { f -> f.errCode?.let { c -> "refused (${Xk.errorText(c)})" } ?: hex(f.data.take(48).toByteArray()) } ?: "no answer"))
+        }
         val info = request("1001", Xk.ACTION_READ, ByteArray(0), 2_000)
         info?.let { applyInfo(it) }
+        if (rawOnce) {
+            addLog("T13 1001 info: " + (info?.let { Xk.jsonObject(it)?.let { j -> redactMac(j) } } ?: "no answer"))
+            main.postDelayed({ rawSetupLog = false }, 10_000)
+        }
         val batt = request("1003", Xk.ACTION_READ, ByteArray(0), 2_500)
         val code = batt?.errCode ?: info?.errCode
         if (code != null && code != 0) {
@@ -1114,12 +1124,15 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                 }
                 Xk.HEAD_CUSTOM -> {
                     if (micStreaming) micBytes("2B frames", f.payload)
-                    if (micSource != "2B frames") addLog("← 2B frame (${f.payload.size} B)")
+                    if (micSource != "2B frames") addLog("← 2B frame (${f.payload.size} B)" +
+                        if (rawSetupLog) ": " + hex(f.payload.take(64).toByteArray()) else "")
                     if (sniffing) sniffLog("2B " + Xk.describeRaw(f.payload))
                     if (previewWanted) liveElement(f.payload, "a 2B frame")
                 }
                 else -> {
                     otherFrames++
+                    // 4.1: mic audio the app didn't ask for (the glasses' own button or wake word): offered to voice chat.
+                    if (!micStreaming && f.head == MIC_HEAD && MicRecords.looksLike(f.payload)) { unsolicitedMic(f.payload); return }
                     if (micStreaming) micBytes("head-%02X frames".format(f.head), f.payload)
                     sniffLog("frame with head %02X cmd %04X divide %04X, %d B: %s".format(
                         f.head, f.cmd, f.divide, f.payload.size, hex(f.payload.take(24).toByteArray())))
@@ -1169,9 +1182,23 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
                 }
                 return
             }
-            // Assistant touch hook: a tap on the glasses starts a voice question.
-            "C101", "C107" -> if (probing) addLog("Touch ignored: the live view test is running")
-                else onTouch?.let { cb -> main.post { cb() } }
+            // Assistant touch hook: a tap on the glasses starts a voice question. 4.1: every touch push is
+            // logged with its whole payload and the time since the last one (hardware test T1), and goes to
+            // the gesture classifier when one is set.
+            "C101", "C107" -> {
+                val now = SystemClock.elapsedRealtime()
+                val gap = if (lastTouchAt > 0) now - lastTouchAt else -1
+                lastTouchAt = now
+                val data = f.data.copyOf()
+                addLog("Touch push $node, ${data.size} B" + (if (data.isNotEmpty()) ": " + hex(data.take(64).toByteArray()) else "") +
+                    (if (gap >= 0) ", $gap ms after the last" else ""))
+                recordHw("$node " + (if (data.isEmpty()) "(no data)" else hex(data.take(64).toByteArray())) + (if (gap >= 0) " +$gap ms" else ""))
+                if (probing) addLog("Touch ignored: the live view test is running")
+                else {
+                    val ev = onTouchEvent
+                    if (ev != null) main.post { ev(node, data) } else onTouch?.let { cb -> main.post { cb() } }
+                }
+            }
             "57B1" -> {
                 // 3.5: the app sends 57B0 only from takePhoto (logged as → 57B0); anything else is the glasses' own button.
                 if (!capturing && (preview != Preview.OFF || keepPreview)) {
@@ -1184,7 +1211,13 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
             }
             "5790" -> if (f.data.isNotEmpty()) { recording = f.data[0].toInt() == 1; changed() }
             "5710" -> if (f.data.isNotEmpty()) onPreviewState(f.data[0].toInt() and 0xFF)
-            "5760" -> addLog("Glasses voice memo state ${f.data.firstOrNull()?.toInt()}")
+            "5760" -> {
+                val v = f.data.firstOrNull()?.toInt()
+                addLog("Glasses voice memo state $v" + if (!micStreaming) " (not started by the app: a double press on the glasses?)" else "")
+                recordHw("5760 ${v ?: "-"}" + if (!micStreaming) " unsolicited" else "")
+                // 4.1: a 5760 = 1 the app didn't ask for is the photo button's double press (HARDWARE-MAP §2.9).
+                if (!micStreaming && v == 1) onButtonPush?.let { cb -> main.post { cb("5760", f.data.copyOf()) } }
+            }
             // Video-preview state per the vendor SDK (0 off, 1 on). Recorded only; the live view decides by frames.
             "57A0" -> if (f.replyType == Xk.FMT_BIN && f.data.isNotEmpty()) {
                 previewState57A0 = f.data[0].toInt() and 0xFF
@@ -1197,7 +1230,17 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     /** Values worth keeping from any reply or push, whoever asked. */
     private fun afterReply(f: Xk.Frame, node: String) {
         when (node) {
-            "1003" -> Xk.battery(f)?.let { charging = it.first; battery = it.second; changed() }
+            "1003" -> Xk.battery(f)?.let {
+                val wasCharging = charging; val wasLevel = battery
+                charging = it.first; battery = it.second
+                // 4.1: every change the glasses push is logged and surfaced (charging starts or stops, level steps).
+                if (wasCharging != it.first || wasLevel != it.second) {
+                    addLog("Glasses battery ${it.second}%" + if (it.first) ", charging" else "")
+                    recordHw("1003 battery ${it.second}%" + if (it.first) " charging" else "")
+                    onBattery?.let { cb -> main.post { cb(it.second, it.first, wasCharging) } }
+                }
+                changed()
+            }
         }
     }
 
@@ -1205,6 +1248,29 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     /** Called on the main thread when the glasses report a touch-pad tap (nodes C101 / C107). */
     @Volatile var onTouch: (() -> Unit)? = null
     // ---- Assistant touch hook (end) ----
+
+    // ---- 4.1 hardware hooks (main thread) ----
+    /** Every touch push with its node and payload, for the gesture classifier; when set, [onTouch] isn't called. */
+    @Volatile var onTouchEvent: ((String, ByteArray) -> Unit)? = null
+    /** A button push the app didn't ask for (node 5760 = 1: the photo button's double press). */
+    @Volatile var onButtonPush: ((String, ByteArray) -> Unit)? = null
+    /** The glasses pushed a battery change: level, charging, and whether it was charging before (null: unknown). */
+    @Volatile var onBattery: ((Int, Boolean, Boolean?) -> Unit)? = null
+    /** The glasses started streaming their mic by themselves (head-0x1F audio the app didn't ask for). */
+    @Volatile var onGlassesMic: (() -> Unit)? = null
+    /** Hardware test T1/T7/T9…: a watcher that sees every hardware event line as it happens. */
+    @Volatile var hwWatcher: ((String) -> Unit)? = null
+    private var lastTouchAt = 0L
+    private val hwEvents = java.util.ArrayDeque<String>()
+
+    private fun recordHw(line: String) {
+        val t = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date()) + "  " + line
+        synchronized(hwEvents) { hwEvents.addLast(t); while (hwEvents.size > 60) hwEvents.removeFirst() }
+        hwWatcher?.let { w -> main.post { w(line) } }
+    }
+
+    /** The last hardware events (touches, buttons, battery, unsolicited mic), newest last. */
+    fun hardwareEvents(): List<String> = synchronized(hwEvents) { hwEvents.toList() }
 
     // ---- 2.1 hooks (read-only; called after the existing success lines) ----
     /** Main thread: the glasses reported the shutter fired (node 57B1). */
@@ -1217,6 +1283,8 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
 
     @Volatile private var assembler: Xk.PhotoAssembler? = null
     @Volatile private var capturing = false
+    /** 4.1: a photo is being taken or is coming over the link (the route policy keeps the mic off the link then). */
+    val photoBusy: Boolean get() = capturing || assembler != null
     @Volatile private var pendingAnnounce: Xk.Frame? = null
     @Volatile private var lastMediaAt = 0L
     @Volatile private var burstOpen = false
@@ -2608,6 +2676,94 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         }
     }
 
+    // ---- 4.1: mic audio the glasses start by themselves ----
+    @Volatile var unsolicitedMicFrames = 0L; private set
+    @Volatile private var micStoppedAt = 0L
+    private var lastUnsolicitedAt = 0L
+    private val unsolicitedFramer = OpusFramer()
+    /** The last unasked-for packets (about 2 s), so voice chat adopting the stream keeps its start. */
+    private val unsolicitedRing = java.util.ArrayDeque<ByteArray>()
+
+    private fun unsolicitedMic(payload: ByteArray) {
+        unsolicitedMicFrames++
+        val now = SystemClock.elapsedRealtime()
+        // The tail of a stream the app itself just stopped is not the glasses starting one.
+        if (now - micStoppedAt < APP_STOP_QUIET_MS) return
+        val fresh = now - lastUnsolicitedAt > 3_000
+        lastUnsolicitedAt = now
+        val packets = unsolicitedFramer.feedRecords(payload)
+        synchronized(unsolicitedRing) { packets.forEach { unsolicitedRing.addLast(it) }; while (unsolicitedRing.size > 100) unsolicitedRing.removeFirst() }
+        if (fresh) {
+            addLog("Glasses mic: the glasses are streaming their mic by themselves (head-1F audio, ${payload.size} B frames); offered to voice chat")
+            recordHw("1F mic audio started by the glasses")
+            onGlassesMic?.let { cb -> main.post { cb() } }
+        }
+    }
+
+    /**
+     * 4.1: takes over a mic stream the glasses started by themselves: the same packet path as
+     * [startMicStream] without sending 5750 (it's already on). The packets of the last 2 s come first.
+     * [stopMicStream] still sends `5750 [00]`. False when there's no such stream or the mic is in use.
+     */
+    fun adoptMicStream(onPacket: (ByteArray) -> Unit): Boolean {
+        if (micStreaming || state != State.READY || SystemClock.elapsedRealtime() - lastUnsolicitedAt > 3_000) return false
+        micSink = onPacket
+        micFramers.clear()
+        micSource = MIC_1F_SOURCE
+        micPackets = 0
+        micStreaming = true
+        val early = synchronized(unsolicitedRing) { unsolicitedRing.toList().also { unsolicitedRing.clear() } }
+        micPackets += early.size
+        early.forEach { runCatching { onPacket(it) } }
+        addLog("Glasses mic stream: adopted the stream the glasses started (${early.size} packets kept from before)")
+        return true
+    }
+
+    /** True for a couple of seconds after unasked-for mic audio arrived. */
+    val glassesMicUnasked: Boolean get() = !micStreaming && SystemClock.elapsedRealtime() - lastUnsolicitedAt < 3_000
+
+    /** Hardware test T13: read 7100 and log the whole 1001 JSON and 2B frames at the next sign-in. */
+    @Volatile var rawSetupLog = false
+
+    private fun redactMac(j: Map<*, *>): String = j.entries.joinToString(", ", "{", "}") { (k, v) ->
+        "$k=" + if ((k as? String)?.contains("mac", ignoreCase = true) == true) "(hidden)" else v.toString()
+    }
+
+    /** 4.1: the glasses' own prompt language (2410 list, 2420 current), read only. */
+    fun readPromptLanguage(done: (List<String>?, String?) -> Unit) {
+        if (state != State.READY) { main.post { done(null, null) }; return }
+        io.execute {
+            val list = runCatching { request("2410", Xk.ACTION_READ, ByteArray(0), 1_500) }.getOrNull()?.let { f -> f.errCode?.let { null } ?: PromptLanguage.tags(f.data) }
+            val cur = runCatching { request("2420", Xk.ACTION_READ, ByteArray(0), 1_500) }.getOrNull()?.let { f -> f.errCode?.let { null } ?: PromptLanguage.tags(f.data).firstOrNull() }
+            addLog("Prompt language: the glasses offer ${list?.joinToString(", ") ?: "?"}; set to ${cur ?: "?"}")
+            main.post { done(list, cur) }
+        }
+    }
+
+    /**
+     * 4.1: sets the glasses' own prompts to English with `2420` action 2 (a 6-byte NUL-padded tag,
+     * HARDWARE-MAP §2.7), only when the glasses list "en" in `2410` and aren't English already.
+     * [done] gets what happened.
+     */
+    fun setPromptLanguageEnglish(done: (String) -> Unit) {
+        readPromptLanguage { list, cur ->
+            when {
+                list == null -> done("The glasses didn't answer the language list (2410), so nothing was changed.")
+                !PromptLanguage.mayWrite(list, cur, "en") -> done(if (cur == "en") "The glasses' prompts are already English." else "The glasses don't list English (${list.joinToString()}), so nothing was changed.")
+                else -> io.execute {
+                    val r = runCatching { request("2420", Xk.ACTION_WRITE, PromptLanguage.payload("en"), 1_500) }.getOrNull()
+                    val msg = when {
+                        r == null -> "The glasses didn't answer the language change."
+                        r.errCode != null && r.errCode != 0 -> "The glasses refused the language change (${Xk.errorText(r.errCode!!)})."
+                        else -> "The glasses' prompts are set to English."
+                    }
+                    addLog("Prompt language: $msg")
+                    main.post { done(msg) }
+                }
+            }
+        }
+    }
+
     /** Stops the glasses' mic stream (5750 [00]). Safe to call when it isn't on. */
     fun stopMicStream() {
         if (!micStreaming) return
@@ -2618,6 +2774,7 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
     private fun stopMicNow(sendStop: Boolean) {
         if (!micStreaming) return
         micStreaming = false
+        micStoppedAt = SystemClock.elapsedRealtime()
         micSink = null
         link?.parser?.onSkipRun = null
         if (!probing && preview == Preview.OFF) stopSniff()
@@ -2720,6 +2877,10 @@ class XkGlasses private constructor(context: Context, private val prefs: Prefs) 
         /** State nodes the glasses push by themselves (also when one of them answers a request). */
         /** 3.7: where the E13C-5 sends its mic (3.6 log). */
         const val MIC_1F_SOURCE = "head-1F frames"
+        /** The frame head the glasses' mic audio travels on (3.6 log). */
+        const val MIC_HEAD = 0x1F
+        /** Mic audio this soon after the app stopped the stream is its tail, not a new stream. */
+        const val APP_STOP_QUIET_MS = 6_000L
         private val PUSH_NODES = setOf("5710", "5711", "57A0", "5750", "5790")
         private const val PROBE_LISTEN_MS = 5_000L
         /** 3.8 full-size probe: reply timeout, extra listening, stray-media cap (time and bytes). */

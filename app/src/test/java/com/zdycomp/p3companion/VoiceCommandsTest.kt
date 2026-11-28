@@ -217,4 +217,15 @@ class VoiceCommandsTest {
         val perCall = (System.nanoTime() - t0) / 1e6 / (n * table.size)
         assertTrue("match() took $perCall ms per call", perCall < 0.5)
     }
+
+    @Test fun voiceChatAndBurstCommands() {
+        for (t in listOf("start voice chat", "Start hands-free voice chat", "voice chat on", "hands free mode")) assertEquals(t, "ai.voice_chat_start", VoiceCommands.match(t)?.id)
+        for (t in listOf("stop voice chat", "end the voice chat", "voice chat off", "turn off hands free")) assertEquals(t, "ai.voice_chat_stop", VoiceCommands.match(t)?.id)
+        for (t in listOf("burst photo", "take a burst photo", "take a burst", "take the sharpest picture")) assertEquals(t, "glasses.burst_photo", VoiceCommands.match(t)?.id)
+        for (t in listOf("sharp snapshot", "take a sharp snapshot", "save a sharper frame")) assertEquals(t, "glasses.sharp_snapshot", VoiceCommands.match(t)?.id)
+        // The old ones still mean what they meant.
+        assertEquals("glasses.photo", VoiceCommands.match("take a picture")?.id)
+        assertEquals("glasses.live_snapshot", VoiceCommands.match("save a snapshot")?.id)
+        assertEquals("ai.stop", VoiceCommands.match("stop")?.id)
+    }
 }

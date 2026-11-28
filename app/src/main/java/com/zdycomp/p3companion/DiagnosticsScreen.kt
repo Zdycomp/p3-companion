@@ -90,6 +90,8 @@ class DiagnosticsScreen(private val a: MainActivity) : Screen {
             ui.button("Test live view", Btn.TONAL, R.drawable.ic_videocam, full = false) { liveTest() }.apply { isEnabled = !running },
             ui.button("Test voice", Btn.TONAL, R.drawable.ic_mic, full = false) { a.withMic { voiceTest() } }.apply { isEnabled = !running },
             ui.button("Try higher quality", Btn.OUTLINED, R.drawable.ic_auto_awesome, full = false) { qualityTest() }.apply { isEnabled = !running },
+            // 4.1: the hardware map's device tests (touch codes, mic sizes, Ogg to Gemini, call-audio bandwidth…).
+            ui.button("Hardware tests", Btn.OUTLINED, R.drawable.ic_glasses_mono, full = false) { a.showHardwareTests() },
         ).apply { setPadding(0, ui.dp(8), 0, 0) })
         a.prefs.liveQualityReport?.let { sum ->
             tests.addView(ui.text("Last quality try: $sum", Type.BODY_SMALL, ui.s.onSurfaceVariant).apply { setPadding(0, ui.dp(6), 0, 0) })

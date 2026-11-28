@@ -342,6 +342,20 @@ class AssistantScreen(private val a: MainActivity) : Screen {
                 }
             }
         }
+        // 4.1: hands-free voice chat: one button to start or end it, and the mic it uses right now.
+        if (mode == Assistant.Mode.CHAT) {
+            val on = asst.voiceChatOn
+            box.addView(ui.button(if (on) "End hands-free voice chat" else "Hands-free voice chat", if (on) Btn.TONAL else Btn.OUTLINED,
+                if (on) R.drawable.ic_stop else R.drawable.ic_glasses_mono, full = false) {
+                if (on) asst.endVoiceChat("you ended it") else a.withMic { asst.startVoiceChat() }
+            }.apply { (layoutParams as? LinearLayout.LayoutParams)?.gravity = Gravity.CENTER_HORIZONTAL },
+                LinearLayout.LayoutParams(Ui.WRAP, Ui.WRAP).apply { gravity = Gravity.CENTER_HORIZONTAL; topMargin = ui.dp(4) })
+            asst.voiceChatStatus?.let { st ->
+                box.addView(ui.text(st, Type.BODY_SMALL, s.primary).apply { gravity = Gravity.CENTER; setPadding(ui.dp(8), ui.dp(4), ui.dp(8), 0) })
+            } ?: box.addView(ui.text("Hands-free: the mic stays open; just talk, and tap the glasses to send, interrupt or cancel.",
+                Type.BODY_SMALL, s.onSurfaceVariant).apply { gravity = Gravity.CENTER; setPadding(ui.dp(8), ui.dp(4), ui.dp(8), 0) })
+        }
+
         if (mine && asst.phase != Assistant.Phase.IDLE) {
             val micLine = asst.micInUse?.let { "Mic: the $it" } ?: if (asst.phase == Assistant.Phase.LISTENING) "Choosing the mic…" else null
             val through = if (asst.throughGlasses) "Through the glasses" else null

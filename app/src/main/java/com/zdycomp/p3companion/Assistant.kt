@@ -43,7 +43,7 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
     var commands: CommandRunner? = null
 
     // Voice: chat and translation
-    var phase = Phase.IDLE; private set
+    @Volatile var phase = Phase.IDLE; private set
     var mode = Mode.CHAT; private set
     var partial: String? = null; private set
     /** Whether the current turn's mic is the glasses'. */
@@ -136,6 +136,7 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
 
     /** What a tap on the glasses or the big button does while a turn is running. */
     fun tapWhileBusy() {
+        if (session != null) { sessionTap(); return }
         if (phase == Phase.LISTENING) clipEnd?.invoke() ?: speech.finishListening() else stop()
     }
 
@@ -182,6 +183,8 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
     private var spp: GlassesMicStream? = null
 
     private fun startTurn(m: Mode, hold: Boolean = false) {
+        // 4.1: during hands-free voice chat the mic button (or a tap) controls the turn.
+        if (session != null && m == Mode.CHAT) { sessionTap(); return }
         if (phase != Phase.IDLE) { tapWhileBusy(); return }
         holding = hold
         releasedEarly = false
@@ -212,6 +215,14 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
         // 3.7: the data-link mic proven by Test voice but nothing here can turn its audio into words.
         if (prefs.useGlassesAudio && glasses.state == XkGlasses.State.READY && (prefs.micRouteScores[MicRoute.GLASSES_SPP] ?: 0) > 0 &&
             sppMode() == VoiceChoice.SppMode.NONE) glasses.addLog("Voice mic: ${SPP_NEEDS_GEMINI}; using another mic")
+        // 4.1: the dynamic policy: live view, a photo coming over, a fresh link or a low battery keep the glasses' mics free.
+        if (m != Mode.CONVERSATION) {
+            val d = routeDecision(session = false)
+            if (d.order == listOf(MicRoute.PHONE) && routes.firstOrNull() != MicRoute.PHONE && glasses.state == XkGlasses.State.READY) {
+                glasses.addLog("Voice mic: the phone's mic this time (${d.why})")
+                routes = listOf(MicRoute.PHONE)
+            }
+        }
         // 3.6: a conversation keeps the mic that worked for its last phrase.
         if (m == Mode.CONVERSATION) convoMic?.takeIf { it in routes }?.let { w -> routes = listOf(w) + routes.filter { it != w } }
         if (routes.size > 1 && (m != Mode.CONVERSATION || convoMic == null)) glasses.addLog("Voice: mics to try: " + routes.joinToString(" → ") { it.label })
@@ -375,23 +386,30 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
         partial = "(listening through the glasses; Gemini writes it down when you stop)"
         changed()
         // 4.0: our own detector ends it 900 ms after the speech (at most 20 s), or only on release for hold to talk.
-        val vad = if (holding) Vad.hold() else Vad.gemini()
+        // 4.1: through the voice chain (its newer detector) when that's on; the glasses' own packets are kept for Ogg.
+        val dsp = if (prefs.voiceChain) MicDsp(VoiceChain.Params.opus(), if (holding) VadPlus.hold() else VadPlus.gemini()) else null
+        val vad: SpeechDetector = dsp?.detector ?: if (holding) Vad.hold() else Vad.gemini()
         var lastLevel = 0L
         val meter: (ShortArray) -> Unit = { pcm ->
             val now = SystemClock.elapsedRealtime()
             if (now - lastLevel >= 66) { lastLevel = now; val db = Level.of(pcm); main.post { if (my == turn) level(db) } }
         }
+        val packets = ArrayList<ByteArray>()
+        val keep: (ByteArray) -> Unit = { p -> synchronized(packets) { if (packets.size < 1_500) packets += p } }
         s.addListener(meter)
-        clipEnd = s.captureClip(vad, limitMs = Vad.GEMINI_MAX_MS + 1_000L) { clip, how ->
+        s.addPacketListener(keep)
+        clipEnd = s.captureClip(vad, limitMs = Vad.GEMINI_MAX_MS + 1_000L, dsp = dsp) { clip, how ->
             clipEnd = null
             s.removeListener(meter)
+            s.removePacketListener(keep)
             if (my != turn || spp !== s) return@captureClip
             VoiceClips.save(app, VoiceClips.SPP, s.ring.snapshot())
             stopSpp()
             level(-120.0)
             glasses.addLog("Voice mic: glasses data link, %.1f s, peak %.0f dBFS, ended: %s".format(Locale.US, clip.size / MicCapture.RATE.toDouble(), vad.peakDb, how.name.lowercase(Locale.US)))
             if (how == Vad.State.ENDED_NO_SPEECH) { geminiHeard(my, m, MicRoute.GLASSES_SPP, null, null); return@captureClip }
-            transcribeClip(my, m, MicRoute.GLASSES_SPP, Vad.trim(clip, MicCapture.RATE, vad.speechStartMs, vad.speechEndMs), langName)
+            val pk = synchronized(packets) { OggOpus.trim(packets.toList(), vad.speechStartMs, vad.speechEndMs) }
+            transcribeClip(my, m, MicRoute.GLASSES_SPP, Vad.trim(clip, MicCapture.RATE, vad.speechStartMs, vad.speechEndMs), langName, pk)
         }
     }
 
@@ -408,7 +426,9 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
         }
         partial = if (holding) "(recording while you hold; Gemini writes it down when you let go)" else "(listening; Gemini writes it down when you stop)"
         changed()
-        val rec = VoiceClipRecorder(app, callAudio, device, if (holding) Vad.hold() else Vad.gemini(), onLevel = { db -> if (my == turn) level(db) }) { res ->
+        // 4.1: the voice chain on this route too; the phone already suppresses noise here, so only high-pass, AGC, limiter and detector.
+        val dsp = if (prefs.voiceChain) MicDsp(VoiceChain.Params.platformCleaned(), if (holding) VadPlus.hold() else VadPlus.gemini()) else null
+        val rec = VoiceClipRecorder(app, callAudio, device, if (holding) Vad.hold() else Vad.gemini(), onLevel = { db -> if (my == turn) level(db) }, dsp = dsp) { res ->
             clipEnd = null
             if (my != turn) return@VoiceClipRecorder
             level(-120.0)
@@ -430,28 +450,56 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
     /** 4.0: cancels our own recording when the turn is stopped. */
     private var stopRecorder: (() -> Unit)? = null
 
-    /** 4.0: sends a recorded clip to Gemini to be written down (16 kHz mono WAV), and logs how long it took. */
-    private fun transcribeClip(my: Int, m: Mode, r: MicRoute, clip: ShortArray, langName: String) {
+    /**
+     * 4.0: sends a recorded clip to Gemini to be written down (16 kHz mono WAV), and logs how long it took.
+     * 4.1: with the glasses' own Opus [packets], as Ogg Opus first (about 15× smaller, the exact bits the
+     * glasses' mic made); refused (or heard as nothing), the WAV goes at once and the answer is remembered.
+     */
+    private fun transcribeClip(my: Int, m: Mode, r: MicRoute, clip: ShortArray, langName: String, packets: List<ByteArray>? = null) {
         val key = prefs.aiKey(AiProvider.GEMINI) ?: run { geminiHeard(my, m, r, null, SPP_NEEDS_GEMINI); return }
         partial = "(Gemini is writing down what you said…)"
         changed()
-        val wav = Wav.pcm16(clip, MicCapture.RATE)
         val lang = Languages.byName(langName).name
         val t0 = SystemClock.elapsedRealtime()
+        val state = prefs.geminiOggState
+        val ogg = AudioUpload.useOgg(state, !packets.isNullOrEmpty())
         io.execute {
             var model = sttModel()
-            var res = runCatching { AiClient.transcribe(key, wav, lang, model) }
-            res.exceptionOrNull()?.let { e -> if (AiClient.modelGone(e, prefs)) { model = sttModel(); res = runCatching { AiClient.transcribe(key, wav, lang, model) } } }
+            var sentAs = "WAV"
+            var bytes = 0
+            var oggNote = ""
+            fun send(audio: ByteArray, mime: String): Result<String?> {
+                bytes = audio.size
+                var res = runCatching { AiClient.transcribe(key, audio, lang, model, mime) }
+                res.exceptionOrNull()?.let { e -> if (AiClient.modelGone(e, prefs)) { model = sttModel(); res = runCatching { AiClient.transcribe(key, audio, lang, model, mime) } } }
+                return res
+            }
+            var res: Result<String?>
+            if (ogg) {
+                sentAs = "Ogg Opus"
+                res = send(OggOpus.build(packets!!), OggOpus.MIME)
+                val e = res.exceptionOrNull() as? AiException
+                val refused = e != null && AudioUpload.isFormatRefusal(e.httpCode, e.message)
+                val empty = res.isSuccess && res.getOrNull().isNullOrBlank()
+                if (refused || empty) {
+                    oggNote = if (refused) "; Gemini refused Ogg Opus (${e!!.httpCode}), sent again as WAV" else "; Gemini heard nothing in the Ogg Opus, sent again as WAV"
+                    val wav = send(Wav.pcm16(clip, MicCapture.RATE), "audio/wav")
+                    sentAs = "WAV"
+                    val wavText = !wav.getOrNull().isNullOrBlank()
+                    prefs.geminiOggState = AudioUpload.after(state, ok = false, refused = refused || (empty && wavText && state != AudioUpload.OGG_WORKS))
+                    res = wav
+                } else if (res.isSuccess) prefs.geminiOggState = AudioUpload.after(state, ok = true, refused = false)
+            } else res = send(Wav.pcm16(clip, MicCapture.RATE), "audio/wav")
             val ms = SystemClock.elapsedRealtime() - t0
             main.post {
                 if (my != turn) return@post
-                glasses.addLog("Voice: Gemini ($model) wrote down %.1f s of audio (%d KB) in %d ms%s".format(
-                    Locale.US, clip.size / MicCapture.RATE.toDouble(), wav.size / 1024, ms,
+                glasses.addLog("Voice: Gemini ($model) wrote down %.1f s of audio sent as %s (%d KB) in %d ms%s%s".format(
+                    Locale.US, clip.size / MicCapture.RATE.toDouble(), sentAs, (bytes + 1023) / 1024, ms, oggNote,
                     res.exceptionOrNull()?.let { "; failed: ${it.message}" } ?: ""))
                 if (res.isFailure && res.exceptionOrNull() is AiException && res.exceptionOrNull()?.message?.startsWith("No internet") == true) {
                     sttBackoffUntil = SystemClock.elapsedRealtime() + 60_000
                 }
-                geminiHeard(my, m, r, res.getOrNull(), res.exceptionOrNull()?.let { it.message ?: it.javaClass.simpleName })
+                geminiHeard(my, m, r, res.getOrNull()?.takeIf { it.isNotBlank() }, res.exceptionOrNull()?.let { it.message ?: it.javaClass.simpleName })
             }
         }
     }
@@ -460,6 +508,12 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
         if (my != turn) return
         partial = null
         speech.markResult()
+        // 4.1: in voice chat a turn with nothing in it (or a failed transcription) just listens again.
+        if (session != null && m == Mode.CHAT) {
+            if (text != null) { glasses.addLog("Voice chat: Gemini heard \"$text\" from the ${r.label}"); scoreRoute(r, true); heard(my, m, text) }
+            else { if (error != null) add(chat, Who.NOTE, "Didn't get that ($error)."); endTurn() }
+            return
+        }
         when {
             text != null -> {
                 glasses.addLog("Voice: Gemini heard \"$text\" from the ${r.label}")
@@ -582,6 +636,384 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
         }
         askAi(my, m, text)
     }
+
+    // ---------------- 4.1: hands-free voice chat through the glasses ----------------
+
+    /**
+     * One hands-free voice chat (docs/HARDWARE-MAP.md §5): the mic stays open across turns. On the
+     * glasses' data-link mic the Opus stream is started once (about 4 s) and kept warm for the whole
+     * chat, so replies stay on media audio with no call mode; every 20 ms goes through the voice chain
+     * ([MicDsp]); each turn is sent as Ogg Opus (WAV if Gemini won't take it); while the reply plays the
+     * echo gate keeps it out of the next question, and speaking clearly louder (or a tap) interrupts it.
+     */
+    private inner class ChatSession(val route: MicRoute, val why: String) {
+        var stream: GlassesMicStream? = null
+        val dsp = MicDsp(if (route == MicRoute.GLASSES_SPP) VoiceChain.Params.opus() else VoiceChain.Params.platformCleaned(), VadPlus.chat())
+        val gate = EchoGate(prefs.echoDelayMs)
+        @Volatile var barge = BargeIn(withReference = false)
+        val lock = Object()
+        var capturing = false
+        var capTurn = 0
+        var pcm = ShortArray(MicCapture.RATE * 4)
+        var pcmN = 0
+        val packets = ArrayList<ByteArray>()
+        val preRoll = ClipRing(MicCapture.RATE * 3 / 10)
+        val prePackets = ArrayDeque<ByteArray>()
+        var preMs = 0.0
+        @Volatile var wasSpeaking = false
+        @Volatile var bargePosted = false
+        var turnsDone = 0
+        var lastHeardAt = SystemClock.elapsedRealtime()
+        var recorder: VoiceClipRecorder? = null
+        var lastLevelAt = 0L
+        var savedVolume: Int? = null
+        var noiseDb: Double? = null
+    }
+
+    private var session: ChatSession? = null
+    private val sessionNext = Runnable { sessionListen() }
+
+    /** 4.1: true while hands-free voice chat is on. */
+    val voiceChatOn: Boolean get() = session != null
+
+    /** 4.1: the active voice-chat route in plain words, for the Assistant screen. */
+    val voiceChatStatus: String? get() = session?.let { ss ->
+        "Voice chat on · " + when (ss.route) {
+            MicRoute.GLASSES_SPP -> "glasses mic stream (Opus, kept warm)" + if (ss.stream?.adopted == true) ", started by the glasses" else ""
+            MicRoute.GLASSES_SCO -> "glasses call audio"
+            MicRoute.PHONE -> "phone mic"
+        } + " · " + ss.why + " · sent as " + (if (ss.route == MicRoute.GLASSES_SPP) AudioUpload.label(prefs.geminiOggState) else "WAV")
+    }
+
+    /** 4.1: told when voice chat starts or ends (media keys, the screen). */
+    var onVoiceChatChanged: ((Boolean) -> Unit)? = null
+
+    /** The last turn's noise floor, for the route policy and the reply volume. */
+    private var lastNoiseDb: Double? = null
+
+    /** The dynamic route policy's view of the link, the camera, the battery and the noise right now. */
+    fun routeDecision(session: Boolean, warm: Boolean = false): RoutePolicy.Decision = RoutePolicy.decide(RoutePolicy.Inputs(
+        linked = glasses.state == XkGlasses.State.READY,
+        useGlasses = prefs.useGlassesAudio,
+        linkAgeMs = SystemClock.elapsedRealtime() - glasses.readySince,
+        liveViewOn = glasses.preview != XkGlasses.Preview.OFF,
+        photoTransfer = glasses.photoBusy,
+        battery = glasses.battery,
+        charging = glasses.charging == true,
+        noiseDb = lastNoiseDb,
+        scores = prefs.micRouteScores,
+        sppUsable = sppMode() != VoiceChoice.SppMode.NONE,
+        session = session,
+        streamWarm = warm || glasses.glassesMicUnasked,
+        pauseLiveViewToListen = prefs.pauseLiveToListen,
+    ))
+
+    /** Starts or ends hands-free voice chat. */
+    fun toggleVoiceChat() { if (session != null) endVoiceChat("you ended it") else startVoiceChat() }
+
+    /**
+     * 4.1: starts hands-free voice chat on the mic the route policy picks (glasses data-link stream →
+     * call audio → phone). [adopt]: the glasses started their mic themselves; that stream is used.
+     */
+    fun startVoiceChat(adopt: Boolean = false) {
+        if (session != null) return
+        if (phase != Phase.IDLE || convoOn) stop()
+        if (!geminiSttWanted()) {
+            add(chat, Who.ERROR, "Hands-free voice chat needs Gemini to write down what you say: a Gemini key (AI setup), \"Gemini writes down what you say\" on, and a connection. A single question still works: tap the mic.")
+            changed(); return
+        }
+        val d = routeDecision(session = true, warm = adopt)
+        glasses.addLog("Voice chat: mics in order: $d")
+        tryStartSession(d.order.filter { !adopt || it == MicRoute.GLASSES_SPP }.ifEmpty { d.order }, 0, d.why, adopt)
+    }
+
+    private fun tryStartSession(order: List<MicRoute>, i: Int, why: String, adopt: Boolean) {
+        val r = order.getOrNull(i) ?: run {
+            add(chat, Who.ERROR, "No mic worked for voice chat. Run Test voice in Diagnostics to see which one does.")
+            changed(); return
+        }
+        val next = { reason: String ->
+            glasses.addLog("Voice chat: the ${r.label} didn't start ($reason)")
+            scoreRoute(r, false)
+            session = null
+            tryStartSession(order, i + 1, why, adopt = false)
+        }
+        when (r) {
+            MicRoute.GLASSES_SPP -> {
+                releaseRouteNow()
+                val ss = ChatSession(r, why)
+                session = ss
+                val s = GlassesMicStream(glasses)
+                ss.stream = s
+                s.addListener { pcm -> sessionPcm(ss, pcm) }
+                s.addPacketListener { p -> sessionPacket(ss, p) }
+                partial = "(starting the glasses' mic stream…)"
+                changed()
+                val cb: (String?) -> Unit = { err ->
+                    if (session !== ss) s.stop()
+                    else if (err != null) { s.stop(); next(err) }
+                    else sessionReady(ss)
+                }
+                if (adopt) s.adopt(cb) else s.start(cb)
+            }
+            MicRoute.GLASSES_SCO -> holdRoute { up ->
+                if (session != null) return@holdRoute
+                if (!up) { releaseRouteNow(); next(route.lastReport ?: "the call audio didn't open"); return@holdRoute }
+                route.rememberWorking()
+                sessionReady(ChatSession(r, why).also { session = it })
+            }
+            MicRoute.PHONE -> sessionReady(ChatSession(r, why).also { session = it })
+        }
+    }
+
+    private fun sessionReady(ss: ChatSession) {
+        if (session !== ss) return
+        scoreRoute(ss.route, true)
+        ss.dsp.onFrame = { o -> sessionFrame(ss, o) }
+        // On call audio the reply plays on the call stream: keep it as loud as media.
+        HardwareKeys.syncCallVolume = ss.route == MicRoute.GLASSES_SCO
+        if (ss.route == MicRoute.GLASSES_SCO) HardwareKeys.syncNow(app)
+        throughGlasses = ss.route != MicRoute.PHONE
+        micInUse = ss.route.label
+        micNote = "voice chat: ${ss.route.label}"
+        add(chat, Who.NOTE, "Voice chat on (${ss.route.label}). Just talk; tap the glasses to send, interrupt or cancel. Say \"stop voice chat\" to end it.")
+        glasses.addLog("Voice chat on: ${voiceChatStatus}")
+        onVoiceChatChanged?.invoke(true)
+        changed()
+        sessionListen()
+    }
+
+    /** Ends hands-free voice chat (no-op when it's off). */
+    fun endVoiceChat(why: String) {
+        val ss = session ?: return
+        session = null
+        HardwareKeys.syncCallVolume = false
+        // A turn still on its way (being written down, thought about or spoken) is cancelled with the chat.
+        if (phase != Phase.IDLE) { turn++; speech.stopSpeaking(); phase = Phase.IDLE; partial = null }
+        main.removeCallbacks(sessionNext)
+        synchronized(ss.lock) { ss.capturing = false }
+        ss.stream?.stop()
+        ss.recorder?.cancel()
+        restoreReplyVolume(ss)
+        if (ss.route == MicRoute.GLASSES_SCO) releaseRouteNow()
+        if (phase == Phase.LISTENING) { phase = Phase.IDLE; partial = null }
+        level(-120.0)
+        glasses.addLog("Voice chat ended ($why) after ${ss.turnsDone} turn(s)")
+        add(chat, Who.NOTE, "Voice chat ended ($why).")
+        onVoiceChatChanged?.invoke(false)
+        changed()
+    }
+
+    /** The next turn: listen on the session's mic (the warm stream, or a new recording on call audio or the phone). */
+    private fun sessionListen(barge: Boolean = false) {
+        val ss = session ?: return
+        if (phase != Phase.IDLE) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - ss.lastHeardAt > SESSION_IDLE_MS) { endVoiceChat("a minute without a question"); return }
+        if (ss.stream?.isStopped == true) { endVoiceChat("the glasses' mic stream stopped"); return }
+        // The policy again: live view opened or the battery ran low mid-chat moves it off the glasses' mic.
+        if (ss.route != MicRoute.PHONE) {
+            val d = routeDecision(session = true, warm = ss.route == MicRoute.GLASSES_SPP)
+            if (d.order == listOf(MicRoute.PHONE)) {
+                glasses.addLog("Voice chat: moving to the phone's mic (${d.why})")
+                endVoiceChatQuietly()
+                sessionReady(ChatSession(MicRoute.PHONE, d.why).also { session = it })
+                return
+            }
+        }
+        val my = ++turn
+        mode = Mode.CHAT
+        phase = Phase.LISTENING
+        partial = if (barge) "(go ahead…)" else "(voice chat: listening…)"
+        changed()
+        when (ss.route) {
+            MicRoute.GLASSES_SPP -> synchronized(ss.lock) {
+                ss.dsp.newTurn(if (barge) VadPlus(endMs = 800, noSpeechMs = 12_000, maxMs = Vad.GEMINI_MAX_MS, startInSpeech = true) else VadPlus.chat())
+                val pre = ss.preRoll.snapshot()
+                if (ss.pcm.size < pre.size) ss.pcm = ShortArray(MicCapture.RATE * 4)
+                System.arraycopy(pre, 0, ss.pcm, 0, pre.size)
+                ss.pcmN = pre.size
+                ss.preMs = pre.size * 1000.0 / MicCapture.RATE
+                ss.packets.clear()
+                ss.packets.addAll(ss.prePackets)
+                ss.capTurn = my
+                ss.capturing = true
+                ss.bargePosted = false
+            }
+            else -> {
+                val dsp = MicDsp(VoiceChain.Params.platformCleaned(), VadPlus.chat())
+                val rec = VoiceClipRecorder(app, ss.route == MicRoute.GLASSES_SCO, if (ss.route == MicRoute.GLASSES_SCO) route.glassesInput() else null,
+                    Vad.gemini(), onLevel = { db -> if (my == turn) level(db) }, dsp = dsp) { res ->
+                    ss.recorder = null
+                    sessionCaptured(ss, my, res.state, res.samples, emptyList(), res.speechStartMs, res.speechEndMs, 0.0, dsp.detector.floorDb)
+                }
+                val err = rec.start()
+                if (err != null) { endVoiceChat("the mic didn't open: $err"); return }
+                ss.recorder = rec
+            }
+        }
+    }
+
+    /** Leaves the current session without the "ended" note (moving to another mic). */
+    private fun endVoiceChatQuietly() {
+        val ss = session ?: return
+        session = null
+        synchronized(ss.lock) { ss.capturing = false }
+        ss.stream?.stop(); ss.recorder?.cancel()
+        restoreReplyVolume(ss)
+        if (ss.route == MicRoute.GLASSES_SCO) releaseRouteNow()
+    }
+
+    /** The warm stream's packets (reader thread): the last 300 ms always, and the turn's while it records. */
+    private fun sessionPacket(ss: ChatSession, p: ByteArray) {
+        synchronized(ss.lock) {
+            ss.prePackets.addLast(p)
+            while (ss.prePackets.size > 15) ss.prePackets.removeFirst()
+            if (ss.capturing && ss.gate.isOpen(SystemClock.elapsedRealtime()) && ss.packets.size < 1_500) ss.packets += p
+        }
+    }
+
+    /** The warm stream's decoded 16 kHz audio (decoder thread). */
+    private fun sessionPcm(ss: ChatSession, raw: ShortArray) {
+        if (session !== ss) return
+        val now = SystemClock.elapsedRealtime()
+        val speaking = phase == Phase.SPEAKING
+        if (speaking != ss.wasSpeaking) {
+            ss.wasSpeaking = speaking
+            if (speaking) { ss.gate.playbackStarted(now); ss.barge = BargeIn(withReference = false); main.post { raiseReplyVolume(ss) } }
+            else { ss.gate.playbackEnded(now); main.post { restoreReplyVolume(ss) } }
+        }
+        val open = ss.gate.isOpen(now)
+        ss.dsp.frozen = !open
+        val out = ss.dsp.process(raw)
+        ss.preRoll.add(out)
+        var done: (() -> Unit)? = null
+        synchronized(ss.lock) {
+            if (ss.capturing && open && out.isNotEmpty()) {
+                if (ss.pcmN + out.size > ss.pcm.size) ss.pcm = ss.pcm.copyOf(maxOf(ss.pcm.size * 2, ss.pcmN + out.size))
+                System.arraycopy(out, 0, ss.pcm, ss.pcmN, out.size)
+                ss.pcmN += out.size
+                val det = ss.dsp.detector
+                if (det.ended) {
+                    ss.capturing = false
+                    val clip = ss.pcm.copyOf(ss.pcmN); val pk = ss.packets.toList(); val my = ss.capTurn
+                    val st = det.state; val a = det.speechStartMs; val b = det.speechEndMs; val pre = ss.preMs; val floor = det.floorDb
+                    done = { sessionCaptured(ss, my, st, clip, pk, a, b, pre, floor) }
+                }
+            }
+        }
+        done?.let { main.post(it) }
+    }
+
+    /** Each analysed 20 ms (decoder thread): the level meter while listening, barge-in while the reply plays. */
+    private fun sessionFrame(ss: ChatSession, o: VoiceChain.Out) {
+        val now = SystemClock.elapsedRealtime()
+        if (phase == Phase.LISTENING && now - ss.lastLevelAt >= 66) {
+            ss.lastLevelAt = now
+            val db = o.features.eAbs; val my = turn
+            main.post { if (my == turn && phase == Phase.LISTENING) level(db) }
+        }
+        if (phase == Phase.SPEAKING && prefs.voiceBargeIn && !ss.bargePosted &&
+            ss.barge.feed(o.features.eAbs, null, o.features.zcr, o.features.deltaE)) {
+            ss.bargePosted = true
+            main.post { if (session === ss && phase == Phase.SPEAKING) sessionBargeIn(ss, byVoice = true) }
+        }
+    }
+
+    /** A turn's audio is in: nothing said listens again; otherwise Gemini writes it down and the chat goes on. */
+    private fun sessionCaptured(ss: ChatSession, my: Int, state: Vad.State, pcm: ShortArray, packets: List<ByteArray>,
+                                startMs: Double, endMs: Double, preMs: Double, floorDb: Double) {
+        if (my != turn || session !== ss) return
+        level(-120.0)
+        if (floorDb > -119) { ss.noiseDb = floorDb; lastNoiseDb = floorDb }
+        glasses.addLog("Voice chat: turn %d, %.1f s on the %s, floor %.0f dBFS, ended: %s".format(Locale.US, ss.turnsDone + 1,
+            pcm.size / MicCapture.RATE.toDouble(), ss.route.label, floorDb, state.name.lowercase(Locale.US)))
+        if (ss.route == MicRoute.GLASSES_SPP) VoiceClips.save(app, VoiceClips.SPP, ss.stream?.ring?.snapshot() ?: pcm)
+        if (state == Vad.State.ENDED_NO_SPEECH) {
+            phase = Phase.IDLE; partial = null; changed()
+            main.removeCallbacks(sessionNext); main.postDelayed(sessionNext, SESSION_GAP_MS)
+            return
+        }
+        ss.turnsDone++
+        ss.lastHeardAt = SystemClock.elapsedRealtime()
+        phase = Phase.THINKING
+        changed()
+        val a = if (startMs < 0) -1.0 else startMs + preMs; val b = if (endMs < 0 || a < 0) -1.0 else endMs + preMs
+        transcribeClip(my, Mode.CHAT, ss.route, Vad.trim(pcm, MicCapture.RATE, a, b), prefs.replyLanguage,
+            if (ss.route == MicRoute.GLASSES_SPP) OggOpus.trim(packets, a, b) else null)
+    }
+
+    /** What a tap (or the mic button, or a mapped key) does during voice chat. */
+    fun sessionTap() {
+        val ss = session ?: return
+        when (phase) {
+            Phase.LISTENING -> {
+                // Send now: what was heard so far is the turn.
+                ss.recorder?.let { it.finish(); return }
+                var done: (() -> Unit)? = null
+                synchronized(ss.lock) {
+                    if (ss.capturing) {
+                        ss.capturing = false
+                        val det = ss.dsp.detector
+                        val clip = ss.pcm.copyOf(ss.pcmN); val pk = ss.packets.toList(); val my = ss.capTurn
+                        val st = if (det.heardSpeech) Vad.State.ENDED_AFTER_SPEECH else Vad.State.ENDED_NO_SPEECH
+                        val a = det.speechStartMs; val pre = ss.preMs; val floor = det.floorDb
+                        done = { sessionCaptured(ss, my, st, clip, pk, a, -1.0, pre, floor) }
+                    }
+                }
+                done?.invoke()
+            }
+            Phase.THINKING -> {
+                turn++
+                speech.stopSpeaking()
+                phase = Phase.IDLE
+                partial = null
+                add(chat, Who.NOTE, "Cancelled.")
+                changed()
+                sessionListen()
+            }
+            Phase.SPEAKING -> sessionBargeIn(ss, byVoice = false)
+            Phase.IDLE -> { main.removeCallbacks(sessionNext); sessionListen() }
+        }
+    }
+
+    /** Interrupts the reply: it stops at once and the next turn starts (by voice: already in speech, with the onset kept). */
+    private fun sessionBargeIn(ss: ChatSession, byVoice: Boolean) {
+        if (session !== ss) return
+        glasses.addLog("Voice chat: reply interrupted " + if (byVoice) "by your voice (barge-in)" else "by a tap")
+        turn++
+        speech.stopSpeaking()
+        ss.gate.openNow(SystemClock.elapsedRealtime())
+        ss.wasSpeaking = false
+        restoreReplyVolume(ss)
+        phase = Phase.IDLE
+        partial = null
+        main.removeCallbacks(sessionNext)
+        sessionListen(barge = byVoice && ss.route == MicRoute.GLASSES_SPP)
+    }
+
+    /** §2.8: one or two steps louder in a noisy place, one quieter in a silent room, within the cap; back after the reply. */
+    private fun raiseReplyVolume(ss: ChatSession) {
+        if (session !== ss || !prefs.replyVolumeAuto || ss.savedVolume != null || ss.route == MicRoute.GLASSES_SCO) return
+        val am = app.getSystemService(android.media.AudioManager::class.java) ?: return
+        runCatching {
+            val st = android.media.AudioManager.STREAM_MUSIC
+            val cur = am.getStreamVolume(st); val max = am.getStreamMaxVolume(st)
+            val want = VolumePolicy.replyStep(cur, max, ss.noiseDb, prefs.replyVolumeCap)
+            if (want != cur) {
+                ss.savedVolume = cur
+                am.setStreamVolume(st, want, 0)
+                glasses.addLog("Voice chat: reply volume %d → %d of %d (noise floor %.0f dBFS)".format(Locale.US, cur, want, max, ss.noiseDb ?: -120.0))
+            }
+        }
+    }
+
+    private fun restoreReplyVolume(ss: ChatSession) {
+        val v = ss.savedVolume ?: return
+        ss.savedVolume = null
+        runCatching { app.getSystemService(android.media.AudioManager::class.java)?.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, v, 0) }
+    }
+
 
     // ---------------- voice commands ----------------
 
@@ -882,6 +1314,7 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
     /** Stops listening, thinking or talking right away. */
     fun stop() {
         turn++
+        endVoiceChat("stopped")
         if (convoOn) endConversation("stopped")
         stopSpp()
         pendingConfirm = null
@@ -908,6 +1341,9 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
         } else if (loop && holdingRoute) {
             // 3.6: the call link stays up between phrases of a conversation.
             main.removeCallbacks(lingerRelease)
+        } else if (session?.route == MicRoute.GLASSES_SCO && holdingRoute) {
+            // 4.1: voice chat on call audio keeps the link up for the whole chat.
+            main.removeCallbacks(lingerRelease)
         } else if (callAudio() && holdingRoute) {
             // Call audio: keep the link up a little, so the next question in this session needn't wait for it.
             main.removeCallbacks(lingerRelease)
@@ -916,6 +1352,11 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
         if (convoOn && !convoPaused) {
             main.removeCallbacks(convoNext)
             main.postDelayed(convoNext, CONVO_GAP_MS)
+        }
+        // 4.1: hands-free voice chat listens again by itself.
+        session?.let { ss ->
+            main.removeCallbacks(sessionNext)
+            main.postDelayed(sessionNext, if (ss.route == MicRoute.GLASSES_SPP) SESSION_GAP_MS else ss.gate.tailMs)
         }
         changed()
     }
@@ -1363,6 +1804,11 @@ class Assistant private constructor(context: Context, private val prefs: Prefs) 
 
         /** Call audio keeps the glasses' link this long after a turn, for the next question. */
         const val SESSION_LINGER_MS = 10_000L
+
+        /** 4.1: voice chat ends after this long with no question. */
+        const val SESSION_IDLE_MS = 60_000L
+        /** 4.1: the pause before voice chat listens again (the echo gate covers the reply's tail itself). */
+        const val SESSION_GAP_MS = 150L
 
         /** 3.6: the pause between one conversation phrase and listening for the next. */
         const val CONVO_GAP_MS = 250L

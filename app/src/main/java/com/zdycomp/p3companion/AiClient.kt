@@ -174,8 +174,8 @@ object AiClient {
      * 3.7: transcribes a WAV clip of the glasses' own mic with Gemini ([AiWire.TRANSCRIBE_MODEL]). Null
      * when nothing was said. Blocking.
      */
-    fun transcribe(apiKey: String, wav: ByteArray, languageName: String, model: String = AiWire.TRANSCRIBE_MODEL): String? {
-        val req = AiWire.geminiTranscribe(apiKey, wav, languageName, model)
+    fun transcribe(apiKey: String, wav: ByteArray, languageName: String, model: String = AiWire.TRANSCRIBE_MODEL, mime: String = "audio/wav"): String? {
+        val req = AiWire.geminiTranscribe(apiKey, wav, languageName, model, mime)
         val (code, body) = post(req, AiProvider.GEMINI, apiKey)
         if (code !in 200..299) throw AiException(AiWire.errorMessage(AiProvider.GEMINI, code, body, apiKey), code)
         return AiWire.parseTranscript(body)

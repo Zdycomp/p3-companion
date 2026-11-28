@@ -3,6 +3,7 @@ package com.zdycomp.p3companion
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.os.SystemClock
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.pm.ShortcutManager
@@ -81,7 +82,7 @@ class MainActivity : Activity() {
         screens = listOf(
             ImportScreen(this), GalleryScreen(this), GlassesScreen(this), AssistantScreen(this), SettingsScreen(this),
             DiagnosticsScreen(this), LiveViewScreen(this), AboutScreen(this), SupRevoltScreen(this), ConversationScreen(this),
-            WifiScreen(this),
+            WifiScreen(this), HardwareTestsScreen(this),
         )
 
         overlay = FrameLayout(this).apply { setBackgroundColor(ui.s.surface) }
@@ -150,7 +151,7 @@ class MainActivity : Activity() {
     /** Home-screen shortcuts and the tile. Returns true when [intent] was one of them. */
     private fun handleAction(intent: Intent?): Boolean {
         val action = intent?.action ?: return false
-        if (action !in listOf(ACTION_PHOTO, ACTION_LIVE, ACTION_VOICE, ACTION_GLASSES, ACTION_CONVERSATION)) return false
+        if (action !in listOf(ACTION_PHOTO, ACTION_LIVE, ACTION_VOICE, ACTION_GLASSES, ACTION_CONVERSATION, Intent.ACTION_VOICE_COMMAND)) return false
         setIntent(Intent(this, MainActivity::class.java))
         if (lockCover != null || AppLock.shouldLock(this, prefs)) { pendingAction = action; return true }
         runAction(action)
@@ -169,6 +170,11 @@ class MainActivity : Activity() {
                 (screens[TAB_ASSISTANT] as? AssistantScreen)?.section = AssistantScreen.SECTION_VOICE
                 show(TAB_ASSISTANT)
                 withMic { if (assistant.phase == Assistant.Phase.IDLE) assistant.voiceChat() }
+            }
+            // 4.1: the hands-free voice-dial key (HFP) of the glasses, or any headset.
+            Intent.ACTION_VOICE_COMMAND -> {
+                glasses.addLog("Key from the headset: voice-dial (ACTION_VOICE_COMMAND)")
+                onGesture(Gesture.VOICE_KEY)
             }
         }
     }
@@ -436,6 +442,7 @@ class MainActivity : Activity() {
     fun goBack() { if (current >= TAB_COUNT) show(returnTab) }
 
     fun showDiagnostics() = show(SCREEN_DIAGNOSTICS)
+    fun showHardwareTests() = show(SCREEN_HARDWARE)
     fun showLiveView() = show(SCREEN_LIVE)
     fun showAbout() = show(SCREEN_ABOUT)
     fun showSupRevolt() = show(SCREEN_SUPREVOLT)
@@ -521,6 +528,20 @@ class MainActivity : Activity() {
         glasses.addListener(glassesListener)
         // Tapping the glasses starts a voice question while the app is on screen.
         glasses.onTouch = { onGlassesTapped() }
+        // 4.1: every touch, button and key as a gesture with its own action (Settings › Glasses buttons).
+        classifier = null
+        glasses.onTouchEvent = { node, data -> onGlassesTouch(node, data) }
+        glasses.onButtonPush = { node, _ -> if (node == "5760") onGesture(Gesture.PHOTO_DOUBLE_PRESS) }
+        glasses.onGlassesMic = { onGlassesStartedMic() }
+        glasses.onBattery = { level, charging, was ->
+            if (was != null && was != charging) snack(if (charging) "Glasses charging ($level%)." else "Glasses off the charger ($level%).")
+            else if (!charging && level < RoutePolicy.LOW_BATTERY && assistant.voiceChatOn) snack("Glasses battery $level%: voice chat moves to the phone's mic.")
+        }
+        HardwareKeys.log = { glasses.addLog(it) }
+        HardwareKeys.onGesture = { onGesture(it) }
+        HardwareKeys.watchVolume(this) { glasses.deviceName ?: prefs.glassesName }
+        assistant.onVoiceChatChanged = { on -> HardwareKeys.setActive(this, on || prefs.mediaKeysAlways); refresh() }
+        HardwareKeys.setActive(this, prefs.mediaKeysAlways || assistant.voiceChatOn)
         // Offline voice commands, and the system speech dialog when no recognition service works.
         assistant.commands?.release()
         assistant.commands = CommandRunner(this)
@@ -533,6 +554,13 @@ class MainActivity : Activity() {
         if (GlassesEvents.foreground?.get() === this) GlassesEvents.foreground = null
         glasses.removeListener(glassesListener)
         glasses.onTouch = null
+        glasses.onTouchEvent = null
+        glasses.onButtonPush = null
+        glasses.onGlassesMic = null
+        glasses.onBattery = null
+        HardwareKeys.onGesture = null
+        if (!isChangingConfigurations) HardwareKeys.setActive(this, false)
+        assistant.onVoiceChatChanged = null
         // The microphone can't be used from the background, so end any voice turn.
         // (Not while the system speech dialog is open for this voice turn: it hands back the words.)
         if (speechDelivery == null) {
@@ -552,6 +580,75 @@ class MainActivity : Activity() {
     }
 
     private var tapWaiting = false
+
+    // ---------- 4.1: gestures, buttons and keys ----------
+
+    private var classifier: TouchClassifier? = null
+    /** Hardware test T1: while set, touch pushes go here instead of to the gestures. */
+    var touchTap: ((String, ByteArray) -> Unit)? = null
+    private val pollTouch = Runnable { classifier?.poll(SystemClock.elapsedRealtime())?.forEach { onGesture(it) } }
+
+    /** Forget the classifier so changed settings or learned codes apply to the next touch. */
+    fun gesturesChanged() { classifier = null }
+
+    private fun onGlassesTouch(node: String, data: ByteArray) {
+        touchTap?.let { it(node, data); return }
+        val c = classifier ?: TouchClassifier(prefs.gestureCodes,
+            waitForDouble = GestureMap.actionFor(prefs.gestureMap, Gesture.DOUBLE_TAP) != HwAction.NOTHING).also { classifier = it }
+        c.touch(node, data, SystemClock.elapsedRealtime()).forEach { onGesture(it) }
+        if (c.waiting) { main.removeCallbacks(pollTouch); main.postDelayed(pollTouch, c.doubleMs + 30) }
+    }
+
+    /** A gesture from the glasses, a headset key or the voice-dial key: does what Settings maps it to. */
+    fun onGesture(g: Gesture) {
+        val action = GestureMap.actionFor(prefs.gestureMap, g)
+        glasses.addLog("Gesture: ${g.label} → ${action.label}")
+        runHwAction(action)
+    }
+
+    fun runHwAction(action: HwAction) {
+        when (action) {
+            HwAction.VOICE_TURN -> onGlassesTapped()
+            HwAction.VOICE_CHAT_TOGGLE -> withMic { openVoice(); assistant.toggleVoiceChat() }
+            HwAction.TAKE_PHOTO -> whenConnected("take the photo") { glasses.takePhoto() }
+            HwAction.BURST_PHOTO -> whenConnected("take a burst photo") { burstPhoto() }
+            HwAction.SHARP_SNAPSHOT -> if (current == SCREEN_LIVE) liveView()?.sharpSnapshot() else snack("Open live view for a sharp snapshot.")
+            HwAction.LIVE_VIEW -> if (current == SCREEN_LIVE) goBack() else whenConnected("open live view") { showLiveView() }
+            HwAction.REPEAT_LAST -> assistant.lastAiLine()?.let { assistant.say(it) } ?: snack("Nothing to repeat yet.")
+            HwAction.VOLUME_UP -> snack(HardwareKeys.stepVolume(this, up = true))
+            HwAction.VOLUME_DOWN -> snack(HardwareKeys.stepVolume(this, up = false))
+            HwAction.FLASHLIGHT -> snack(TorchController.get(this).toggle())
+            HwAction.VOICE_MEMO -> if (recorder.recording) { recorder.stop(); snack("Memo saved.") } else withMic(forRecording = true) { recorder.start() }
+            HwAction.NOTHING -> {}
+        }
+    }
+
+    private fun openVoice() {
+        val screen = screens[TAB_ASSISTANT] as? AssistantScreen
+        if (current != TAB_ASSISTANT || screen?.section != AssistantScreen.SECTION_VOICE) {
+            screen?.section = AssistantScreen.SECTION_VOICE
+            show(TAB_ASSISTANT)
+        }
+    }
+
+    /** 4.1: the glasses started streaming their mic themselves (their own button or wake word): voice chat takes it. */
+    private fun onGlassesStartedMic() {
+        if (!prefs.adoptGlassesMic || lockCover != null) { glasses.addLog("Glasses mic: not used (Settings › Glasses buttons)"); return }
+        if (assistant.voiceChatOn || assistant.phase != Assistant.Phase.IDLE || BurstCapture.running) return
+        openVoice()
+        assistant.startVoiceChat(adopt = true)
+    }
+
+    /** 4.1: "Burst photo": voice chat on the glasses' mic pauses for it (the link carries the photos), then comes back. */
+    fun burstPhoto() {
+        val chat = assistant.voiceChatOn
+        if (chat) assistant.endVoiceChat("burst photo")
+        BurstCapture.photoBurst(this, glasses, progress = { snack(it) }) { uri, line ->
+            snack(line.substringBefore(" (originals kept)").let { if (uri != null) "Burst photo saved (the originals are kept)." else it })
+            refreshGalleryIfShown()
+            if (chat) withMic { assistant.startVoiceChat() }
+        }
+    }
 
     private fun onGlassesTapped() {
         if (!prefs.tapToTalk || lockCover != null) return
@@ -1171,6 +1268,7 @@ class MainActivity : Activity() {
         const val SCREEN_SUPREVOLT = 8
         const val SCREEN_CONVERSATION = 9
         const val SCREEN_WIFI = 10
+        const val SCREEN_HARDWARE = 11
 
         const val ACTION_PHOTO = "com.zdycomp.p3companion.action.PHOTO"
         const val ACTION_LIVE = "com.zdycomp.p3companion.action.LIVE"

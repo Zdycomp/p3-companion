@@ -88,6 +88,11 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- 4.1: the hands-free voice-dial key of the glasses (or any headset) opens voice chat -->
+            <intent-filter>
+                <action android:name="android.intent.action.VOICE_COMMAND" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
             <!-- Home-screen shortcuts: Take photo, Live view, Voice chat -->
             <meta-data
                 android:name="android.app.shortcuts"

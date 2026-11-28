@@ -389,6 +389,72 @@ class Prefs internal constructor(private val sp: SharedPreferences) {
         get() = sp.getBoolean("live_sharpen_live", false)
         set(v) = sp.edit().putBoolean("live_sharpen_live", v).apply()
 
+    // ---------- 4.1: the glasses' hardware, used dynamically ----------
+
+    /** What each touch, button and media key does ([GestureMap] text). */
+    var gestureMap: Map<Gesture, HwAction>
+        get() = GestureMap.parse(sp.getString("gesture_map", null))
+        set(v) = sp.edit().putString("gesture_map", GestureMap.format(v)).apply()
+
+    /** Touch codes learned in hardware test T1 ("C107:01=LONG_PRESS|…"). */
+    var gestureCodes: Map<String, Gesture>
+        get() = GestureMap.parseCodes(sp.getString("gesture_codes", null))
+        set(v) = sp.edit().putString("gesture_codes", GestureMap.formatCodes(v)).apply()
+
+    /** Whether Gemini takes the glasses' Ogg Opus ([AudioUpload] states). */
+    var geminiOggState: Int
+        get() = sp.getInt("gemini_ogg", AudioUpload.UNKNOWN).let { if (it in 0..2) it else AudioUpload.UNKNOWN }
+        set(v) = sp.edit().putInt("gemini_ogg", v.coerceIn(0, 2)).apply()
+
+    /** The measured round trip from a reply leaving the phone to its echo in the glasses' mic, ms (null: not measured). */
+    var echoDelayMs: Double?
+        get() = sp.getFloat("echo_delay_ms", -1f).takeIf { it >= 0f }?.toDouble()
+        set(v) = sp.edit().putFloat("echo_delay_ms", v?.toFloat()?.coerceIn(0f, 2_000f) ?: -1f).apply()
+
+    /** Voice chat: speaking clearly louder than the reply interrupts it (a tap on the glasses always does). */
+    var voiceBargeIn: Boolean
+        get() = sp.getBoolean("barge_in", true)
+        set(v) = sp.edit().putBoolean("barge_in", v).apply()
+
+    /** Voice chat: the reply's volume follows the noise around you (within [replyVolumeCap] %). */
+    var replyVolumeAuto: Boolean
+        get() = sp.getBoolean("reply_volume_auto", true)
+        set(v) = sp.edit().putBoolean("reply_volume_auto", v).apply()
+
+    var replyVolumeCap: Int
+        get() = sp.getInt("reply_volume_cap", 80).coerceIn(30, 100)
+        set(v) = sp.edit().putInt("reply_volume_cap", v.coerceIn(30, 100)).apply()
+
+    /** The 4.1 voice chain (high-pass, noise suppressor, auto level, limiter, the newer speech detector) on every mic. */
+    var voiceChain: Boolean
+        get() = sp.getBoolean("voice_chain", true)
+        set(v) = sp.edit().putBoolean("voice_chain", v).apply()
+
+    /** Live view pauses while a glasses mic listens, instead of using the phone's mic. */
+    var pauseLiveToListen: Boolean
+        get() = sp.getBoolean("pause_live_listen", false)
+        set(v) = sp.edit().putBoolean("pause_live_listen", v).apply()
+
+    /** Photos in a burst photo (3-6). */
+    var burstCount: Int
+        get() = sp.getInt("burst_count", 4).coerceIn(3, 6)
+        set(v) = sp.edit().putInt("burst_count", v.coerceIn(3, 6)).apply()
+
+    /** Live view keeps its last 16 pictures for a zero-lag sharp snapshot. */
+    var liveBurstRing: Boolean
+        get() = sp.getBoolean("live_burst", true)
+        set(v) = sp.edit().putBoolean("live_burst", v).apply()
+
+    /** The glasses' media keys control the app all the time (otherwise only during voice chat). */
+    var mediaKeysAlways: Boolean
+        get() = sp.getBoolean("media_keys_always", false)
+        set(v) = sp.edit().putBoolean("media_keys_always", v).apply()
+
+    /** Mic audio the glasses start by themselves (their own button or wake word) starts voice chat. */
+    var adoptGlassesMic: Boolean
+        get() = sp.getBoolean("adopt_glasses_mic", true)
+        set(v) = sp.edit().putBoolean("adopt_glasses_mic", v).apply()
+
     /** Minutes before the flashlight turns itself off, 0 = stays on until turned off (the default). */
     var torchAutoOffMin: Int
         get() = sp.getInt("torch_auto_off", 0).let { if (it in TorchLogic.AUTO_OFF_MIN) it else 0 }

@@ -42,6 +42,10 @@ object SettingsBackup {
         "gemini_voice_on" to Kind.BOOL, "gemini_voice" to Kind.STRING, "gemini_stt" to Kind.BOOL, "hold_to_talk" to Kind.BOOL,
         "gemini_tts_model" to Kind.STRING, "enhance_photos" to Kind.BOOL, "enhance_strength" to Kind.FLOAT, "enhance_scale" to Kind.INT,
         "live_sharpen_live" to Kind.BOOL, "torch_auto_off" to Kind.INT,
+        // 4.1 (the learned touch codes and Gemini's format answer stay with these glasses and this key)
+        "gesture_map" to Kind.STRING, "barge_in" to Kind.BOOL, "reply_volume_auto" to Kind.BOOL, "reply_volume_cap" to Kind.INT,
+        "voice_chain" to Kind.BOOL, "pause_live_listen" to Kind.BOOL, "burst_count" to Kind.INT, "live_burst" to Kind.BOOL,
+        "media_keys_always" to Kind.BOOL, "adopt_glasses_mic" to Kind.BOOL,
         // SupRevolt (never the token or the server address)
         "sr_scans" to Kind.STRING,
         // Privacy

@@ -1,5 +1,97 @@
 # Changelog
 
+## 4.1.0 (versionCode 15)
+
+Goal: the owner's ask: *use every part of the glasses' hardware dynamically, especially the voice chat and the
+glasses' own microphone, and sharpen the picture further.* Spec: `docs/HARDWARE-MAP.md` and
+`docs/SHARPEN-AND-AUDIO-MATH.md`. Connect and bind, reply matching, live view, photos, translation, SupRevolt, the
+Wi-Fi screen, drop recovery, the flashlight, Gemini speech-to-text and voice, and the simple commands are unchanged
+(all earlier tests pass).
+
+**Hands-free voice chat through the glasses** (`Assistant` "4.1" section, `GlassesMicStream`, `OggOpus`, `EchoGate`)
+- A session keeps the glasses' Opus mic stream (`5750`) running for the whole conversation (started once, ~4 s),
+  decoded by `MediaCodec` `audio/opus` with the synthesized OpusHead for the level meter, the speech detector and the
+  voice chain. Each turn keeps 300 ms before the speech and 400 ms after it.
+- Each turn goes to Gemini as Ogg Opus (`audio/ogg`, RFC 7845 pages with CRC, 50 packets a page, granule = packets ×
+  960) built from the glasses' own packets, about 2 KB/s; a format refusal (400/415) or an empty transcript while our
+  detector heard speech resends the decoded 16 kHz WAV at once, and the outcome is remembered (`Prefs.geminiOggState`,
+  shown in Settings, resettable).
+- Multi-turn history as before; replies in Gemini's voice on media audio. The echo gate closes from the start of a
+  reply to its end plus the tail (500 ms until measured), freezing the noise floor, gain and detector; voice barge-in
+  (no reference: 8 dB over the reply's 80th percentile in 7 of 10 frames, after 500 ms of learning) and a tap both
+  interrupt.
+- Glasses tap: idle → listen now; listening → send; thinking → cancel; speaking → interrupt. Ends after 60 s with no
+  question, on "stop voice chat", a double tap, Stop, or when the stream stops.
+- Mic audio the glasses start by themselves (head `0x1F` while the app didn't send `5750`) is adopted
+  (`XkGlasses.adoptMicStream`, the last 2 s kept) instead of being dropped; `stopMicStream` still sends `5750 [00]`.
+- The data-link route outside voice chat sends Ogg Opus the same way. `AiClient.transcribe` takes a MIME type.
+
+**Dynamic route policy** (`RoutePolicy`)
+- Voice chat: glasses Opus stream → call audio (SCO) → phone mic. A single question: call audio first (fastest),
+  or in a noisy place (floor > −42 dBFS) because it has the phone's noise suppression. Live view open (unless "Pause
+  live view to listen"), a photo transfer, a link under 3 s old or a glasses battery under 20% (not charging) use the
+  phone's mic; a stream the glasses started is used even right after connecting. Re-checked before every turn; the
+  active route and why are shown on the Assistant tab and logged.
+
+**Voice chain on every route** (`VoiceChain`, `MicDsp`, `VadPlus`)
+- 80 Hz Butterworth high-pass, √Hann STFT (640/320/1024) noise suppressor with minimum-statistics floor and
+  decision-directed Wiener gain (floor −10 dB for speech-to-text), AGC to −20 dBFS on speech only, 2 ms look-ahead
+  limiter at −1 dBFS; the speech detector uses energy, zero crossings and noise-whitened spectral flatness with a
+  hangover. On call audio and the phone mic (already cleaned by the phone) the suppressor is skipped, never stacked.
+  Settings › Voice chat › "Clean up the mic" turns it off (back to the 4.0 detector).
+
+**The rest of the hardware** (`HardwarePolicy`, `HardwareKeys`, `XkGlasses` 4.1 hooks)
+- Every touch push (`C101`/`C107`) is logged with its full payload and the gap since the last; 5760 pushes the app
+  didn't cause, battery/charging changes and unsolicited mic audio are logged as hardware events.
+- Gestures: tap / double tap by timing (400 ms), plus codes learned in hardware test T1 (long press, swipes, rear
+  button); photo button double press (unsolicited `5760 = 1`); media keys through a `MediaSession` active during voice
+  chat (or always, by setting); the HFP voice-dial key (`ACTION_VOICE_COMMAND`). Each maps to an action in Settings ›
+  Glasses buttons.
+- Volume: phone media volume changes are logged (T8); during voice chat on call audio, call volume follows media; the reply
+  volume in voice chat follows the noise floor within a cap and is restored afterwards.
+- Battery and charging pushes are surfaced ("Glasses charging (77%)").
+- Prompt language: Settings › Glasses buttons › "Glasses' prompts in English" reads `2410`/`2420` and writes `2420`
+  (action 2, 6-byte NUL-padded tag, as the hardware map documents) only when `2410` lists "en" and `2420` isn't
+  already "en". On the E13C-5 it already reads "en", so nothing is written there.
+- Diagnostics › Hardware tests: T1-T15 with steps; T1 (learn touch codes, media keys), T2 (Opus size histogram),
+  T4 (Ogg Opus vs WAV to Gemini), T5 (energy above 4 kHz on call audio and the data link), T7 (double press),
+  T13 (at the next sign-in, read `7100` and log the whole `1001` JSON with the MAC hidden, and the `0x2B` hex) run in
+  the app.
+
+**Multi-frame sharpening** (`BurstSR`, `Fft`, `BurstCapture`, `LiveRing`)
+- Pure Kotlin on `FloatArray`, off the main thread: YCbCr → deblock (8×8 JPEG / 4×4 H.264 grid, two passes) →
+  sharpest frame as reference, blurred ones dropped → photometric match (moments, then least-squares gain/offset) →
+  phase correlation (Hann, Gaussian sub-pixel fit) → pyramidal inverse-compositional Lucas-Kanade (affine only when it
+  beats a shift by 20 %, Huber-robust) → per-tile motion rejection (compared at low frequency, so aliasing isn't taken
+  for motion; H.264 skip blocks get no weight) → shift-and-add gather on the 2×/3× grid with a bicubic hole prior →
+  iterative back-projection through each sample's pixel footprint → light Richardson-Lucy with TV for the remaining
+  system blur and a halo clamp → chroma averaged at low resolution and upsampled by a guided filter on the new luma.
+  Areas no other frame covers fall back to a lightly deconvolved bicubic, so it's never worse than one frame.
+- On the synthetic aliased test scene (N = 8, σ = 2) it beats bicubic by about 6 dB (oracle shifts 7 dB) and the 4.0
+  enhance by over 1 dB; registration is within 0.05 px RMS. About 3 s for 4 × 640×480 → 1280×960 on a desktop JVM
+  (4 threads); expect a few times that on the phone.
+- "Burst photo" (4 photos, 3-6 in Settings, progress shown, voice chat on the glasses' mic pauses for it, refused
+  under 20% glasses battery) and "Sharp snapshot" (the last 16 live pictures from a zero-lag ring). Saved as a
+  separate `-burst` JPEG with an honest comment ("Burst ×4, 1280×960 from 640×480 (Bluetooth photos) on the phone…");
+  the originals are kept. The 4.0 quick enhance is unchanged.
+
+**Voice commands**: "start voice chat", "stop voice chat", "burst photo", "sharp snapshot" (plus variants); the old
+phrases keep their meaning.
+
+**Tests**: 348 → 406. New: `OggOpusTest` (CRC against the definition and a known value, OpusHead bytes, pages,
+flags, granules, lacing, trim, SILK size hint), `VoiceChainTest` (high-pass, STFT transparency, re-blocking, noise
+floor, suppressor, AGC, limiter, detector timing, hum/hiss/clicks, lost packets, drop-in for `Vad`), `EchoGateTest`
+(gate timing, round-trip delay, barge-in on speech, none on echo alone), `BurstSRTest` (FFT, phase correlation integer
+and sub-pixel, LK translation/rotation/noise, moving object, tile weights, skip blocks, SR vs bicubic and the 4.0
+enhance, oracle, single frame, exposure change, flat, deblocking, deconvolution without halo, guided chroma, a 3× live
+burst), `HardwarePolicyTest` (route policy, gesture map, touch classifier, volume policy, upload format, prompt
+language, spectrum share). No JDK-only image APIs.
+
+**Needs a device check**: Gemini accepting `audio/ogg` Opus (T4; the WAV fallback covers a refusal), the glasses'
+touch codes beyond tap (T1), whether the photo button's double press sends `5760` (T7), echo level and barge-in on the
+real speaker (T3), mic versus live view on the E13C-5 (T6), media keys and the voice-dial key from these glasses,
+burst timing and alignment on real photos, and the phone's speed for burst and sharp snapshot.
+
 ## 4.0.0 (versionCode 14)
 
 Goal: the owner's ask: a microphone that works as well as it should, the best picture the hardware allows, a

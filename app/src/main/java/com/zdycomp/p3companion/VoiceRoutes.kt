@@ -238,19 +238,19 @@ class Vad(
     private val minSpeechMs: Int = 120,
     private val minSpeechDb: Double = -50.0,
     private val overFloorDb: Double = 10.0,
-) {
+) : SpeechDetector {
     enum class State { WAITING, SPEECH, ENDED_AFTER_SPEECH, ENDED_NO_SPEECH, ENDED_MAX }
 
-    var state = State.WAITING; private set
+    override var state = State.WAITING; private set
     /** Whether speech was ever detected. */
-    var heardSpeech = false; private set
-    var floorDb = 0.0; private set
-    var peakDb = -120.0; private set
+    override var heardSpeech = false; private set
+    override var floorDb = 0.0; private set
+    override var peakDb = -120.0; private set
     var totalMs = 0.0; private set
     /** 4.0: where the speech began (ms from the start), or -1 before any speech. */
-    var speechStartMs = -1.0; private set
+    override var speechStartMs = -1.0; private set
     /** 4.0: where the last loud piece ended (ms from the start), or -1. */
-    var speechEndMs = -1.0; private set
+    override var speechEndMs = -1.0; private set
     private var hasFloor = false
     private var loudRun = 0.0
     private var quietRun = 0.0
@@ -282,10 +282,10 @@ class Vad(
         }
     }
 
-    val ended: Boolean get() = state == State.ENDED_AFTER_SPEECH || state == State.ENDED_NO_SPEECH || state == State.ENDED_MAX
+    override val ended: Boolean get() = state == State.ENDED_AFTER_SPEECH || state == State.ENDED_NO_SPEECH || state == State.ENDED_MAX
 
     /** Feeds one chunk (any length; about 20 ms is typical). Returns the state after it. */
-    fun feed(s: ShortArray, count: Int = s.size): State {
+    override fun feed(s: ShortArray, count: Int): State {
         if (ended || count <= 0) return state
         val ms = count * 1000.0 / rate
         val db = Level.of(s, count)

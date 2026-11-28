@@ -2,43 +2,41 @@ package com.zdycomp.p3companion
 
 /** What's new in this version, shown once after an update and on the About screen. */
 object WhatsNew {
-    const val VERSION = "4.0.0"
+    const val VERSION = "4.1.0"
 
     val headlines = listOf(
-        "Gemini now writes down what you say: far better accuracy than the phone's recognizer, with a live mic level meter",
-        "Every spoken reply in Gemini's natural voice (Kore by default, 30 to choose from), no more phone or Chinese voice",
-        "Simple commands: 12 easy ones offline, and anything else in your own words: the AI works the app for you",
-        "A real flashlight: stays on until you turn it off, with a big button, a Quick Settings tile and Turn off in the notification",
-        "Sharper pictures: an enhanced 1280×960 copy of every 640×480 Bluetooth photo (the original is kept), and live sharpening",
-        "The app now finds the newest Gemini models for your key by itself",
+        "Hands-free voice chat through the glasses: their own mic stays open the whole conversation, answers in Gemini's voice, and you can talk over a reply to interrupt it",
+        "Tap the glasses to send, interrupt or cancel; double tap starts or ends voice chat; every button, touch and media key can be set in Settings",
+        "The mic adapts by itself: glasses stream, call audio or phone mic depending on the link, live view, battery and noise, with the one in use shown",
+        "Cleaner mic on every route: high-pass, noise suppression, auto level and a limiter, and a speech detector that ignores hum, hiss and clicks",
+        "Burst photo and Sharp snapshot: several pictures aligned to a hundredth of a pixel and combined, for real extra detail (originals kept)",
+        "Diagnostics › Hardware tests: the app learns your glasses' touch codes and checks what each part of the hardware really does",
     )
 
     val details = listOf(
-        "Microphone" to listOf(
-            "With a Gemini key, the app records the mic itself (noise suppression, auto gain and echo cancelling when the phone has them), ends after about a second of quiet (at most 20 s), and Gemini writes down exactly what you said. The phone's own recognizer is still there offline and without a Gemini key.",
-            "A level meter shows while it listens, so you can see the mic hears you. Hold to talk (Settings › Assistant) records only while you hold the button.",
-            "Voice questions use the glasses' call audio when it passed Test voice, otherwise the phone's mic. The connection log notes the mic, its level, how it ended and how long Gemini took.",
+        "Voice chat" to listOf(
+            "Start it with the Hands-free voice chat button on the Assistant tab, by saying \"start voice chat\", or with a double tap on the glasses. Say \"stop voice chat\" (or double tap) to end it; it also ends after a minute with no question.",
+            "On the glasses' data-link mic the stream is started once and kept open, so there's no call mode: answers play in Gemini's voice on media audio. Each turn goes to Gemini as the glasses' own Opus sound (about 2 KB a second); if Gemini won't take that, the app sends a WAV instead and remembers which works.",
+            "While an answer plays, the mic doesn't pick it up (the echo gate). Speaking clearly louder interrupts it; a tap on the glasses always does. The previous turns are kept, so you can follow up.",
+            "Mic audio the glasses start by themselves (their own button or wake word) now goes to voice chat instead of being dropped.",
         ),
-        "Gemini's voice" to listOf(
-            "Answers, commands, translations and read-aloud are spoken by Gemini's voice, streamed so the first words play as soon as they arrive, through the glasses when they're connected. Pick a voice and preview it in Settings › Assistant.",
-            "Offline or when Gemini's voice fails, the phone's Google voice in your reply language takes over (never a Chinese voice for an English answer), and the log says which voice spoke.",
+        "The mic adapts" to listOf(
+            "Voice chat prefers the glasses' own mic stream, then their call audio, then the phone's mic. Live view, a photo coming over, a link under 3 s old or a glasses battery under 20% move it off the glasses by itself; a noisy place makes a single question use call audio, which has the phone's noise suppression. The Assistant tab shows which mic is in use and why.",
+            "Every mic now goes through the voice chain: an 80 Hz high-pass, a noise suppressor that tracks the noise floor, automatic level to a steady loudness, and a limiter. Its speech detector looks at loudness, zero crossings and the spectrum, so fans, hum, hiss and clicks don't start a turn.",
+            "In voice chat the reply's volume goes up a step in a noisy place and down in a silent room (within a cap you set), and back afterwards. In voice chat on call audio, the call volume follows the media volume.",
         ),
-        "Simple commands" to listOf(
-            "Twelve commands to remember: take a picture, start or stop video, what am I looking at, read this, translate, flashlight on or off, volume up or down, battery, live view, stop, help, scan this. They work offline at once.",
-            "Anything else, say it your way (\"I need some light\", \"film this\", \"how much room is left on the glasses\"): Gemini picks the app action. Deleting or clearing still asks you to say yes. Every old phrase still works.",
-            "A bare \"battery\" now gives both the glasses' and the phone's battery when the glasses are connected.",
+        "Buttons and keys" to listOf(
+            "Settings › Glasses buttons: what a tap, double tap, long press, swipes, the photo button's double press, the rear button, the media keys and the voice-dial key do: talk, voice chat, photo, burst photo, sharp snapshot, live view, repeat, volume, flashlight, memo or nothing.",
+            "Taps and double taps are told apart by timing. Long press, swipes and the rear button work once Hardware test T1 has learned their codes on your glasses. Every touch push is logged with its bytes and timing.",
+            "Battery and charging changes the glasses push are logged and shown (\"Glasses charging (77%)\"). The glasses' own spoken prompts can be set to English in Settings, only if they offer English and aren't English already.",
         ),
-        "Flashlight" to listOf(
-            "The phone's torch stays on until you turn it off: the big button on the Glasses tab, the Flashlight tile in Quick Settings, Turn off in the notification, or \"flashlight off\". An optional auto-off timer is in Settings › Flashlight (off by default).",
-            "It's only ever the phone's torch: no flashlight command takes a photo or uses the glasses' camera. If another app has the camera, it says so.",
+        "Sharper pictures" to listOf(
+            "Burst photo takes 4 photos (3-6 in Settings › Pictures) while you hold still, about 6 s each, then lines them up to a hundredth of a pixel, leaves out anything that moved, and combines them on a 2× (or 3×) grid with back-projection and a light deconvolution. The small shifts between shots sample the scene between the pixels, which a single photo can't. It's saved as a separate \"-burst\" copy; Gallery › Details says \"Burst ×4, 1280×960 from 640×480\".",
+            "Sharp snapshot in live view does the same at once with the last 16 live pictures (no shutter lag).",
+            "Honest limits: the glasses send 640×480 photos and a 320×240 live picture. Combining frames recovers detail the pictures aliased and noise hid, about 1.2-1.5× in real resolution when you and the scene hold still; it can't add what the camera never captured. The 4.0 enhanced copy is unchanged.",
         ),
-        "Pictures" to listOf(
-            "Bluetooth photos are 640×480 and live view 320×240: that's all the glasses send (they have no Wi-Fi), so nothing can make the camera capture more.",
-            "Within that, Enhance photos (on by default) saves a separate \"-enhanced\" copy: denoised, upscaled 2× (or 3×) with Lanczos, sharpened without halos, with a touch of contrast. Gallery › Details says \"Enhanced 1280×960 from 640×480\". Live-view snapshots get the same treatment.",
-            "Live view: \"Sharpen the live picture\" adds a light sharpening on the phone, and turns itself off if the picture drops below 25 per second.",
-        ),
-        "Models" to listOf(
-            "With a Gemini key the app reads Google's model list (about once a week) and uses the newest stable Flash model for chat and speech-to-text, and the newest speech model for its voice. You can still type a model in AI setup.",
+        "Hardware tests" to listOf(
+            "Diagnostics › Hardware tests runs the device tests from the hardware map: learn touch codes (T1), the glasses' mic sizes (T2), Ogg Opus against WAV with Gemini (T4), wideband or narrowband call audio (T5), the photo button's double press (T7), raw setup bytes (T13), and the steps for the rest. Results go to the connection log for sharing.",
         ),
     )
 

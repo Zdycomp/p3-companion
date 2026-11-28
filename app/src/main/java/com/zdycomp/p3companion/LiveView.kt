@@ -761,6 +761,11 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         }
         recordButton = recBtn
         controls.addView(recBtn, LinearLayout.LayoutParams(ui.dp(72), ui.dp(72)).apply { marginStart = ui.dp(24); marginEnd = ui.dp(24) })
+        // 4.1: the sharp snapshot: the last 16 live pictures aligned and combined at once.
+        controls.addView(ui.iconButton(R.drawable.ic_auto_awesome, "Sharp snapshot (last 16 pictures combined)", IconBtn.TONAL) { sharpSnapshot() }.apply {
+            layoutParams = LinearLayout.LayoutParams(ui.dp(56), ui.dp(56)).apply { marginEnd = ui.dp(8) }
+            setPadding(ui.dp(14), ui.dp(14), ui.dp(14), ui.dp(14))
+        })
         controls.addView(ui.iconButton(R.drawable.ic_grid, "Rule-of-thirds grid", if (showGrid) IconBtn.TONAL else IconBtn.OUTLINED) {
             showGrid = !showGrid
             gridView?.visibility = if (showGrid) View.VISIBLE else View.GONE
@@ -795,7 +800,11 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
             override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) { p.setSurface(Surface(st)); applyTransform() }
             override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) { applyTransform() }
             override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean { p.setSurface(null); return true }
-            override fun onSurfaceTextureUpdated(st: SurfaceTexture) { texFrames++ }
+            override fun onSurfaceTextureUpdated(st: SurfaceTexture) {
+                texFrames++
+                // 4.1: the last 16 pictures for a zero-lag sharp snapshot (a GPU copy of 320×240, about 1 ms).
+                if (a.prefs.liveBurstRing && mode == Mode.VIDEO) { val (vw, vh) = p.size; liveRing.add(tv, vw, vh) }
+            }
         }
         g.videoSink = { p.offer(it) }
         g.liveGapSink = { p.resync() }
@@ -1158,6 +1167,7 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
         }.apply { layoutParams = LinearLayout.LayoutParams(ui.dp(56), ui.dp(56)).apply { marginStart = ui.dp(6); marginEnd = ui.dp(6) } }
         bar.addView(btn(R.drawable.ic_close, "Leave full screen") { setFullscreen(false) })
         bar.addView(btn(R.drawable.ic_photo_camera, "Save a snapshot") { snapshot() })
+        bar.addView(btn(R.drawable.ic_auto_awesome, "Sharp snapshot") { sharpSnapshot() })
         bar.addView(btn(R.drawable.ic_record, "Record to phone or stop") { toggleRecording() })
         bar.addView(btn(R.drawable.ic_refresh, "Rotate the picture") {
             a.prefs.liveRotation = ViewMath.nextRotation(a.prefs.liveRotation)
@@ -1497,6 +1507,24 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
      * decoded picture at the glasses' native size (not the screen's), turned like the screen, optionally
      * 2× upscaled and sharpened on the copy.
      */
+    /** 4.1: zero-lag live burst. */
+    private val liveRing = LiveRing(16)
+
+    /** 4.1: the last 16 live pictures, aligned and combined into one sharper 2× (or 3×) picture; the live view isn't touched. */
+    internal fun sharpSnapshot() {
+        if (mode != Mode.VIDEO) { a.toast("Sharp snapshot needs live video; in snapshot view use Burst photo instead."); return }
+        if (!a.prefs.liveBurstRing) { a.toast("Turn on \"Keep the last 16 live pictures\" in Settings › Pictures first."); return }
+        val frames = liveRing.snapshot()
+        if (frames.size < 4) { a.toast("Live view hasn't shown enough pictures yet."); return }
+        flashView?.let { f -> if (!a.ui.reduceMotion) { f.alpha = 0f; f.animate().alpha(0.6f).setDuration(60).withEndAction { f.animate().alpha(0f).setDuration(90).start() }.start() } }
+        a.toast("Combining ${frames.size} live pictures…")
+        BurstCapture.liveBurst(a, frames, liveRing.w, liveRing.h, a.prefs.liveRotation) { uri, line ->
+            a.glasses.addLog(line)
+            a.toast(if (uri != null) "Sharp snapshot saved." else line)
+            if (uri != null) a.refreshGalleryIfShown()
+        }
+    }
+
     internal fun snapshot() {
         if (mode == Mode.SNAPSHOT) { keepCurrent(); return }
         val jpegOnly = jpegShown > 0 && (pipeline?.received ?: 0L) == 0L
@@ -1583,6 +1611,7 @@ class LiveViewScreen(private val a: MainActivity) : Screen {
     override fun onHidden() {
         if (!active) return
         active = false
+        liveRing.clear()
         main.removeCallbacks(ticker)
         main.removeCallbacks(hideControls)
         // Full screen stays on through a rebuild (coming back to the app); MainActivity ends it when another screen opens.

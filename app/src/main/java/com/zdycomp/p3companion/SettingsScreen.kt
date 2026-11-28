@@ -29,6 +29,7 @@ class SettingsScreen(private val a: MainActivity) : Screen {
         appearance(col)
         glasses(col)
         capture(col)
+        hardware(col)
         import(col)
         assistant(col)
         supRevolt(col)
@@ -263,6 +264,14 @@ class SettingsScreen(private val a: MainActivity) : Screen {
                 addView(ui.slider(11, step, onStep = { show(it) }) { p.enhanceStrength = it / 10f })
             })
         }
+        // 4.1: multi-frame sharpening.
+        pg.addView(pad(ui.choiceRow("Burst photo", (3..6).map { "$it photos" }, p.burstCount - 3) { p.burstCount = it + 3 }))
+        pg.addView(ui.switchRow("Keep the last 16 live pictures", "For Sharp snapshot in live view: no shutter lag, about 5 MB while live view shows",
+            p.liveBurstRing, R.drawable.ic_videocam) { p.liveBurstRing = it })
+        pg.addView(note("Burst photo (say \"burst photo\", or the photo button's double press) takes several photos while you hold still, " +
+            "aligns them to a hundredth of a pixel and combines them into one picture with real extra detail: the small shifts between " +
+            "shots sample the scene in between the pixels. Sharp snapshot does the same at once with live view's last 16 pictures. " +
+            "Both are saved as a separate \"-burst\" copy; the originals stay."))
         pg.addView(note("Over Bluetooth the glasses only ever send 640×480 photos and a 320×240 live picture; there is no bigger size and the glasses have no Wi-Fi. " +
             "Enhancing makes the most of that on the phone (and the Gallery's Details say \"Enhanced 1280×960 from 640×480\"), but it can't add detail the camera never sent."))
         col.addView(pg)
@@ -275,6 +284,67 @@ class SettingsScreen(private val a: MainActivity) : Screen {
         }))
         fg.addView(note("The phone's flashlight stays on until you turn it off: on the Glasses tab, with the Flashlight tile in Quick Settings, the notification's Turn off, or by saying \"flashlight off\". It never uses the glasses' camera."))
         col.addView(fg)
+    }
+
+    // ---------------- 4.1: the glasses' hardware ----------------
+
+    private fun hardware(col: LinearLayout) {
+        val ui = a.ui
+        val p = a.prefs
+        col.addView(ui.sectionLabel("Voice chat through the glasses"))
+        val v = ui.group()
+        v.addView(ui.switchRow("Interrupt by talking", "While a reply plays, speaking clearly louder than it stops it (a tap on the glasses always does)",
+            p.voiceBargeIn, R.drawable.ic_mic) { p.voiceBargeIn = it })
+        v.addView(ui.switchRow("Reply volume follows the noise", "A step louder in a noisy place, a step quieter in a silent room, back after the reply",
+            p.replyVolumeAuto, R.drawable.ic_volume_up) { p.replyVolumeAuto = it; a.refresh() })
+        if (p.replyVolumeAuto) v.addView(pad(ui.choiceRow("No louder than", listOf("50%", "65%", "80%", "100%"),
+            listOf(50, 65, 80, 100).indexOf(p.replyVolumeCap).coerceAtLeast(2)) { p.replyVolumeCap = listOf(50, 65, 80, 100)[it] }))
+        v.addView(ui.switchRow("Clean up the mic", "High-pass, noise suppression, auto level and a limiter on every mic, with a speech detector that ignores hum, hiss and clicks",
+            p.voiceChain, R.drawable.ic_auto_awesome) { p.voiceChain = it })
+        v.addView(ui.switchRow("Pause live view to listen", "With live view open, use the glasses' mic (live view stops while it listens) instead of the phone's",
+            p.pauseLiveToListen, R.drawable.ic_videocam) { p.pauseLiveToListen = it })
+        v.addView(ui.switchRow("Use the mic when the glasses start it", "If the glasses start streaming their mic by themselves, voice chat listens to it",
+            p.adoptGlassesMic, R.drawable.ic_glasses_mono) { p.adoptGlassesMic = it })
+        v.addView(ui.listRow("Audio sent to Gemini", AudioUpload.label(p.geminiOggState), R.drawable.ic_upload, null) {
+            if (p.geminiOggState != AudioUpload.UNKNOWN) a.confirm("Try Ogg Opus again?", "The next question from the glasses' data-link mic is sent as Ogg Opus first again.", "Try again") {
+                p.geminiOggState = AudioUpload.UNKNOWN; a.refresh()
+            }
+        })
+        v.addView(note("Hands-free voice chat (the button on the Assistant tab, \"start voice chat\", or a double tap) keeps the glasses' own mic stream open " +
+            "for the whole chat, so answers stay in Gemini's voice on media audio. Each turn goes to Gemini as the glasses' own Opus sound. " +
+            "It moves to call audio or the phone's mic by itself when live view opens, a photo is coming over or the glasses' battery runs low."))
+        col.addView(v)
+
+        col.addView(ui.sectionLabel("Glasses buttons"))
+        val g = ui.group()
+        val map = p.gestureMap
+        for (gesture in Gesture.values()) {
+            val act = GestureMap.actionFor(map, gesture)
+            g.addView(ui.listRow(gesture.label, act.label, null, null) {
+                ui.sheet(gesture.label, HwAction.values().map { choice ->
+                    SheetItem(choice.label, selected = choice == act) {
+                        p.gestureMap = p.gestureMap.toMutableMap().also { it[gesture] = choice }
+                        a.gesturesChanged(); a.refresh()
+                    }
+                }).show()
+            })
+        }
+        val learned = p.gestureCodes
+        g.addView(note("Taps and double taps are told apart by timing. Long press, swipes and the rear button work once their codes are learned in " +
+            "Diagnostics › Hardware tests (T1)" + (if (learned.isEmpty()) "; none learned yet." else ": learned " + learned.values.toSet().joinToString { it.label.lowercase() } + ".") +
+            " Media keys reach the app during voice chat."))
+        g.addView(ui.switchRow("Media keys always", "The glasses' play/pause and skip keys control the app whenever it's open (music apps won't get them then)",
+            p.mediaKeysAlways, R.drawable.ic_play) { p.mediaKeysAlways = it; HardwareKeys.setActive(a, it || a.assistant.voiceChatOn) })
+        if (learned.isNotEmpty()) g.addView(ui.listRow("Forget learned touch codes", null, R.drawable.ic_delete, null) {
+            p.gestureCodes = emptyMap(); a.gesturesChanged(); a.refresh()
+        })
+        g.addView(ui.listRow("Glasses' prompts in English", "The glasses' own spoken prompts; changed only if they offer English and aren't English already",
+            R.drawable.ic_translate, null) {
+            a.whenConnected("change the glasses' prompt language") {
+                a.glasses.setPromptLanguageEnglish { msg -> a.snack(msg) }
+            }
+        })
+        col.addView(g)
     }
 
     // ---------------- Import ----------------
